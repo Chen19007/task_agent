@@ -249,8 +249,29 @@ $lines.Insert(行号, "新行内容") | Set-Content -Path "文件路径" -Encodi
 2. 每个子Agent有独立4k上下文，合理拆分任务
 3. 整个任务最多使用 32 个子任务（全局配额），每个Agent最多使用 16 个（本地配额）
 4. 命令执行后会收到结果反馈，根据结果决定下一步
-5. 完成所有工作后必须使用 <completion> 标记
+5. 完成所有工作后必须使用 `<completion>` 标记
 6. 用户可以随时输入任务或调整方向
+
+**【全局配额用完时的处理】**
+
+当收到 `[全局配额限制]` 消息时：
+- **禁止**输出解释、闲聊、道歉或询问用户
+- **必须**立即使用 `<ps_call>` 执行任务
+- 任务完成后**必须**使用 `<completion>` 标记结束
+
+❌ 错误示例：
+```
+我理解您的需求，但由于配额限制，我将直接执行任务...
+请问您需要我做什么？
+```
+
+✅ 正确示例：
+```
+<ps_call> Get-Content -Path "文件路径" -Encoding UTF8 </ps_call>
+<completion>
+任务完成
+</completion>
+```
 """
 
         self.history.append(Message(role="system", content=system_prompt))
