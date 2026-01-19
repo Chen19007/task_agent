@@ -50,14 +50,14 @@ class SimpleAgent:
 
     def __init__(self, config: Optional[Config] = None,
                  depth: int = 0, max_depth: int = 4,
-                 global_remaining_quota: Optional[int] = None):
+                 global_subagent_count: int = 0):
         """初始化 Agent
 
         Args:
             config: 配置对象
             depth: 当前深度（0=顶级）
             max_depth: 最大允许深度（默认4层）
-            global_remaining_quota: 全局剩余子Agent配额（防止层级间循环）
+            global_subagent_count: 全局已使用的子Agent数量（累加计数）
         """
         self.config = config or Config.from_env()
         self.history: list[Message] = []
@@ -72,8 +72,8 @@ class SimpleAgent:
         self.total_sub_agents_created = 0
         self.total_commands_executed = 0
 
-        # 全局配额
-        self._global_remaining_quota = global_remaining_quota
+        # 全局配额（累加计数，而不是递减剩余量）
+        self._global_subagent_count = global_subagent_count
 
         # 初始化系统消息
         self._init_system_prompt()
@@ -86,9 +86,9 @@ class SimpleAgent:
         max_agents = self.max_depth ** 2
         local_remaining = max_agents - self.total_sub_agents_created
 
-        # 全局配额（防止层级间循环）
+        # 全局配额（累加计数）
         global_total = max_agents * 2  # 全局配额是单Agent的2倍
-        global_remaining = self._global_remaining_quota if self._global_remaining_quota is not None else global_total
+        global_used = self._global_subagent_count
 
         # 估算当前上下文使用量
         context_used = self._estimate_context_tokens()
@@ -102,8 +102,8 @@ class SimpleAgent:
 - 当前深度: {self.depth}
 - 最大深度: {self.max_depth}
 - 已创建子Agent: {self.total_sub_agents_created}
-- 本地配额: {local_remaining}/{max_agents}（当前Agent剩余）
-- 全局配额: {global_remaining}/{global_total}（整个任务剩余，防止循环）
+- 本地配额: {local_remaining}/{max_agents}（当前Agent还能创建 {local_remaining} 个子任务）
+- 全局配额: {global_used}/{global_total}（整个任务累计已使用 {global_used} 个子任务，总计 {global_total} 个）
 - 上下文使用: {context_used}/{context_total} tokens ({context_percent:.1f}%)
 - 剩余可用: {context_remaining} tokens
 """
@@ -134,8 +134,63 @@ class SimpleAgent:
 <ps_call> Set-Content -Path test.txt -Value "hello" </ps_call>
 <ps_call> Get-Process | Where-Object {$_.CPU -gt 10} </ps_call>
 
+**【常用文件操作命令速查】**
+
+**读取文件内容：**
+<ps_call> Get-Content -Path "文件路径" -Encoding UTF8 </ps_call>
+<ps_call> Get-Content -Path "文件路径" -Raw -Encoding UTF8 </ps_call>  # 一次性读取全部（推荐大文件）
+
+**创建/覆盖文件：**
+<ps_call> Set-Content -Path "文件路径" -Value "内容" -Encoding UTF8 </ps_call>
+
+**追加内容到文件末尾：**
+<ps_call> Add-Content -Path "文件路径" -Value "追加内容" -Encoding UTF8 </ps_call>
+
+**在指定位置插入内容：**
+```powershell
+$content = Get-Content -Path "文件路径" -Encoding UTF8
+$lines = $content -split "`n"
+$lines.Insert(行号, "新行内容") | Set-Content -Path "文件路径" -Encoding UTF8
+```
+例如在第 5 行后插入：
+<ps_call> $lines = Get-Content -Path "file.txt" -Encoding UTF8; $lines.Insert(5, "新行内容") | Set-Content -Path "file.txt" -Encoding UTF8 </ps_call>
+
+**替换文件中的特定内容：**
+<ps_call> (Get-Content -Path "文件路径" -Encoding UTF8) -replace "旧内容", "新内容" | Set-Content -Path "文件路径" -Encoding UTF8 </ps_call>
+
+**删除文件：**
+<ps_call> Remove-Item -Path "文件路径" -Force </ps_call>
+
+**创建目录：**
+<ps_call> New-Item -Path "目录路径" -ItemType Directory -Force </ps_call>
+
+**查看文件是否存在：**
+<ps_call> Test-Path -Path "文件路径" </ps_call>
+
+**获取文件大小/信息：**
+<ps_call> Get-Item "文件路径" | Select-Object Name, Length, LastWriteTime </ps_call>
+
+**查看文件前 N 行：**
+<ps_call> Get-Content -Path "文件路径" -TotalCount 10 -Encoding UTF8 </ps_call>
+
+**查看文件后 N 行：**
+<ps_call> Get-Content -Path "文件路径" -Tail 10 -Encoding UTF8 </ps_call>
+
+**搜索文件内容：**
+<ps_call> Select-String -Path "文件路径" -Pattern "搜索内容" </ps_call>
+
+⚠️ **重要提示**：
+- 大文件用 `-Raw` 一次性读取，不要分块读取再拼接
+- 修改文件前可以用 `Test-Path` 检查是否存在
+- 路径用双引号括起来，包含空格也没问题
+
 **2. 子Agent - 任务拆分（推荐）：**
 <create_agent> 子任务描述 </create_agent>
+
+**说明：**
+- 每个子Agent是独立的任务分支，有独立的上下文窗口
+- 整个任务最多创建 32 个子任务（全局配额），请合理分配
+- 子Agent完成后会返回摘要，供当前Agent继续决策
 
 **3. 提问等待用户输入：**
 
@@ -191,12 +246,11 @@ class SimpleAgent:
 
 **规则：**
 1. 深度优先遍历：先完成一个分支的所有子任务，创建子Agent后必须等待其完全完成才能创建下一个（你是深度优先遍历的 Agent）
-2. 顺序执行：必须等待子Agent完全完成才能创建下一个
-3. 每个子Agent有独立4k上下文，合理拆分任务
-4. 达到最大深度或配额时，直接执行任务
-5. 命令执行后会收到结果反馈，根据结果决定下一步
-6. 完成所有工作后必须使用 <completion> 标记
-7. 用户可以随时输入任务或调整方向
+2. 每个子Agent有独立4k上下文，合理拆分任务
+3. 整个任务最多使用 32 个子任务（全局配额），每个Agent最多使用 16 个（本地配额）
+4. 命令执行后会收到结果反馈，根据结果决定下一步
+5. 完成所有工作后必须使用 <completion> 标记
+6. 用户可以随时输入任务或调整方向
 """
 
         self.history.append(Message(role="system", content=system_prompt))
@@ -253,32 +307,29 @@ class SimpleAgent:
                 self._add_message("user", f"[本地配额限制] 请直接执行任务: {task}")
                 return StepResult(outputs=outputs, action=Action.CONTINUE)
 
-            # 检查全局配额限制（防止层级间循环）
-            if self._global_remaining_quota is not None and self._global_remaining_quota <= 0:
-                outputs.append(f"\n[全局配额限制] 整个任务已用完所有子Agent配额，请直接执行任务\n")
+            # 检查全局配额限制（防止层级间循环）- 累加计数
+            global_total = self.max_depth ** 2 * 2
+            if self._global_subagent_count >= global_total:
+                outputs.append(f"\n[全局配额限制] 整个任务已用完所有 {global_total} 个子Agent配额，请直接执行任务\n")
                 self._add_message("user", f"[全局配额限制] 请直接执行任务: {task}")
                 return StepResult(outputs=outputs, action=Action.CONTINUE)
 
             self.total_sub_agents_created += 1
 
-            # 更新全局配额（传递给子Agent）
-            new_global_quota = None
-            if self._global_remaining_quota is not None:
-                new_global_quota = self._global_remaining_quota - 1
+            # 累加全局计数并传递给子Agent
+            new_global_count = self._global_subagent_count + 1
 
             # 获取元数据用于显示
             context_used = self._estimate_context_tokens()
             context_total = self.config.max_output_tokens * 4
-            global_total = self.max_depth ** 2 * 2
-            global_used = global_total - (new_global_quota if new_global_quota is not None else global_total)
 
             outputs.append(f"\n{'='*60}\n")
             outputs.append(f"[子Agent #{self.total_sub_agents_created}] 深度 {self.depth + 1}/{self.max_depth}\n")
             outputs.append(f"任务: {task[:60]}...\n")
-            outputs.append(f"上下文: {context_used}/{context_total} | 全局配额: {global_used}/{global_total}\n")
+            outputs.append(f"上下文: {context_used}/{context_total} | 全局配额: {new_global_count}/{global_total}\n")
             outputs.append(f"{'='*60}\n")
 
-            return StepResult(outputs=outputs, action=Action.SWITCH_TO_CHILD, data=(task, new_global_quota))
+            return StepResult(outputs=outputs, action=Action.SWITCH_TO_CHILD, data=(task, new_global_count))
 
         # 检查是否完成
         if self._is_completed(response):
@@ -407,9 +458,9 @@ class Executor:
         self.current_agent: Optional[SimpleAgent] = None
         self._is_running = False
 
-        # 全局子Agent配额（防止层级间循环）
-        self._global_quota_total = max_depth ** 2 * 2  # 全局配额是单Agent的2倍
-        self._global_quota_remaining = self._global_quota_total
+        # 全局子Agent配额（防止层级间循环）- 累加计数
+        self._global_subagent_total = max_depth ** 2 * 2  # 总配额
+        self._global_subagent_count = 0  # 已使用的子Agent数量
 
     def run(self, task: str) -> Generator[str, None, None]:
         """运行任务
@@ -426,7 +477,7 @@ class Executor:
                 config=self.config,
                 depth=0,
                 max_depth=self.max_depth,
-                global_remaining_quota=self._global_quota_remaining
+                global_subagent_count=self._global_subagent_count
             )
             self.current_agent.start(task)
 
@@ -462,13 +513,13 @@ class Executor:
                 yield output
 
             if result.action == Action.SWITCH_TO_CHILD:
-                child_task, new_global_quota = result.data
+                child_task, new_global_count = result.data
                 self.context_stack.append(self.current_agent)
                 self.current_agent = SimpleAgent(
                     config=self.config,
                     depth=self.current_agent.depth + 1,
                     max_depth=self.max_depth,
-                    global_remaining_quota=new_global_quota
+                    global_subagent_count=new_global_count
                 )
                 self.current_agent.start(child_task)
 
