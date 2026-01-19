@@ -59,14 +59,24 @@ class OpenAIClient(LLMClient):
 
                         try:
                             data = json.loads(line)
-                            delta = data.get("choices", [{}])[0].get("delta", {})
+                            choices = data.get("choices", [])
+
+                            # 跳过 choices 为空的情况（通常是最后的 usage 数据）
+                            if not choices:
+                                continue
+
+                            delta = choices[0].get("delta", {})
+
+                            # 处理 content 字段
                             content = delta.get("content", "")
 
-                            if content:
-                                # OpenAI 不返回 reasoning 字段
-                                yield StreamChunk(content=content, reasoning="")
+                            # 处理推理内容（某些模型返回 reasoning_content）
+                            reasoning = delta.get("reasoning_content", "")
 
-                        except json.JSONDecodeError:
+                            if content or reasoning:
+                                yield StreamChunk(content=content, reasoning=reasoning)
+
+                        except (json.JSONDecodeError, KeyError, IndexError):
                             # 跳过无法解析的行
                             continue
 

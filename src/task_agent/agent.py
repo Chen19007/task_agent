@@ -217,10 +217,20 @@ class SimpleAgent:
             StepResult: 执行结果
         """
         # 调用LLM
-        response = self._call_llm()
+        content, reasoning = self._call_llm()
+
+        # 组合输出：reasoning（如果有） + content
+        # reasoning 不参与标签解析，只做辅助参考
+        output_for_display = reasoning + content if reasoning else content
+        response = content  # 只有 content 参与标签解析
+
         self._add_message("assistant", response)
 
-        outputs = [response]
+        outputs = []
+        if reasoning:
+            outputs.append(f"[思考: {reasoning}]\n")
+        if response:
+            outputs.append(response)
 
         # 解析并执行标签，收集输出
         tool_outputs = list(self._parse_tools(response))
@@ -276,7 +286,8 @@ class SimpleAgent:
             return StepResult(outputs=outputs, action=Action.COMPLETE, data=summary)
 
         # 检查是否需要等待用户输入
-        if not self._has_action_tags(response) and not tool_outputs:
+        # 只有当没有标签、没有工具输出、也没有 reasoning 时才等待
+        if not self._has_action_tags(response) and not tool_outputs and not reasoning:
             outputs.append("\n[等待用户输入]\n")
             return StepResult(outputs=outputs, action=Action.WAIT)
 
@@ -303,8 +314,8 @@ class SimpleAgent:
         total_chars = sum(len(msg.content) for msg in self.history)
         return total_chars // 4
 
-    def _call_llm(self) -> str:
-        """调用LLM"""
+    def _call_llm(self) -> tuple[str, str]:
+        """调用LLM，返回 (content, reasoning)"""
         messages = [{"role": msg.role, "content": msg.content} for msg in self.history]
 
         # 使用 LLM 客户端
@@ -323,7 +334,7 @@ class SimpleAgent:
                 print(f"\n--- LLM REASONING ---\n{reasoning}\n--- END ---\n", file=sys.stderr)
             print(f"\n--- LLM CONTENT ---\n{content}\n--- END ---\n", file=sys.stderr)
 
-            return content
+            return content, reasoning
         except Exception as e:
             raise RuntimeError(f"调用LLM失败: {e}")
 

@@ -59,6 +59,19 @@ def parse_args():
     parser.add_argument("--host", "-H", default="http://localhost:11434",
                         help="Ollama地址（默认：http://localhost:11434）")
 
+    parser.add_argument("--api-type", "-a", default="ollama",
+                        choices=["ollama", "openai"],
+                        help="API类型：ollama 或 openai（默认：ollama）")
+
+    parser.add_argument("--base-url", "-b", default="https://api.openai.com/v1",
+                        help="OpenAI Base URL（默认：https://api.openai.com/v1）")
+
+    parser.add_argument("--api-key", "-k", default="",
+                        help="OpenAI API Key")
+
+    parser.add_argument("--max-tokens", "-M", type=int, default=None,
+                        help="最大输出token数（默认：Ollama=1024, OpenAI=8192）")
+
     parser.add_argument("--verbose", "-v", action="store_true",
                         help="显示详细日志")
 
@@ -104,7 +117,11 @@ def print_help():
 [bold yellow]命令行参数：[/bold yellow]
   -m, --model   - 指定模型名称（默认：qwen3:4b）
   -t, --timeout - 超时时间秒（默认：300）
+  -a, --api-type- API类型：ollama 或 openai（默认：ollama）
   -H, --host    - Ollama地址（默认：http://localhost:11434）
+  -b, --base-url- OpenAI Base URL（默认：https://api.openai.com/v1）
+  -k, --api-key - OpenAI API Key
+  -M, --max-tokens- 最大输出token（默认：8192，适合大模型）
   -v, --verbose - 显示详细日志
 
 [bold yellow]使用示例：[/bold yellow]
@@ -132,12 +149,25 @@ def main():
     """主函数"""
     args = parse_args()
 
+    # 根据 API 类型设置不同的 max_output_tokens 默认值
+    # 本地小模型（Ollama）默认 1024，大模型（OpenAI）默认 8192
+    if args.api_type == "openai":
+        default_max_tokens = 8192
+    else:
+        default_max_tokens = 1024
+
+    # 用户指定则用用户的，否则用 API 类型对应的默认值
+    max_tokens = args.max_tokens if args.max_tokens is not None else default_max_tokens
+
     # 创建配置
     config = Config(
+        api_type=args.api_type,
         ollama_host=args.host,
+        openai_base_url=args.base_url,
+        openai_api_key=args.api_key,
         model=args.model,
         timeout=args.timeout,
-        max_output_tokens=1024,
+        max_output_tokens=max_tokens,
     )
 
     # 检查 LLM 连接
@@ -356,7 +386,7 @@ def _execute_command(command: str, timeout: int):
     full_cmd = f'powershell -NoProfile -EncodedCommand {encoded_command}'
 
     process = subprocess.run(
-        full_cmd, shell=True, capture_output=True, text=True,
+        full_cmd, shell=True, capture_output=True, text=True, encoding='utf-8',
         timeout=timeout
     )
     return process
