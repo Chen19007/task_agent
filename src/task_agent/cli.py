@@ -49,8 +49,8 @@ def parse_args():
 
     parser.add_argument("task", nargs="?", help="要执行的任务描述")
 
-    parser.add_argument("--model", "-m", default="qwen3-48k:latest",
-                        help="模型名称（默认：qwen3-48k:latest）")
+    parser.add_argument("--model", "-m", default="qwen3:4b",
+                        help="模型名称（默认：qwen3:4b）")
 
     parser.add_argument("--timeout", "-t", type=int, default=300,
                         help="超时时间（秒，默认：300）")
@@ -102,7 +102,7 @@ def print_help():
   <任务描述>    - 执行指定任务
 
 [bold yellow]命令行参数：[/bold yellow]
-  -m, --model   - 指定模型名称（默认：qwen3-48k:latest）
+  -m, --model   - 指定模型名称（默认：qwen3:4b）
   -t, --timeout - 超时时间秒（默认：300）
   -H, --host    - Ollama地址（默认：http://localhost:11434）
   -v, --verbose - 显示详细日志
@@ -194,11 +194,52 @@ def _run_single_task(agent: SimpleAgent, task: str):
     if os.environ.get("AGENT_LOG_FILE"):
         log_file = open(os.environ["AGENT_LOG_FILE"], "w", encoding="utf-8")
 
+    # 用于存储待确认的命令
+    pending_command: str | None = None
+    waiting_for_confirm = False
+
     # 执行任务（顶级Agent，is_root=True）
     for output in agent.run(task, is_root=True):
         if log_file:
             log_file.write(output)
             log_file.flush()
+
+        # 检查是否需要用户确认
+        if "<confirm_required>" in output:
+            waiting_for_confirm = True
+            continue
+        if "<confirm_command_end>" in output and pending_command:
+            # 等待用户确认
+            confirm = console.input("[bold yellow]是否执行此命令？[y/n]: [/bold yellow]")
+            if confirm.lower() != "y":
+                console.print("[info]命令已跳过[/info]\n")
+                # 发送跳过消息给 Agent
+                agent._add_message("user", f'<ps_call_result id="skip">\n命令已跳过\n</ps_call_result>')
+                pending_command = None
+                waiting_for_confirm = False
+                continue
+            # 用户确认，执行命令
+            result = agent._execute_command(pending_command)
+            agent.total_commands_executed += 1
+
+            # 构建明确的结果消息
+            if result.returncode == 0:
+                if result.stdout:
+                    output = f"命令执行成功，输出：\n{result.stdout}"
+                else:
+                    output = "命令执行成功（无输出）"
+            else:
+                output = f"命令执行失败（退出码: {result.returncode}）：\n{result.stderr}"
+
+            agent._add_message("user", f'<ps_call_result id="executed">\n{output}\n</ps_call_result>')
+            pending_command = None
+            waiting_for_confirm = False
+
+        # 提取命令内容（用于确认）
+        if waiting_for_confirm and "命令: " in output:
+            pending_command = output.split("命令: ")[1].strip()
+            # 注意：命令编号已经在 agent 层生成，这里保持原样输出即可
+
         console.print(output, end="", soft_wrap=True)
 
     if log_file:

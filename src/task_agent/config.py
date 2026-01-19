@@ -9,7 +9,7 @@ class Config:
 
     # Ollama 配置
     ollama_host: str = "http://localhost:11434"
-    model: str = "qwen3-48k:latest"
+    model: str = "qwen3:4b"
 
     # 执行配置
     timeout: int = 300
@@ -22,7 +22,7 @@ class Config:
         
         return cls(
             ollama_host=os.environ.get("OLLAMA_HOST", "http://localhost:11434"),
-            model=os.environ.get("OLLAMA_MODEL", "qwen3-48k:latest"),
+            model=os.environ.get("OLLAMA_MODEL", "qwen3:4b"),
             timeout=int(os.environ.get("OLLAMA_TIMEOUT", "300")),
             max_output_tokens=int(os.environ.get("OLLAMA_MAX_OUTPUT_TOKENS", "1024")),
         )
