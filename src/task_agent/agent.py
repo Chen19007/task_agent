@@ -49,13 +49,15 @@ class SimpleAgent:
     """
 
     def __init__(self, config: Optional[Config] = None,
-                 depth: int = 0, max_depth: int = 4):
+                 depth: int = 0, max_depth: int = 4,
+                 global_remaining_quota: Optional[int] = None):
         """初始化 Agent
 
         Args:
             config: 配置对象
             depth: 当前深度（0=顶级）
             max_depth: 最大允许深度（默认4层）
+            global_remaining_quota: 全局剩余子Agent配额（防止层级间循环）
         """
         self.config = config or Config.from_env()
         self.history: list[Message] = []
@@ -70,6 +72,9 @@ class SimpleAgent:
         self.total_sub_agents_created = 0
         self.total_commands_executed = 0
 
+        # 全局配额
+        self._global_remaining_quota = global_remaining_quota
+
         # 初始化系统消息
         self._init_system_prompt()
 
@@ -79,7 +84,11 @@ class SimpleAgent:
     def _init_system_prompt(self):
         """初始化系统提示词"""
         max_agents = self.max_depth ** 2
-        remaining = max_agents - self.total_sub_agents_created
+        local_remaining = max_agents - self.total_sub_agents_created
+
+        # 全局配额（防止层级间循环）
+        global_total = max_agents * 2  # 全局配额是单Agent的2倍
+        global_remaining = self._global_remaining_quota if self._global_remaining_quota is not None else global_total
 
         # 估算当前上下文使用量
         context_used = self._estimate_context_tokens()
@@ -93,7 +102,8 @@ class SimpleAgent:
 - 当前深度: {self.depth}
 - 最大深度: {self.max_depth}
 - 已创建子Agent: {self.total_sub_agents_created}
-- 可用配额: {remaining}（最多{max_agents}个）
+- 本地配额: {local_remaining}/{max_agents}（当前Agent剩余）
+- 全局配额: {global_remaining}/{global_total}（整个任务剩余，防止循环）
 - 上下文使用: {context_used}/{context_total} tokens ({context_percent:.1f}%)
 - 剩余可用: {context_remaining} tokens
 """
@@ -221,25 +231,44 @@ class SimpleAgent:
             task = self._pending_child_task
             self._pending_child_task = None
 
-            # 检查限制
+            # 检查深度限制
             if self.depth >= self.max_depth:
                 self._add_message("user", f"[深度限制] 请直接执行任务: {task}")
                 outputs.append(f"\n[深度限制] 达到最大深度 {self.max_depth}，由当前Agent执行: {task[:40]}...\n")
                 return StepResult(outputs=outputs, action=Action.CONTINUE)
 
+            # 检查本地配额限制
             if self.total_sub_agents_created >= self.max_depth ** 2:
-                outputs.append(f"\n[配额限制] 已用完 {self.max_depth ** 2} 个子Agent配额\n")
-                self._add_message("user", f"[配额限制] 请直接执行任务: {task}")
+                outputs.append(f"\n[本地配额限制] 当前Agent已用完 {self.max_depth ** 2} 个子Agent配额\n")
+                self._add_message("user", f"[本地配额限制] 请直接执行任务: {task}")
+                return StepResult(outputs=outputs, action=Action.CONTINUE)
+
+            # 检查全局配额限制（防止层级间循环）
+            if self._global_remaining_quota is not None and self._global_remaining_quota <= 0:
+                outputs.append(f"\n[全局配额限制] 整个任务已用完所有子Agent配额，请直接执行任务\n")
+                self._add_message("user", f"[全局配额限制] 请直接执行任务: {task}")
                 return StepResult(outputs=outputs, action=Action.CONTINUE)
 
             self.total_sub_agents_created += 1
 
+            # 更新全局配额（传递给子Agent）
+            new_global_quota = None
+            if self._global_remaining_quota is not None:
+                new_global_quota = self._global_remaining_quota - 1
+
+            # 获取元数据用于显示
+            context_used = self._estimate_context_tokens()
+            context_total = self.config.max_output_tokens * 4
+            global_total = self.max_depth ** 2 * 2
+            global_used = global_total - (new_global_quota if new_global_quota is not None else global_total)
+
             outputs.append(f"\n{'='*60}\n")
             outputs.append(f"[子Agent #{self.total_sub_agents_created}] 深度 {self.depth + 1}/{self.max_depth}\n")
             outputs.append(f"任务: {task[:60]}...\n")
+            outputs.append(f"上下文: {context_used}/{context_total} | 全局配额: {global_used}/{global_total}\n")
             outputs.append(f"{'='*60}\n")
 
-            return StepResult(outputs=outputs, action=Action.SWITCH_TO_CHILD, data=task)
+            return StepResult(outputs=outputs, action=Action.SWITCH_TO_CHILD, data=(task, new_global_quota))
 
         # 检查是否完成
         if self._is_completed(response):
@@ -316,7 +345,7 @@ class SimpleAgent:
         # 执行PowerShell命令
         for match in re.finditer(r'<ps_call>\s*(.+?)\s*</ps_call>', response, re.DOTALL):
             command = match.group(1).strip()
-            self.total_commands_executed += 1
+            self.total_commands_executed += 1  # 解析时分配编号
 
             yield "<confirm_required>\n"
             yield f"[待执行命令 #{self.total_commands_executed}]\n"
@@ -367,6 +396,10 @@ class Executor:
         self.current_agent: Optional[SimpleAgent] = None
         self._is_running = False
 
+        # 全局子Agent配额（防止层级间循环）
+        self._global_quota_total = max_depth ** 2 * 2  # 全局配额是单Agent的2倍
+        self._global_quota_remaining = self._global_quota_total
+
     def run(self, task: str) -> Generator[str, None, None]:
         """运行任务
 
@@ -381,7 +414,8 @@ class Executor:
             self.current_agent = SimpleAgent(
                 config=self.config,
                 depth=0,
-                max_depth=self.max_depth
+                max_depth=self.max_depth,
+                global_remaining_quota=self._global_quota_remaining
             )
             self.current_agent.start(task)
 
@@ -417,12 +451,13 @@ class Executor:
                 yield output
 
             if result.action == Action.SWITCH_TO_CHILD:
-                child_task = result.data
+                child_task, new_global_quota = result.data
                 self.context_stack.append(self.current_agent)
                 self.current_agent = SimpleAgent(
                     config=self.config,
                     depth=self.current_agent.depth + 1,
-                    max_depth=self.max_depth
+                    max_depth=self.max_depth,
+                    global_remaining_quota=new_global_quota
                 )
                 self.current_agent.start(child_task)
 

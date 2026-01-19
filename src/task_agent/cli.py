@@ -212,32 +212,39 @@ def _run_single_task(config: Config, task: str):
             continue
         if "<confirm_command_end>" in output and pending_command:
             # 等待用户确认
-            confirm = console.input("[bold yellow]是否执行此命令？[y/n]: [/bold yellow]")
-            if confirm.lower() != "y":
+            confirm = console.input("[bold yellow]执行命令[y] / 跳过[n] / 修改建议: [/bold yellow]")
+            confirm_lower = confirm.lower().strip()
+
+            if confirm_lower == "y":
+                # 用户确认，执行命令
+                result = _execute_command(pending_command, config.timeout)
+
+                # 构建明确的结果消息
+                if result.returncode == 0:
+                    if result.stdout:
+                        output = f"命令执行成功，输出：\n{result.stdout}"
+                    else:
+                        output = "命令执行成功（无输出）"
+                else:
+                    output = f"命令执行失败（退出码: {result.returncode}）：\n{result.stderr}"
+
+                if executor.current_agent:
+                    executor.current_agent._add_message("user", f'<ps_call_result id="executed">\n{output}\n</ps_call_result>')
+
+            elif confirm_lower == "n":
                 console.print("[info]命令已跳过[/info]\n")
                 # 发送跳过消息给当前Agent
                 if executor.current_agent:
                     executor.current_agent._add_message("user", f'<ps_call_result id="skip">\n命令已跳过\n</ps_call_result>')
-                pending_command = None
-                waiting_for_confirm = False
-                continue
-            # 用户确认，执行命令
-            result = _execute_command(pending_command, config.timeout)
-
-            # 构建明确的结果消息
-            if result.returncode == 0:
-                if result.stdout:
-                    output = f"命令执行成功，输出：\n{result.stdout}"
-                else:
-                    output = "命令执行成功（无输出）"
             else:
-                output = f"命令执行失败（退出码: {result.returncode}）：\n{result.stderr}"
+                # 用户输入修改建议
+                console.print("[info]已将您的建议发送给 Agent[/info]\n")
+                if executor.current_agent:
+                    executor.current_agent._add_message("user", f'<ps_call_result id="rejected">\n用户建议：{confirm}\n</ps_call_result>')
 
-            if executor.current_agent:
-                executor.current_agent._add_message("user", f'<ps_call_result id="executed">\n{output}\n</ps_call_result>')
-                executor.current_agent.total_commands_executed += 1
             pending_command = None
             waiting_for_confirm = False
+            continue
 
         # 提取命令内容（用于确认）
         if waiting_for_confirm and "命令: " in output:
@@ -264,6 +271,7 @@ def _run_single_task(config: Config, task: str):
                     break
 
                 if not line:  # 空行，结束输入
+                    console.print("[success]✓ 输入已接收，正在处理...[/success]\n")
                     break
 
                 lines.append(line)
@@ -296,27 +304,33 @@ def _run_single_task(config: Config, task: str):
                 waiting_for_confirm = True
                 continue
             if "<confirm_command_end>" in output and pending_command:
-                confirm = console.input("[bold yellow]是否执行此命令？[y/n]: [/bold yellow]")
-                if confirm.lower() != "y":
+                confirm = console.input("[bold yellow]执行命令[y] / 跳过[n] / 修改建议: [/bold yellow]")
+                confirm_lower = confirm.lower().strip()
+
+                if confirm_lower == "y":
+                    result = _execute_command(pending_command, config.timeout)
+                    if result.returncode == 0:
+                        if result.stdout:
+                            output = f"命令执行成功，输出：\n{result.stdout}"
+                        else:
+                            output = "命令执行成功（无输出）"
+                    else:
+                        output = f"命令执行失败（退出码: {result.returncode}）：\n{result.stderr}"
+                    if executor.current_agent:
+                        executor.current_agent._add_message("user", f'<ps_call_result id="executed">\n{output}\n</ps_call_result>')
+
+                elif confirm_lower == "n":
                     console.print("[info]命令已跳过[/info]\n")
                     if executor.current_agent:
                         executor.current_agent._add_message("user", f'<ps_call_result id="skip">\n命令已跳过\n</ps_call_result>')
-                    pending_command = None
-                    waiting_for_confirm = False
-                    continue
-                result = _execute_command(pending_command, config.timeout)
-                if result.returncode == 0:
-                    if result.stdout:
-                        output = f"命令执行成功，输出：\n{result.stdout}"
-                    else:
-                        output = "命令执行成功（无输出）"
                 else:
-                    output = f"命令执行失败（退出码: {result.returncode}）：\n{result.stderr}"
-                if executor.current_agent:
-                    executor.current_agent._add_message("user", f'<ps_call_result id="executed">\n{output}\n</ps_call_result>')
-                    executor.current_agent.total_commands_executed += 1
+                    console.print("[info]已将您的建议发送给 Agent[/info]\n")
+                    if executor.current_agent:
+                        executor.current_agent._add_message("user", f'<ps_call_result id="rejected">\n用户建议：{confirm}\n</ps_call_result>')
+
                 pending_command = None
                 waiting_for_confirm = False
+                continue
 
             if waiting_for_confirm and "命令: " in output:
                 pending_command = output.split("命令: ")[1].strip()
@@ -335,7 +349,12 @@ def _run_single_task(config: Config, task: str):
 def _execute_command(command: str, timeout: int):
     """执行命令"""
     import subprocess
-    full_cmd = f'powershell -NoProfile -Command "{command}"'
+    import base64
+
+    # 使用 UTF-16 LE 编码并 Base64 编码命令，避免引号转义问题
+    encoded_command = base64.b64encode(command.encode('utf-16-le')).decode('ascii')
+    full_cmd = f'powershell -NoProfile -EncodedCommand {encoded_command}'
+
     process = subprocess.run(
         full_cmd, shell=True, capture_output=True, text=True,
         timeout=timeout

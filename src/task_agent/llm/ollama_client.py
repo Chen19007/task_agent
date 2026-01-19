@@ -42,10 +42,6 @@ class OllamaClient(LLMClient):
                         content = message.get("content", "")
                         reasoning = message.get("thinking", "")
 
-                        if reasoning:
-                            # 推理过程用于调试
-                            print(f"\n--- LLM REASONING ---\n{reasoning}\n--- END ---\n", file=sys.stderr)
-
                         if content:
                             yield StreamChunk(content=content, reasoning=reasoning)
 
