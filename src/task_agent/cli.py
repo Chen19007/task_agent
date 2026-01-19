@@ -10,8 +10,9 @@ from rich.panel import Panel
 from rich.text import Text
 from rich.theme import Theme
 
-from .agent import SimpleAgent
+from .agent import Executor
 from .config import Config
+from .llm import create_client
 
 # 自定义主题
 custom_theme = Theme(
@@ -64,12 +65,11 @@ def parse_args():
     return parser.parse_args()
 
 
-def check_ollama_connection(host: str) -> bool:
-    """检查Ollama连接"""
+def check_llm_connection(config: Config) -> bool:
+    """检查 LLM 服务连接"""
     try:
-        import requests
-        response = requests.get(f"{host}/api/tags", timeout=5)
-        return response.ok
+        client = create_client(config)
+        return client.check_connection()
     except Exception:
         return False
 
@@ -140,19 +140,17 @@ def main():
         max_output_tokens=1024,
     )
 
-    # 检查Ollama连接
-    if not check_ollama_connection(config.ollama_host):
-        console.print(f"[error]无法连接到Ollama：{config.ollama_host}[/error]")
+    # 检查 LLM 连接
+    if not check_llm_connection(config):
+        service_name = "OpenAI" if config.api_type == "openai" else "Ollama"
+        console.print(f"[error]无法连接到 {service_name}[/error]")
         sys.exit(1)
 
-    print_welcome()
+    # print_welcome()  # 调试阶段暂不显示
     console.print(f"[info]模型：{config.model} | 超时：{args.timeout}s[/info]\n")
 
-    # 初始化Agent（顶级）
-    agent = SimpleAgent(config)
-
     if args.task:
-        _run_single_task(agent, args.task)
+        _run_single_task(config, args.task)
         return
 
     # 交互模式
@@ -171,7 +169,7 @@ def main():
                 print_help()
                 continue
 
-            _run_single_task(agent, task)
+            _run_single_task(config, task)
 
         except KeyboardInterrupt:
             console.print("\n\n[info]任务已中断[/info]")
@@ -184,7 +182,7 @@ def main():
                 console.print(traceback.format_exc())
 
 
-def _run_single_task(agent: SimpleAgent, task: str):
+def _run_single_task(config: Config, task: str):
     """执行单个任务"""
     console.print("-" * 60)
     start_time = time.time()
@@ -194,12 +192,16 @@ def _run_single_task(agent: SimpleAgent, task: str):
     if os.environ.get("AGENT_LOG_FILE"):
         log_file = open(os.environ["AGENT_LOG_FILE"], "w", encoding="utf-8")
 
+    # 创建执行器
+    executor = Executor(config)
+
     # 用于存储待确认的命令
     pending_command: str | None = None
     waiting_for_confirm = False
+    waiting_for_user_input = False  # 新增：等待用户输入标志
 
-    # 执行任务（顶级Agent，is_root=True）
-    for output in agent.run(task, is_root=True):
+    # 执行任务
+    for output in executor.run(task):
         if log_file:
             log_file.write(output)
             log_file.flush()
@@ -213,14 +215,14 @@ def _run_single_task(agent: SimpleAgent, task: str):
             confirm = console.input("[bold yellow]是否执行此命令？[y/n]: [/bold yellow]")
             if confirm.lower() != "y":
                 console.print("[info]命令已跳过[/info]\n")
-                # 发送跳过消息给 Agent
-                agent._add_message("user", f'<ps_call_result id="skip">\n命令已跳过\n</ps_call_result>')
+                # 发送跳过消息给当前Agent
+                if executor.current_agent:
+                    executor.current_agent._add_message("user", f'<ps_call_result id="skip">\n命令已跳过\n</ps_call_result>')
                 pending_command = None
                 waiting_for_confirm = False
                 continue
             # 用户确认，执行命令
-            result = agent._execute_command(pending_command)
-            agent.total_commands_executed += 1
+            result = _execute_command(pending_command, config.timeout)
 
             # 构建明确的结果消息
             if result.returncode == 0:
@@ -231,31 +233,114 @@ def _run_single_task(agent: SimpleAgent, task: str):
             else:
                 output = f"命令执行失败（退出码: {result.returncode}）：\n{result.stderr}"
 
-            agent._add_message("user", f'<ps_call_result id="executed">\n{output}\n</ps_call_result>')
+            if executor.current_agent:
+                executor.current_agent._add_message("user", f'<ps_call_result id="executed">\n{output}\n</ps_call_result>')
+                executor.current_agent.total_commands_executed += 1
             pending_command = None
             waiting_for_confirm = False
 
         # 提取命令内容（用于确认）
         if waiting_for_confirm and "命令: " in output:
             pending_command = output.split("命令: ")[1].strip()
-            # 注意：命令编号已经在 agent 层生成，这里保持原样输出即可
+
+        # 检查是否需要用户输入
+        if "[等待用户输入]" in output:
+            waiting_for_user_input = True
 
         console.print(output, end="", soft_wrap=True)
+
+    # 如果等待用户输入，继续循环
+    while waiting_for_user_input and executor.current_agent:
+        console.print("\n[info]请输入内容（空行结束，q 退出）：[/info]")
+
+        lines = []
+        while True:
+            try:
+                line = console.input("  ")
+
+                if line.lower() in ["q", "quit", "exit"]:
+                    console.print("[info]任务已终止[/info]")
+                    waiting_for_user_input = False
+                    break
+
+                if not line:  # 空行，结束输入
+                    break
+
+                lines.append(line)
+            except KeyboardInterrupt:
+                console.print("\n[warning]输入已取消[/warning]")
+                break
+
+        if not waiting_for_user_input:
+            break
+
+        user_input = "\n".join(lines)
+
+        if not user_input:
+            console.print("[warning]空输入，跳过[/warning]\n")
+            continue
+
+        if log_file:
+            log_file.write(f"\n[用户输入]\n{user_input}\n")
+            log_file.flush()
+
+        # 继续执行
+        waiting_for_user_input = False
+        for output in executor.resume(user_input):
+            if log_file:
+                log_file.write(output)
+                log_file.flush()
+
+            # 同样的确认逻辑
+            if "<confirm_required>" in output:
+                waiting_for_confirm = True
+                continue
+            if "<confirm_command_end>" in output and pending_command:
+                confirm = console.input("[bold yellow]是否执行此命令？[y/n]: [/bold yellow]")
+                if confirm.lower() != "y":
+                    console.print("[info]命令已跳过[/info]\n")
+                    if executor.current_agent:
+                        executor.current_agent._add_message("user", f'<ps_call_result id="skip">\n命令已跳过\n</ps_call_result>')
+                    pending_command = None
+                    waiting_for_confirm = False
+                    continue
+                result = _execute_command(pending_command, config.timeout)
+                if result.returncode == 0:
+                    if result.stdout:
+                        output = f"命令执行成功，输出：\n{result.stdout}"
+                    else:
+                        output = "命令执行成功（无输出）"
+                else:
+                    output = f"命令执行失败（退出码: {result.returncode}）：\n{result.stderr}"
+                if executor.current_agent:
+                    executor.current_agent._add_message("user", f'<ps_call_result id="executed">\n{output}\n</ps_call_result>')
+                    executor.current_agent.total_commands_executed += 1
+                pending_command = None
+                waiting_for_confirm = False
+
+            if waiting_for_confirm and "命令: " in output:
+                pending_command = output.split("命令: ")[1].strip()
+
+            if "[等待用户输入]" in output:
+                waiting_for_user_input = True
+
+            console.print(output, end="", soft_wrap=True)
 
     if log_file:
         log_file.close()
 
-    # 打印摘要
-    summary = agent.get_summary()
-    duration = time.time() - start_time
-
     console.print("-" * 60)
-    console.print(
-        f"\n[success]执行完成[/success]\n"
-        f"总耗时：{duration:.2f}秒\n"
-        f"Agent: {summary['agent_id']} | 深度: {summary['depth']}\n"
-        f"执行命令: {summary['commands']} | 创建子Agent: {summary['sub_agents']}\n"
+
+
+def _execute_command(command: str, timeout: int):
+    """执行命令"""
+    import subprocess
+    full_cmd = f'powershell -NoProfile -Command "{command}"'
+    process = subprocess.run(
+        full_cmd, shell=True, capture_output=True, text=True,
+        timeout=timeout
     )
+    return process
 
 
 if __name__ == "__main__":

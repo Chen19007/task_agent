@@ -1,16 +1,32 @@
-"""极简 Agent 核心模块 - 统一逻辑，无父子区别"""
+"""极简 Agent 核心模块 - 上下文切换架构"""
 
-import json
 import re
 import sys
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Generator, Optional, Tuple, Any
-
-import requests
+from typing import Generator, Optional, Any
+from enum import Enum
 
 from .config import Config
+from .llm import create_client
+
+
+class Action(Enum):
+    """Agent执行后的动作"""
+    CONTINUE = "continue"  # 继续执行下一轮
+    WAIT = "wait"  # 等待用户输入
+    SWITCH_TO_CHILD = "switch_to_child"  # 切换到子Agent
+    RETURN_TO_PARENT = "return_to_parent"  # 返回父Agent
+    COMPLETE = "complete"  # 任务完成
+
+
+@dataclass
+class StepResult:
+    """单步执行结果"""
+    outputs: list[str]  # 输出内容列表
+    action: Action  # 下一步动作
+    data: Any = None  # 携带数据（切换时的任务/摘要）
 
 
 @dataclass
@@ -22,19 +38,20 @@ class Message:
 
 
 class SimpleAgent:
-    """极简任务执行 Agent - 统一逻辑，无父子区别
-    
-    每个Agent的逻辑统一：
-    1. 创建子Agent → 聚合结果 → 继续执行或接收 <completion> 结束
-    2. 完成后把自己的结果聚合到父上下文
-    3. 切换到父上下文，根据当前上下文继续执行
-    4. 如果没有父（顶级Agent）就输出最终结果
+    """极简任务执行 Agent - 统一逻辑，上下文切换
+
+    每个Agent独立执行，通过切换上下文实现嵌套：
+    1. 执行中：step() 返回 CONTINUE
+    2. 需要子Agent：step() 返回 SWITCH_TO_CHILD，携带任务
+    3. 子Agent完成：收到摘要，step() 返回 CONTINUE
+    4. 等待用户：step() 返回 WAIT
+    5. 任务完成：step() 返回 COMPLETE
     """
 
     def __init__(self, config: Optional[Config] = None,
                  depth: int = 0, max_depth: int = 4):
         """初始化 Agent
-        
+
         Args:
             config: 配置对象
             depth: 当前深度（0=顶级）
@@ -43,34 +60,44 @@ class SimpleAgent:
         self.config = config or Config.from_env()
         self.history: list[Message] = []
         self.start_time = 0.0
-        
+
         # Agent标识
         self.agent_id = str(uuid.uuid4())[:8]
         self.depth = depth
         self.max_depth = max_depth
 
-        # 子Agent管理（追踪状态，因为一次可能创建多个）
-        self.children: list[dict] = []  # 每个元素: {"task": str, "status": "running|completed"}
+        # 统计
         self.total_sub_agents_created = 0
         self.total_commands_executed = 0
-        
+
         # 初始化系统消息
         self._init_system_prompt()
+
+        # 待执行的子Agent任务（step()返回时携带）
+        self._pending_child_task: Optional[str] = None
 
     def _init_system_prompt(self):
         """初始化系统提示词"""
         max_agents = self.max_depth ** 2
         remaining = max_agents - self.total_sub_agents_created
-        
+
+        # 估算当前上下文使用量
+        context_used = self._estimate_context_tokens()
+        context_total = self.config.max_output_tokens * 4  # 假设总窗口是输出的4倍
+        context_remaining = context_total - context_used
+        context_percent = (context_used / context_total) * 100
+
         tree_info = f"""
 **当前状态：**
 - Agent ID: {self.agent_id}
 - 当前深度: {self.depth}
 - 最大深度: {self.max_depth}
-- 已创建子Agent: {len(self.children)}
+- 已创建子Agent: {self.total_sub_agents_created}
 - 可用配额: {remaining}（最多{max_agents}个）
+- 上下文使用: {context_used}/{context_total} tokens ({context_percent:.1f}%)
+- 剩余可用: {context_remaining} tokens
 """
-        
+
         system_prompt = """你是一个任务执行agent，负责完成用户任务。
 
 """ + tree_info + """
@@ -100,114 +127,174 @@ class SimpleAgent:
 **2. 子Agent - 任务拆分（推荐）：**
 <create_agent> 子任务描述 </create_agent>
 
-**3. 任务完成：**
+**3. 提问等待用户输入：**
+
+当需要用户提供信息才能继续时，直接提问即可。
+
+✅ 正确用法：
+- 需要知道文件名时："请问您要创建的文件名是什么？"
+- 需要知道用户偏好时："您希望使用哪种编程语言（Python/JavaScript/Go）？"
+- 需要确认方案时："方案A侧重性能，方案B侧重开发速度，您倾向哪个？"
+
+⚠️ **注意**：提问后 Agent 会暂停，等待用户输入后自动继续执行。
+
+❌ 错误做法：
+- 提问后紧接着输出 `<completion>` - 这是矛盾的，提问意味着未完成
+- 使用 `<ps_call> Read-Host "xxx" </ps_call>` - 这是交互式命令，会卡住
+
+**4. 任务完成标记 <completion>（重要）：**
+
+<completion> 任务总结内容 </completion>
+
+【上下文传递机制】
+- ⚠️ **只有 <completion> 标签内的内容会被传递给父Agent或下一个任务**
+- 中间的对话、命令输出、提问等内容不会被传递
+- 父Agent只会看到你的 completion 内容，然后根据它决定下一步
+
+【关键约束】
+- ❌ **禁止在任务未完成时使用 <completion>**
+- ❌ **有疑问或需要用户确认时，禁止使用 <completion>** - 应该直接提问并等待用户回复
+- ✅ 只有在以下情况才能使用：
+  1. 所有子Agent都已返回结果
+  2. 所有计划的工作都已执行完毕
+  3. 没有待处理的命令或待创建的子Agent
+  4. 确定任务已完成，不需要进一步用户输入
+- ⚠️ 一旦输出 <completion>，Agent将立即停止，无法继续执行
+
+【正确用法示例】
+✅ 完成撰写两个文档后：
 <completion>
 # 完成的工作
-- 列出完成的任务
+- 撰写游戏概念章节
+- 撰写核心玩法章节
 
 # 产出物
-- 列出生成的文件或结果
+- game_concept.md
+- core_mechanics.md
+</completion>
+
+❌ 错误用法（任务未完成）：
+<completion>
+# 准备开始工作
+# 产出物：无
 </completion>
 
 **规则：**
-1. 深度优先：先完成一个分支的所有子任务
+1. 深度优先遍历：先完成一个分支的所有子任务，创建子Agent后必须等待其完全完成才能创建下一个（你是深度优先遍历的 Agent）
 2. 顺序执行：必须等待子Agent完全完成才能创建下一个
-3. 每个子Agent有独立4k上下文，大胆拆分任务
+3. 每个子Agent有独立4k上下文，合理拆分任务
 4. 达到最大深度或配额时，直接执行任务
 5. 命令执行后会收到结果反馈，根据结果决定下一步
 6. 完成所有工作后必须使用 <completion> 标记
 7. 用户可以随时输入任务或调整方向
 """
-        
+
         self.history.append(Message(role="system", content=system_prompt))
 
-    def run(self, task: str, is_root: bool = True) -> Generator[str, None, None]:
-        """运行任务
-        
+    def start(self, task: str):
+        """开始执行任务（初始化）
+
         Args:
             task: 用户任务描述
-            is_root: 是否是顶级Agent（决定最终输出格式）
-            
-        Yields:
-            str: 输出片段
         """
         self.start_time = time.time()
         self._add_message("user", task)
 
-        # 主循环：直到遇到 <completion>
-        while True:
-            # 调用LLM
-            response = self._call_llm()
-            yield response
-            self._add_message("assistant", response)
+    def step(self) -> StepResult:
+        """执行一步
 
-            # 解析并执行标签
-            has_output = False
-            for output in self._parse_and_execute_tools(response):
-                has_output = True
-                yield output
+        Returns:
+            StepResult: 执行结果
+        """
+        # 调用LLM
+        response = self._call_llm()
+        self._add_message("assistant", response)
 
-            # 检查是否完成
-            if self._is_completed(response):
-                # 顶级Agent输出最终结果
-                if is_root:
-                    yield "\n" + "="*60 + "\n"
-                    yield "[最终结果]\n"
-                    summary = self._extract_completion(response)
-                    yield summary + "\n"
-                    yield f"执行命令: {self.total_commands_executed}\n"
-                    yield f"创建子Agent: {self.total_sub_agents_created}\n"
-                    yield "="*60 + "\n"
-                break
+        outputs = [response]
 
-            # 如果没有操作标签也没有输出，等待用户输入
-            if not self._has_action_tags(response) and not has_output:
-                yield "\n[等待用户输入]\n"
-                break
+        # 解析并执行标签，收集输出
+        tool_outputs = list(self._parse_tools(response))
+        outputs.extend(tool_outputs)
+
+        # 检查是否需要切换到子Agent
+        if self._pending_child_task:
+            task = self._pending_child_task
+            self._pending_child_task = None
+
+            # 检查限制
+            if self.depth >= self.max_depth:
+                self._add_message("user", f"[深度限制] 请直接执行任务: {task}")
+                outputs.append(f"\n[深度限制] 达到最大深度 {self.max_depth}，由当前Agent执行: {task[:40]}...\n")
+                return StepResult(outputs=outputs, action=Action.CONTINUE)
+
+            if self.total_sub_agents_created >= self.max_depth ** 2:
+                outputs.append(f"\n[配额限制] 已用完 {self.max_depth ** 2} 个子Agent配额\n")
+                self._add_message("user", f"[配额限制] 请直接执行任务: {task}")
+                return StepResult(outputs=outputs, action=Action.CONTINUE)
+
+            self.total_sub_agents_created += 1
+
+            outputs.append(f"\n{'='*60}\n")
+            outputs.append(f"[子Agent #{self.total_sub_agents_created}] 深度 {self.depth + 1}/{self.max_depth}\n")
+            outputs.append(f"任务: {task[:60]}...\n")
+            outputs.append(f"{'='*60}\n")
+
+            return StepResult(outputs=outputs, action=Action.SWITCH_TO_CHILD, data=task)
+
+        # 检查是否完成
+        if self._is_completed(response):
+            summary = self._extract_completion(response)
+            return StepResult(outputs=outputs, action=Action.COMPLETE, data=summary)
+
+        # 检查是否需要等待用户输入
+        if not self._has_action_tags(response) and not tool_outputs:
+            outputs.append("\n[等待用户输入]\n")
+            return StepResult(outputs=outputs, action=Action.WAIT)
+
+        return StepResult(outputs=outputs, action=Action.CONTINUE)
+
+    def on_child_completed(self, summary: str):
+        """子Agent完成时的回调
+
+        Args:
+            summary: 子Agent的完成摘要
+        """
+        if summary:
+            self._add_message("user", summary)
 
     def _add_message(self, role: str, content: str):
         """添加消息到历史记录"""
         self.history.append(Message(role=role, content=content))
 
+    def _estimate_context_tokens(self) -> int:
+        """估算当前上下文使用的 token 数
+
+        使用简单估算：4 字符 ≈ 1 token（适用于中文混合）
+        """
+        total_chars = sum(len(msg.content) for msg in self.history)
+        return total_chars // 4
+
     def _call_llm(self) -> str:
         """调用LLM"""
         messages = [{"role": msg.role, "content": msg.content} for msg in self.history]
 
-        payload = {
-            "model": self.config.model,
-            "messages": messages,
-            "stream": True,  # qwen3 需要流式
-            "options": {"num_predict": self.config.max_output_tokens},
-        }
+        # 使用 LLM 客户端
+        client = create_client(self.config)
 
-        url = f"{self.config.ollama_host}/api/chat"
+        content = ""
+        reasoning = ""
 
         try:
-            # qwen3 使用流式响应，需要拼接
-            reasoning_content = ""
-            content = ""
+            for chunk in client.chat(messages, self.config.max_output_tokens):
+                content += chunk.content
+                reasoning += chunk.reasoning
 
-            with requests.post(url, json=payload, timeout=self.config.timeout, stream=True) as response:
-                for line in response.iter_lines():
-                    if line:
-                        data = json.loads(line.decode('utf-8'))
-                        # qwen3 格式: message.thinking 或 message.content
-                        message = data.get("message", {})
-                        reasoning = message.get("thinking", "")
-                        content_part = message.get("content", "")
-                        if reasoning:
-                            reasoning_content += reasoning
-                        if content_part:
-                            content += content_part
+            # 调试输出
+            if reasoning:
+                print(f"\n--- LLM REASONING ---\n{reasoning}\n--- END ---\n", file=sys.stderr)
+            print(f"\n--- LLM CONTENT ---\n{content}\n--- END ---\n", file=sys.stderr)
 
-            # qwen3 把思考过程放在 reasoning_content，输出在 content
-            # 注意：如果没有 content 就返回空，不应该用 thinking 填补
-            result = content if content else ""
-            # 调试输出完整响应
-            if reasoning_content:
-                print(f"\n--- LLM REASONING ---\n{reasoning_content}\n--- END ---\n", file=sys.stderr)
-            print(f"\n--- LLM CONTENT ---\n{result}\n--- END ---\n", file=sys.stderr)
-            return result
+            return content
         except Exception as e:
             raise RuntimeError(f"调用LLM失败: {e}")
 
@@ -224,104 +311,23 @@ class SimpleAgent:
         match = re.search(r'<completion>\s*(.+?)\s*</completion>', response, re.DOTALL)
         return match.group(1) if match else "任务完成"
 
-    def _parse_and_execute_tools(self, response: str) -> Generator[str, None, None]:
-        """解析并执行标签"""
-        # 执行PowerShell命令 - 串行执行，一个一个来
+    def _parse_tools(self, response: str) -> Generator[str, None, None]:
+        """解析工具标签"""
+        # 执行PowerShell命令
         for match in re.finditer(r'<ps_call>\s*(.+?)\s*</ps_call>', response, re.DOTALL):
             command = match.group(1).strip()
+            self.total_commands_executed += 1
 
-            # 预分配编号（执行后确认）
-            pending_id = self.total_commands_executed + 1
-
-            # 输出命令，等待用户确认
             yield "<confirm_required>\n"
-            yield f"[待执行命令 #{pending_id}]\n"
+            yield f"[待执行命令 #{self.total_commands_executed}]\n"
             yield f"命令: {command}\n"
             yield "<confirm_command_end>\n"
 
-        # 创建并执行子Agent - 自动编号
+        # 创建子Agent（只设置第一个，等待切换）
         for match in re.finditer(r'<create_agent>\s*(.+?)\s*</create_agent>', response, re.DOTALL):
-            task = match.group(1).strip()
-
-            # 检查限制
-            if self.depth >= self.max_depth:
-                # 深度限制：将子任务作为用户消息，让当前Agent自己执行
-                self._add_message("user", f"[深度限制] 请直接执行任务: {task}")
-                yield f"\n[深度限制] 达到最大深度 {self.max_depth}，由当前Agent执行: {task[:40]}...\n"
-                continue  # 重新循环，LLM会响应新的用户消息
-
-            if self.total_sub_agents_created >= self.max_depth ** 2:
-                yield f"\n[配额限制] 已用完 {self.max_depth ** 2} 个子Agent配额\n"
-                self._add_message("user", f"[配额限制] 请直接执行任务: {task}")
-                continue  # 重新循环，LLM会响应新的用户消息
-            
-            # 创建子Agent（逻辑统一，无父子区别）
-            sub_agent = SimpleAgent(
-                config=self.config,
-                depth=self.depth + 1,
-                max_depth=self.max_depth
-            )
-
-            self.total_sub_agents_created += 1
-
-            # 追踪子Agent状态
-            child_info = {"task": task, "status": "running", "agent_id": sub_agent.agent_id}
-            self.children.append(child_info)
-
-            # 执行子Agent
-            yield f"\n{'='*60}\n"
-            yield f"[子Agent #{self.total_sub_agents_created}] 深度 {sub_agent.depth}/{sub_agent.max_depth}\n"
-            yield f"任务: {task[:60]}...\n"
-            yield f"{'='*60}\n"
-
-            # 子Agent完成后，聚合结果到父上下文
-            sub_outputs = []
-            for output in sub_agent.run(task, is_root=False):
-                sub_outputs.append(output)
-                yield output
-
-            # 聚合子Agent结果 - 只有completion内容才加入父上下文
-            sub_summary = self._extract_agent_summary(sub_outputs)
-            if sub_summary:  # 只有有内容时才聚合
-                self._add_message("user", sub_summary)
-
-            # 更新状态
-            child_info["status"] = "completed"
-            yield f"\n[子Agent #{self.total_sub_agents_created} 结果已聚合]\n"
-
-    def _extract_agent_summary(self, outputs: list) -> str:
-        """提取Agent输出摘要 - 只提取 <completion> 内容"""
-        full = "".join(outputs)
-
-        # 只提取completion内容，不包含命令等中间过程
-        comp = re.search(r'<completion>\s*(.+?)\s*</completion>', full, re.DOTALL)
-        if comp:
-            return comp.group(1).strip()
-        return ""  # 没有completion就不聚合任何内容
-
-    def _execute_command(self, command: str) -> "CommandResult":
-        """执行命令 - 直接用 PowerShell 执行"""
-        try:
-            import subprocess
-
-            # 直接用 PowerShell 执行，无需前缀
-            full_cmd = f'powershell -NoProfile -Command "{command}"'
-
-            process = subprocess.run(
-                full_cmd, shell=True, capture_output=True, text=True,
-                timeout=self.config.timeout
-            )
-
-            return CommandResult(
-                command=command,
-                stdout=process.stdout,
-                stderr=process.stderr,
-                returncode=process.returncode
-            )
-        except subprocess.TimeoutExpired:
-            return CommandResult(command=command, stdout="", stderr="超时", returncode=-1)
-        except Exception as e:
-            return CommandResult(command=command, stdout="", stderr=str(e), returncode=-1)
+            if not self._pending_child_task:  # 只处理第一个
+                self._pending_child_task = match.group(1).strip()
+                break
 
     def get_summary(self) -> dict:
         """获取执行摘要"""
@@ -340,3 +346,104 @@ class CommandResult:
     stdout: str
     stderr: str
     returncode: int
+
+
+class Executor:
+    """Agent执行器 - 上下文切换
+
+    维护上下文栈，处理Agent切换逻辑
+    """
+
+    def __init__(self, config: Optional[Config] = None, max_depth: int = 4):
+        """初始化执行器
+
+        Args:
+            config: 配置对象
+            max_depth: 最大深度
+        """
+        self.config = config or Config.from_env()
+        self.max_depth = max_depth
+        self.context_stack: list[SimpleAgent] = []
+        self.current_agent: Optional[SimpleAgent] = None
+        self._is_running = False
+
+    def run(self, task: str) -> Generator[str, None, None]:
+        """运行任务
+
+        Args:
+            task: 用户任务描述
+
+        Yields:
+            str: 输出片段
+        """
+        # 创建顶级Agent
+        if not self.current_agent:
+            self.current_agent = SimpleAgent(
+                config=self.config,
+                depth=0,
+                max_depth=self.max_depth
+            )
+            self.current_agent.start(task)
+
+        self._is_running = True
+        yield from self._execute_loop()
+
+    def resume(self, user_input: str) -> Generator[str, None, None]:
+        """恢复执行（用户输入后）
+
+        Args:
+            user_input: 用户输入内容
+
+        Yields:
+            str: 输出片段
+        """
+        if not self.current_agent:
+            return
+
+        self.current_agent._add_message("user", user_input)
+        self._is_running = True
+        yield from self._execute_loop()
+
+    def _execute_loop(self) -> Generator[str, None, None]:
+        """执行循环（内部方法）
+
+        Yields:
+            str: 输出片段
+        """
+        while self.current_agent and self._is_running:
+            result = self.current_agent.step()
+
+            for output in result.outputs:
+                yield output
+
+            if result.action == Action.SWITCH_TO_CHILD:
+                child_task = result.data
+                self.context_stack.append(self.current_agent)
+                self.current_agent = SimpleAgent(
+                    config=self.config,
+                    depth=self.current_agent.depth + 1,
+                    max_depth=self.max_depth
+                )
+                self.current_agent.start(child_task)
+
+            elif result.action == Action.COMPLETE:
+                if self.context_stack:
+                    parent = self.context_stack.pop()
+                    parent.on_child_completed(result.data or "")
+                    self.current_agent = parent
+                else:
+                    yield "\n" + "="*60 + "\n"
+                    yield "[最终结果]\n"
+                    yield result.data + "\n"
+                    agent_summary = self.current_agent.get_summary()
+                    yield f"执行命令: {agent_summary['commands']}\n"
+                    yield f"创建子Agent: {agent_summary['sub_agents']}\n"
+                    yield "="*60 + "\n"
+                    self._is_running = False
+                    break
+
+            elif result.action == Action.WAIT:
+                self._is_running = False
+                break
+
+            # CONTINUE 继续循环
