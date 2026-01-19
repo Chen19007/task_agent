@@ -27,6 +27,14 @@ custom_theme = Theme(
     }
 )
 
+import msvcrt
+
+def _clear_input_buffer():
+    """清空 stdin 中的残留输入（Windows）"""
+    while msvcrt.kbhit():
+        msvcrt.getch()
+
+
 console = Console(theme=custom_theme)
 
 
@@ -186,6 +194,7 @@ def main():
     # 交互模式
     while True:
         try:
+            _clear_input_buffer()
             task = console.input("[user]请输入任务（q退出）：[/user]")
 
             if not task:
@@ -242,6 +251,7 @@ def _run_single_task(config: Config, task: str):
             continue
         if "<confirm_command_end>" in output and pending_command:
             # 等待用户确认
+            _clear_input_buffer()
             confirm = console.input("[bold yellow]执行命令[y] / 跳过[n] / 修改建议: [/bold yellow]")
             confirm_lower = confirm.lower().strip()
 
@@ -293,6 +303,7 @@ def _run_single_task(config: Config, task: str):
         lines = []
         while True:
             try:
+                _clear_input_buffer()
                 line = console.input("  ")
 
                 if line.lower() in ["q", "quit", "exit"]:
@@ -301,7 +312,10 @@ def _run_single_task(config: Config, task: str):
                     break
 
                 if not line:  # 空行，结束输入
-                    console.print("[success]✓ 输入已接收，正在处理...[/success]\n")
+                    # 清空当前行的提示信息
+                    sys.stdout.write("\r" + " " * 50 + "\r")
+                    sys.stdout.flush()
+                    console.print("[success]输入已接收，正在处理...[/success]\n", end="")
                     break
 
                 lines.append(line)
@@ -334,6 +348,7 @@ def _run_single_task(config: Config, task: str):
                 waiting_for_confirm = True
                 continue
             if "<confirm_command_end>" in output and pending_command:
+                _clear_input_buffer()
                 confirm = console.input("[bold yellow]执行命令[y] / 跳过[n] / 修改建议: [/bold yellow]")
                 confirm_lower = confirm.lower().strip()
 
