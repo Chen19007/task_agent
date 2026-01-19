@@ -344,14 +344,17 @@ $lines.Insert(行号, "新行内容") | Set-Content -Path "文件路径" -Encodi
 
         return StepResult(outputs=outputs, action=Action.CONTINUE)
 
-    def on_child_completed(self, summary: str):
+    def on_child_completed(self, summary: str, global_count: int):
         """子Agent完成时的回调
 
         Args:
             summary: 子Agent的完成摘要
+            global_count: 同步全局子Agent计数
         """
         if summary:
             self._add_message("user", summary)
+        # 同步全局计数
+        self._global_subagent_count = global_count
 
     def _add_message(self, role: str, content: str):
         """添加消息到历史记录"""
@@ -526,7 +529,9 @@ class Executor:
             elif result.action == Action.COMPLETE:
                 if self.context_stack:
                     parent = self.context_stack.pop()
-                    parent.on_child_completed(result.data or "")
+                    # 需要获取当前 agent 的 global_count 传递给父 agent
+                    parent_global_count = self.current_agent._global_subagent_count
+                    parent.on_child_completed(result.data or "", parent_global_count)
                     self.current_agent = parent
                 else:
                     yield "\n" + "="*60 + "\n"
