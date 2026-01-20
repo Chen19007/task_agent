@@ -479,7 +479,6 @@ $lines.Insert(行号, "新行内容") | Set-Content -Path "文件路径" -Encodi
             context_total = self.config.num_ctx
 
             outputs.append(f"\n{'+'*60}\n")
-            outputs.append(f"## [子 Agent #{self.total_sub_agents_created}]\n")
             agent_info = f" [{agent_name}]" if agent_name else ""
             outputs.append(f"深度: {self.depth + 1}/{self.max_depth}{agent_info} | 任务: {task}\n")
             outputs.append(f"上下文: {context_used}/{context_total} | 配额: {new_global_count}/{global_total}\n")

@@ -122,13 +122,20 @@ def print_help():
             Text(
                 """[bold cyan]命令列表[/bold cyan]
 
-[bold yellow]交互模式命令：[/bold yellow]
-  help, h       - 显示此帮助信息
-  q, quit, exit - 退出程序（会自动保存当前会话）
-  /list         - 列出所有保存的会话
-  /new          - 创建新会话（自动保存当前会话）
-  /resume <id>  - 恢复指定ID的会话
-  <任务描述>     - 执行指定任务
+[bold yellow]交互模式：[/bold yellow]
+  [bold]主循环[/bold] - 等待输入新任务
+    提示符: [user]任务>[/user]
+    - <任务描述>   - 执行任务（使用当前会话上下文）
+    - /new        - 创建新会话（自动保存当前会话）
+    - /list       - 列出所有保存的会话
+    - /resume <id>- 恢复指定ID的会话
+    - q, quit     - 退出程序
+
+  [bold]等待输入模式[/bold] - Agent 询问问题，等待回复
+    提示符: [info]>[/info]
+    - <内容>      - 输入回复内容（空行结束）
+    - q           - 终止当前任务
+    - /list       - 查看会话列表
 
 [bold yellow]命令行参数：[/bold yellow]
   -m, --model   - 指定模型名称（默认：qwen3:4b）
@@ -155,9 +162,9 @@ def print_help():
   - 使用 <completion> 标记任务完成
 
 [bold yellow]会话管理：[/bold yellow]
-  - 每次执行任务后自动保存当前会话
-  - 退出程序时自动保存当前会话
-  - 会话存储在 sessions/ 目录""",
+  - 主循环输入任务默认使用当前会话
+  - 要创建新会话使用 /new 命令
+  - 会话自动保存在 sessions/ 目录""",
                 justify="left",
                 style="white",
             ),
@@ -229,8 +236,14 @@ def main():
                 else:
                     console.print(f"\n[dim]当前会话：临时（未保存）[/dim]\n")
 
+            # 显示当前会话状态
+            if session_manager.current_session_id:
+                console.print(f"[dim]当前会话 #{session_manager.current_session_id} | 输入任务继续，/new 新建，/list 列表[/dim]")
+            else:
+                console.print(f"[dim]临时会话 | 输入任务创建会话，/list 列表[/dim]")
+
             _clear_input_buffer()
-            task = console.input("[user]请输入任务（q退出）：[/user]")
+            task = console.input("[user]任务> [/user]")
 
             if not task:
                 continue
@@ -455,13 +468,16 @@ def _run_single_task(config: Config, task: str, executor: 'Executor' = None, ses
 
     # 如果等待用户输入，继续循环
     while waiting_for_user_input and executor.current_agent:
-        console.print("\n[info]请输入内容（空行结束，q 退出）：[/info]")
+        console.print("\n" + "=" * 60)
+        console.print("[bold yellow]Agent 等待您的回复[/bold yellow]")
+        console.print("[dim]输入内容后按空行结束（q 退出，/list 查看会话）[/dim]")
+        console.print("=" * 60 + "\n")
 
         lines = []
         while True:
             try:
                 _clear_input_buffer()
-                line = console.input("  ")
+                line = console.input("[info]> [/info]")
 
                 if line.lower() in ["q", "quit", "exit"]:
                     console.print("[info]任务已终止[/info]")

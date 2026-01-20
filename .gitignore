@@ -182,3 +182,4 @@ db.sqlite
 db.sqlite3-journal
 
 # Session filessessions/
+sessions/
