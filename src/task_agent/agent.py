@@ -146,42 +146,22 @@ class SimpleAgent:
 
 示例对比：
 ❌ 错误：<ps_call> Read-Host "请输入姓名" </ps_call>  （会卡住等待输入）
-✅ 正确：先问用户"请提供姓名"，再生成 <ps_call> Set-Content -Path name.txt -Value "张三" </ps_call>
+✅ 正确：先问用户"请提供姓名"，再生成 <ps_call> Add-Content -Path name.txt -Value "张三" -Encoding UTF8 </ps_call>
 
 ✅ 合法示例：
 <ps_call> Get-ChildItem </ps_call>
-<ps_call> Set-Content -Path test.txt -Value "hello" </ps_call>
 <ps_call> Get-Process | Where-Object {{$_.CPU -gt 10}} </ps_call>
 
-**【常用文件操作命令速查】**
+**【文件操作规则】**
 
-**读取文件内容：**
+**【强制规则】文件修改必须使用 file-edit 子 agent**
+- ❌ 禁止：直接使用 `<ps_call>` 修改文件内容（追加/插入/替换/创建）
+- ✅ 正确：使用 `<create_agent name=file-edit>任务描述</create_agent>`
+- ✅ 允许：直接使用 `<ps_call> Get-Content` 读取文件内容
+
+**读取文件内容（允许直接使用）：**
 <ps_call> Get-Content -Path "文件路径" -Encoding UTF8 </ps_call>
 <ps_call> Get-Content -Path "文件路径" -Raw -Encoding UTF8 </ps_call>  # 一次性读取全部（推荐大文件）
-
-**创建/覆盖文件：**
-<ps_call> Set-Content -Path "文件路径" -Value "内容" -Encoding UTF8 </ps_call>
-
-**追加内容到文件末尾：**
-<ps_call> Add-Content -Path "文件路径" -Value "追加内容" -Encoding UTF8 </ps_call>
-
-**在指定位置插入内容：**
-```powershell
-$content = Get-Content -Path "文件路径" -Encoding UTF8
-$lines = $content -split "`n"
-$lines.Insert(行号, "新行内容") | Set-Content -Path "文件路径" -Encoding UTF8
-```
-例如在第 5 行后插入：
-<ps_call> $lines = Get-Content -Path "file.txt" -Encoding UTF8; $lines.Insert(5, "新行内容") | Set-Content -Path "file.txt" -Encoding UTF8 </ps_call>
-
-**替换文件中的特定内容：**
-<ps_call> (Get-Content -Path "文件路径" -Encoding UTF8) -replace "旧内容", "新内容" | Set-Content -Path "文件路径" -Encoding UTF8 </ps_call>
-
-**删除文件：**
-<ps_call> Remove-Item -Path "文件路径" -Force </ps_call>
-
-**创建目录：**
-<ps_call> New-Item -Path "目录路径" -ItemType Directory -Force </ps_call>
 
 **查看文件是否存在：**
 <ps_call> Test-Path -Path "文件路径" </ps_call>
@@ -198,9 +178,15 @@ $lines.Insert(行号, "新行内容") | Set-Content -Path "文件路径" -Encodi
 **搜索文件内容：**
 <ps_call> Select-String -Path "文件路径" -Pattern "搜索内容" </ps_call>
 
+**删除文件（谨慎使用）：**
+<ps_call> Remove-Item -Path "文件路径" -Force </ps_call>
+
+**创建目录：**
+<ps_call> New-Item -Path "目录路径" -ItemType Directory -Force </ps_call>
+
 ⚠️ **重要提示**：
-- 大文件用 `-Raw` 一次性读取，不要分块读取再拼接
-- 修改文件前可以用 `Test-Path` 检查是否存在
+- 大文件用 `-Raw` 一次性读取
+- 修改文件内容请使用 `<create_agent name=file-edit>`
 - 路径用双引号括起来，包含空格也没问题
 
 **2. 子Agent - 任务拆分（推荐）：**
