@@ -28,7 +28,10 @@ class OllamaClient(LLMClient):
             "model": self.config.model,
             "messages": messages,
             "stream": True,
-            "options": {"num_predict": max_tokens},
+            "options": {
+                "num_predict": max_tokens,
+                "num_ctx": self.config.num_ctx,
+            },
         }
 
         try:
@@ -42,7 +45,9 @@ class OllamaClient(LLMClient):
                         content = message.get("content", "")
                         reasoning = message.get("thinking", "")
 
-                        if content:
+                        # Ollama/Qwen3 格式：思考时 content 为空，回答时 thinking 为空
+                        # 只要有 content 或 thinking 就输出（与 OpenAI 客户端保持一致）
+                        if content or reasoning:
                             yield StreamChunk(content=content, reasoning=reasoning)
 
         except Exception as e:

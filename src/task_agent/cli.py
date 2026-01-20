@@ -78,7 +78,11 @@ def parse_args():
                         help="OpenAI API Key")
 
     parser.add_argument("--max-tokens", "-M", type=int, default=None,
-                        help="最大输出token数（默认：Ollama=1024, OpenAI=8192）")
+                        help="最大输出token数（默认：Ollama=4096, OpenAI=8192）")
+
+    parser.add_argument("--num-ctx", type=int, default=None,
+                        help="上下文窗口大小（Ollama num_ctx，默认 4096）")
+
 
     parser.add_argument("--verbose", "-v", action="store_true",
                         help="显示详细日志")
@@ -129,7 +133,8 @@ def print_help():
   -H, --host    - Ollama地址（默认：http://localhost:11434）
   -b, --base-url- OpenAI Base URL（默认：https://api.openai.com/v1）
   -k, --api-key - OpenAI API Key
-  -M, --max-tokens- 最大输出token（默认：8192，适合大模型）
+  -M, --max-tokens- 最大输出token（默认：Ollama=4096, OpenAI=8192，适合大模型）
+  --num-ctx        - 上下文窗口大小（Ollama num_ctx，默认 4096）
   -v, --verbose - 显示详细日志
 
 [bold yellow]使用示例：[/bold yellow]
@@ -158,14 +163,22 @@ def main():
     args = parse_args()
 
     # 根据 API 类型设置不同的 max_output_tokens 默认值
-    # 本地小模型（Ollama）默认 1024，大模型（OpenAI）默认 8192
+    # 本地小模型（Ollama）默认 4096，大模型（OpenAI）默认 8192 * 4
     if args.api_type == "openai":
-        default_max_tokens = 8192
+        default_max_tokens = 8192 * 4
     else:
-        default_max_tokens = 1024
+        default_max_tokens = 4096
+
+    # 根据 API 类型设置不同的 num_ctx 默认值
+    # 本地小模型（Ollama）默认 4096，大模型（OpenAI）默认 200k
+    if args.api_type == "openai":
+        default_num_ctx = 1024 * 200
+    else:
+        default_num_ctx = 4096
 
     # 用户指定则用用户的，否则用 API 类型对应的默认值
     max_tokens = args.max_tokens if args.max_tokens is not None else default_max_tokens
+    num_ctx = args.num_ctx if args.num_ctx is not None else default_num_ctx
 
     # 创建配置
     config = Config(
@@ -176,6 +189,7 @@ def main():
         model=args.model,
         timeout=args.timeout,
         max_output_tokens=max_tokens,
+        num_ctx=num_ctx,
     )
 
     # 检查 LLM 连接

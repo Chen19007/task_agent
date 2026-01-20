@@ -20,7 +20,8 @@ class Config:
     # 通用配置
     model: str = "qwen3:4b"
     timeout: int = 300
-    max_output_tokens: int = 1024
+    max_output_tokens: int = 4096
+    num_ctx: int = 4096
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -34,7 +35,8 @@ class Config:
             openai_base_url=os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
             model=os.environ.get("OLLAMA_MODEL", "qwen3:4b"),
             timeout=int(os.environ.get("OLLAMA_TIMEOUT", "300")),
-            max_output_tokens=int(os.environ.get("OLLAMA_MAX_OUTPUT_TOKENS", "1024")),
+            max_output_tokens=int(os.environ.get("OLLAMA_MAX_OUTPUT_TOKENS", "4096")),
+            num_ctx=int(os.environ.get("OLLAMA_NUM_CTX", "4096")),
         )
 
     def to_dict(self) -> dict:
@@ -46,4 +48,5 @@ class Config:
             "model": self.model,
             "timeout": self.timeout,
             "max_output_tokens": self.max_output_tokens,
+            "num_ctx": self.num_ctx,
         }

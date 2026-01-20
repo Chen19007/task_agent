@@ -95,7 +95,7 @@ class SimpleAgent:
 
         # 估算当前上下文使用量
         context_used = self._estimate_context_tokens()
-        context_total = self.config.max_output_tokens * 4  # 假设总窗口是输出的4倍
+        context_total = self.config.num_ctx  # 假设总窗口是输出的4倍
         context_remaining = context_total - context_used
         context_percent = (context_used / context_total) * 100
 
@@ -362,7 +362,7 @@ $lines.Insert(行号, "新行内容") | Set-Content -Path "文件路径" -Encodi
 
             # 获取元数据用于显示
             context_used = self._estimate_context_tokens()
-            context_total = self.config.max_output_tokens * 4
+            context_total = self.config.num_ctx
 
             outputs.append(f"\n{'+'*60}\n")
             outputs.append(f"## [子 Agent #{self.total_sub_agents_created}]\n")
