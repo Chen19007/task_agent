@@ -25,9 +25,11 @@ class Action(Enum):
 @dataclass
 class StepResult:
     """单步执行结果"""
-    outputs: list[str]  # 输出内容列表
+    outputs: list[str]  # 输出内容列表（不含命令框）
     action: Action  # 下一步动作
     data: Any = None  # 携带数据（切换时的任务/摘要）
+    pending_commands: list[str] = field(default_factory=list)  # 待确认的命令列表
+    command_blocks: list[str] = field(default_factory=list)  # 命令框显示内容（逐个显示）
 
 
 @dataclass
@@ -291,29 +293,6 @@ $lines.Insert(行号, "新行内容") | Set-Content -Path "文件路径" -Encodi
             task: 用户任务描述
         """
         self.start_time = time.time()
-
-        # 打印调试信息：基础系统提示词和聚合上下文
-        print(f"\n{'='*60}", file=sys.stderr)
-        print(f"[Agent #{self.agent_id} 深度 {self.depth}] 初始化", file=sys.stderr)
-        print(f"{'='*60}", file=sys.stderr)
-        print(f"\n--- [1/2] 基础系统提示词 (核心规则) ---", file=sys.stderr)
-        print(self.history[0].content[:500] + "..." if len(self.history[0].content) > 500 else self.history[0].content, file=sys.stderr)
-
-        # 打印聚合的上下文（来自父Agent的消息）
-        aggregated = [msg for msg in self.history[1:] if msg.role == "user"]
-        if aggregated:
-            print(f"\n--- [2/2] 聚合上下文 ({len(aggregated)} 条来自父Agent) ---", file=sys.stderr)
-            for i, msg in enumerate(aggregated, 1):
-                preview = msg.content[:200] + "..." if len(msg.content) > 200 else msg.content
-                print(f"[{i}] {preview}", file=sys.stderr)
-        else:
-            print(f"\n--- [2/2] 聚合上下文 ---", file=sys.stderr)
-            print("(无，直接执行用户任务)", file=sys.stderr)
-
-        print(f"\n{'='*60}", file=sys.stderr)
-        print(f"用户任务: {task[:100]}{'...' if len(task) > 100 else ''}", file=sys.stderr)
-        print(f"{'='*60}\n", file=sys.stderr)
-
         self._add_message("user", task)
 
     def step(self) -> StepResult:
@@ -332,14 +311,18 @@ $lines.Insert(行号, "新行内容") | Set-Content -Path "文件路径" -Encodi
 
         self._add_message("assistant", response)
 
+        # 格式化输出
         outputs = []
-        if reasoning:
-            outputs.append(f"[思考: {reasoning}]\n")
-        if response:
+        if reasoning and reasoning.strip():
+            outputs.append(f"\n** 思考过程：\n")
+            outputs.append(f"{'━'*50}\n")
+            outputs.append(f"{reasoning}\n")
+            outputs.append(f"{'━'*50}\n\n")
+        if response and response.strip():
             outputs.append(response)
 
-        # 解析并执行标签，收集输出
-        tool_outputs = list(self._parse_tools(response))
+        # 解析并执行标签，收集输出和命令
+        tool_outputs, pending_commands, command_blocks = self._parse_tools(response)
         outputs.extend(tool_outputs)
 
         # 检查是否需要切换到子Agent
@@ -350,21 +333,27 @@ $lines.Insert(行号, "新行内容") | Set-Content -Path "文件路径" -Encodi
             # 检查深度限制
             if self.depth >= self.max_depth:
                 self._add_message("user", f"[深度限制] 请直接执行任务: {task}")
-                outputs.append(f"\n[深度限制] 达到最大深度 {self.max_depth}，由当前Agent执行: {task[:40]}...\n")
-                return StepResult(outputs=outputs, action=Action.CONTINUE)
+                outputs.append(f"\n!! [深度限制]\n")
+                outputs.append(f"已达到最大深度 {self.max_depth}，由当前Agent执行\n")
+                outputs.append(f"{'═'*50}\n\n")
+                return StepResult(outputs=outputs, action=Action.CONTINUE, pending_commands=pending_commands, command_blocks=command_blocks)
 
             # 检查本地配额限制
             if self.total_sub_agents_created >= self.max_depth ** 2:
-                outputs.append(f"\n[本地配额限制] 当前Agent已用完 {self.max_depth ** 2} 个子Agent配额\n")
+                outputs.append(f"\n!! [本地配额限制]\n")
+                outputs.append(f"当前Agent已用完 {self.max_depth ** 2} 个子Agent配额\n")
+                outputs.append(f"{'═'*50}\n\n")
                 self._add_message("user", f"[本地配额限制] 请直接执行任务: {task}")
-                return StepResult(outputs=outputs, action=Action.CONTINUE)
+                return StepResult(outputs=outputs, action=Action.CONTINUE, pending_commands=pending_commands, command_blocks=command_blocks)
 
             # 检查全局配额限制（防止层级间循环）- 累加计数
             global_total = self.max_depth ** 2 * 2
             if self._global_subagent_count >= global_total:
-                outputs.append(f"\n[全局配额限制] 整个任务已用完所有 {global_total} 个子Agent配额，请直接执行任务\n")
+                outputs.append(f"\n!! [全局配额限制]\n")
+                outputs.append(f"整个任务已用完所有 {global_total} 个子Agent配额\n")
+                outputs.append(f"{'═'*50}\n\n")
                 self._add_message("user", f"[全局配额限制] 请直接执行任务: {task}")
-                return StepResult(outputs=outputs, action=Action.CONTINUE)
+                return StepResult(outputs=outputs, action=Action.CONTINUE, pending_commands=pending_commands, command_blocks=command_blocks)
 
             self.total_sub_agents_created += 1
 
@@ -375,26 +364,27 @@ $lines.Insert(行号, "新行内容") | Set-Content -Path "文件路径" -Encodi
             context_used = self._estimate_context_tokens()
             context_total = self.config.max_output_tokens * 4
 
-            outputs.append(f"\n{'='*60}\n")
-            outputs.append(f"[子Agent #{self.total_sub_agents_created}] 深度 {self.depth + 1}/{self.max_depth}\n")
-            outputs.append(f"任务: {task[:60]}...\n")
-            outputs.append(f"上下文: {context_used}/{context_total} | 全局配额: {new_global_count}/{global_total}\n")
-            outputs.append(f"{'='*60}\n")
+            outputs.append(f"\n{'+'*60}\n")
+            outputs.append(f"## [子 Agent #{self.total_sub_agents_created}]\n")
+            outputs.append(f"深度: {self.depth + 1}/{self.max_depth} | 任务: {task}\n")
+            outputs.append(f"上下文: {context_used}/{context_total} | 配额: {new_global_count}/{global_total}\n")
+            outputs.append(f"{'+'*60}\n\n")
 
-            return StepResult(outputs=outputs, action=Action.SWITCH_TO_CHILD, data=(task, new_global_count))
+            return StepResult(outputs=outputs, action=Action.SWITCH_TO_CHILD, data=(task, new_global_count), pending_commands=pending_commands, command_blocks=command_blocks)
 
         # 检查是否完成
         if self._is_completed(response):
             summary = self._extract_completion(response)
-            return StepResult(outputs=outputs, action=Action.COMPLETE, data=summary)
+            return StepResult(outputs=outputs, action=Action.COMPLETE, data=summary, pending_commands=pending_commands, command_blocks=command_blocks)
 
         # 检查是否需要等待用户输入
-        # 只有当没有标签、没有工具输出、也没有 reasoning 时才等待
-        if not self._has_action_tags(response) and not tool_outputs and not reasoning:
-            outputs.append("\n[等待用户输入]\n")
-            return StepResult(outputs=outputs, action=Action.WAIT)
+        # 只有当没有任何标签时才等待（reasoning 不影响）
+        if not self._has_action_tags(response) and not tool_outputs:
+            outputs.append(f"\n?? 等待用户输入...\n")
+            outputs.append("[等待用户输入]\n")  # 保留供 cli.py 检测
+            return StepResult(outputs=outputs, action=Action.WAIT, pending_commands=pending_commands, command_blocks=command_blocks)
 
-        return StepResult(outputs=outputs, action=Action.CONTINUE)
+        return StepResult(outputs=outputs, action=Action.CONTINUE, pending_commands=pending_commands, command_blocks=command_blocks)
 
     def on_child_completed(self, summary: str, global_count: int):
         """子Agent完成时的回调
@@ -403,16 +393,7 @@ $lines.Insert(行号, "新行内容") | Set-Content -Path "文件路径" -Encodi
             summary: 子Agent的完成摘要
             global_count: 同步全局子Agent计数
         """
-        # 打印子Agent返回的摘要
         if summary:
-            print(f"\n{'='*60}", file=sys.stderr)
-            print(f"[Agent #{self.agent_id} 深度 {self.depth}] 收到子Agent返回", file=sys.stderr)
-            print(f"{'='*60}", file=sys.stderr)
-            print(f"\n--- 子Agent 完成摘要 ---", file=sys.stderr)
-            preview = summary[:500] + "..." if len(summary) > 500 else summary
-            print(preview, file=sys.stderr)
-            print(f"\n{'='*60}\n", file=sys.stderr)
-
             # 子Agent结果是工具执行的输出，用tool角色
             self._add_message("tool", summary)
         # 同步全局计数
@@ -445,11 +426,6 @@ $lines.Insert(行号, "新行内容") | Set-Content -Path "文件路径" -Encodi
                 content += chunk.content
                 reasoning += chunk.reasoning
 
-            # 调试输出
-            if reasoning:
-                print(f"\n--- LLM REASONING ---\n{reasoning}\n--- END ---\n", file=sys.stderr)
-            print(f"\n--- LLM CONTENT ---\n{content}\n--- END ---\n", file=sys.stderr)
-
             return content, reasoning
         except Exception as e:
             raise RuntimeError(f"调用LLM失败: {e}")
@@ -467,23 +443,33 @@ $lines.Insert(行号, "新行内容") | Set-Content -Path "文件路径" -Encodi
         match = re.search(r'<completion>\s*(.+?)\s*</completion>', response, re.DOTALL)
         return match.group(1) if match else "任务完成"
 
-    def _parse_tools(self, response: str) -> Generator[str, None, None]:
-        """解析工具标签"""
+    def _parse_tools(self, response: str) -> tuple[list[str], list[str], list[str]]:
+        """解析工具标签
+
+        Returns:
+            (outputs, commands, command_blocks): 输出内容列表、待执行命令列表、命令框显示内容
+        """
+        outputs = []
+        commands = []
+        command_blocks = []
+
         # 执行PowerShell命令
         for match in re.finditer(r'<ps_call>\s*(.+?)\s*</ps_call>', response, re.DOTALL):
             command = match.group(1).strip()
             self.total_commands_executed += 1  # 解析时分配编号
 
-            yield "<confirm_required>\n"
-            yield f"[待执行命令 #{self.total_commands_executed}]\n"
-            yield f"命令: {command}\n"
-            yield "<confirm_command_end>\n"
+            # 命令框单独存储，不放入 outputs
+            block = f"\n>> [待执行命令 #{self.total_commands_executed}]\n命令: {command}\n{'━'*50}\n\n"
+            command_blocks.append(block)
+            commands.append(command)
 
         # 创建子Agent（只设置第一个，等待切换）
         for match in re.finditer(r'<create_agent>\s*(.+?)\s*</create_agent>', response, re.DOTALL):
             if not self._pending_child_task:  # 只处理第一个
                 self._pending_child_task = match.group(1).strip()
                 break
+
+        return outputs, commands, command_blocks
 
     def get_summary(self) -> dict:
         """获取执行摘要"""
@@ -527,16 +513,19 @@ class Executor:
         self._global_subagent_total = max_depth ** 2 * 2  # 总配额
         self._global_subagent_count = 0  # 已使用的子Agent数量
 
-    def run(self, task: str) -> Generator[str, None, None]:
+        # 保存最近的 StepResult，供 cli.py 访问
+        self.last_step_result: Optional[StepResult] = None
+
+    def run(self, task: str) -> Generator[tuple[list[str], StepResult], None, None]:
         """运行任务
 
         Args:
             task: 用户任务描述
 
         Yields:
-            str: 输出片段
+            tuple[list[str], StepResult]: (输出片段列表, 执行结果)
         """
-        # 创建顶级Agent
+        # 创建顶级Agent（如果不存在）
         if not self.current_agent:
             self.current_agent = SimpleAgent(
                 config=self.config,
@@ -545,18 +534,21 @@ class Executor:
                 global_subagent_count=self._global_subagent_count
             )
             self.current_agent.start(task)
+        else:
+            # 复用现有 agent，添加新任务到历史
+            self.current_agent.start(task)
 
         self._is_running = True
         yield from self._execute_loop()
 
-    def resume(self, user_input: str) -> Generator[str, None, None]:
+    def resume(self, user_input: str) -> Generator[tuple[list[str], StepResult], None, None]:
         """恢复执行（用户输入后）
 
         Args:
             user_input: 用户输入内容
 
         Yields:
-            str: 输出片段
+            tuple[list[str], StepResult]: (输出片段列表, 执行结果)
         """
         if not self.current_agent:
             return
@@ -565,28 +557,24 @@ class Executor:
         self._is_running = True
         yield from self._execute_loop()
 
-    def _execute_loop(self) -> Generator[str, None, None]:
+    def _execute_loop(self) -> Generator[tuple[list[str], StepResult], None, None]:
         """执行循环（内部方法）
 
         Yields:
-            str: 输出片段
+            tuple[list[str], StepResult]: (输出片段列表, 执行结果)
         """
         while self.current_agent and self._is_running:
             result = self.current_agent.step()
 
-            for output in result.outputs:
-                yield output
+            # 保存 StepResult 供 cli.py 访问
+            self.last_step_result = result
+
+            # 一次性返回所有输出和结果，让 cli.py 先显示完输出再处理命令
+            yield (result.outputs, result)
 
             if result.action == Action.SWITCH_TO_CHILD:
                 child_task, new_global_count = result.data
                 self.context_stack.append(self.current_agent)
-
-                # 打印切换日志
-                print(f"\n{'='*60}", file=sys.stderr)
-                print(f"[Agent #{self.current_agent.agent_id} 深度 {self.current_agent.depth}] 创建子Agent", file=sys.stderr)
-                print(f"{'='*60}", file=sys.stderr)
-                print(f"任务: {child_task[:100]}{'...' if len(child_task) > 100 else ''}", file=sys.stderr)
-                print(f"{'='*60}\n", file=sys.stderr)
 
                 self.current_agent = SimpleAgent(
                     config=self.config,
@@ -604,15 +592,18 @@ class Executor:
                     parent.on_child_completed(result.data or "", parent_global_count)
                     self.current_agent = parent
                 else:
-                    yield "\n" + "="*60 + "\n"
-                    yield "[最终结果]\n"
-                    yield result.data + "\n"
+                    # 根 agent 完成后，保留 current_agent 状态，等待下一个任务
+                    final_outputs = [
+                        f"\n{'='*50}\n",
+                        f"[任务完成]\n",
+                        f"{'='*50}\n",
+                        f"{result.data}\n"
+                    ]
                     agent_summary = self.current_agent.get_summary()
-                    yield f"执行命令: {agent_summary['commands']}\n"
-                    yield f"创建子Agent: {agent_summary['sub_agents']}\n"
-                    yield "="*60 + "\n"
+                    final_outputs.append(f"执行命令: {agent_summary['commands']} | 创建子Agent: {agent_summary['sub_agents']}\n\n")
+                    yield (final_outputs, result)
                     self._is_running = False
-                    break
+                    # 不 break，保留 current_agent 供下一个任务使用
 
             elif result.action == Action.WAIT:
                 self._is_running = False

@@ -192,6 +192,7 @@ def main():
         return
 
     # 交互模式
+    executor = Executor(config)  # 保持 Executor 实例，保留上下文
     while True:
         try:
             _clear_input_buffer()
@@ -208,7 +209,7 @@ def main():
                 print_help()
                 continue
 
-            _run_single_task(config, task)
+            _run_single_task(config, task, executor)
 
         except KeyboardInterrupt:
             console.print("\n\n[info]任务已中断[/info]")
@@ -221,80 +222,89 @@ def main():
                 console.print(traceback.format_exc())
 
 
-def _run_single_task(config: Config, task: str):
-    """执行单个任务"""
+def _run_single_task(config: Config, task: str, executor: 'Executor' = None):
+    """执行单个任务
+
+    Args:
+        config: 配置对象
+        task: 任务描述
+        executor: 可选的现有 Executor（用于交互模式保留上下文）
+    """
     console.print("-" * 60)
-    start_time = time.time()
 
     # 打开日志
     log_file = None
     if os.environ.get("AGENT_LOG_FILE"):
         log_file = open(os.environ["AGENT_LOG_FILE"], "w", encoding="utf-8")
 
-    # 创建执行器
-    executor = Executor(config)
+    # 创建或复用执行器
+    if executor is None:
+        executor = Executor(config)
 
-    # 用于存储待确认的命令
-    pending_command: str | None = None
-    waiting_for_confirm = False
-    waiting_for_user_input = False  # 新增：等待用户输入标志
+    # 用于命令确认的状态
+    command_batch_id = 0  # 当前处理的命令批次ID
+    processed_count = 0  # 已处理的命令数量
+    waiting_for_user_input = False  # 等待用户输入标志
 
     # 执行任务
-    for output in executor.run(task):
-        if log_file:
-            log_file.write(output)
-            log_file.flush()
+    for outputs, result in executor.run(task):
+        # 先显示非命令框的输出
+        for output in outputs:
+            console.print(output, end="", soft_wrap=True)
 
-        # 检查是否需要用户确认
-        if "<confirm_required>" in output:
-            waiting_for_confirm = True
-            continue
-        if "<confirm_command_end>" in output and pending_command:
-            # 等待用户确认
-            _clear_input_buffer()
-            confirm = console.input("[bold yellow]执行命令[y] / 跳过[n] / 修改建议: [/bold yellow]")
-            confirm_lower = confirm.lower().strip()
+        # 逐个显示命令框并确认
+        if result and result.command_blocks:
+            # 新的命令批次
+            if id(result.command_blocks) != command_batch_id:
+                command_batch_id = id(result.command_blocks)
+                processed_count = 0
 
-            if confirm_lower == "y":
-                # 用户确认，执行命令
-                result = _execute_command(pending_command, config.timeout)
+            while processed_count < len(result.command_blocks):
+                # 显示当前命令框
+                console.print(result.command_blocks[processed_count], end="")
 
-                # 构建明确的结果消息
-                if result.returncode == 0:
-                    if result.stdout:
-                        output = f"命令执行成功，输出：\n{result.stdout}"
+                # 获取对应的命令
+                command = result.pending_commands[processed_count]
+
+                # 等待用户确认
+                _clear_input_buffer()
+                confirm = console.input("[bold yellow]执行命令[y] / 跳过[n] / 修改建议: [/bold yellow]")
+                confirm_lower = confirm.lower().strip()
+
+                if confirm_lower == "y":
+                    # 用户确认，执行命令
+                    cmd_result = _execute_command(command, executor.config.timeout)
+
+                    # 构建明确的结果消息
+                    if cmd_result.returncode == 0:
+                        if cmd_result.stdout:
+                            result_msg = f"命令执行成功，输出：\n{cmd_result.stdout}"
+                        else:
+                            result_msg = "命令执行成功（无输出）"
                     else:
-                        output = "命令执行成功（无输出）"
+                        result_msg = f"命令执行失败（退出码: {cmd_result.returncode}）：\n{cmd_result.stderr}"
+
+                    console.print(f"\n[info]{result_msg}[/info]\n")
+
+                    if executor.current_agent:
+                        executor.current_agent._add_message("tool", f'<ps_call_result id="executed">\n{result_msg}\n</ps_call_result>')
+
+                elif confirm_lower == "n":
+                    console.print("[info]命令已跳过[/info]\n")
+                    # 发送跳过消息给当前Agent
+                    if executor.current_agent:
+                        executor.current_agent._add_message("user", f'<ps_call_result id="skip">\n命令已跳过\n</ps_call_result>')
                 else:
-                    output = f"命令执行失败（退出码: {result.returncode}）：\n{result.stderr}"
+                    # 用户输入修改建议
+                    console.print("[info]已将您的建议发送给 Agent[/info]\n")
+                    if executor.current_agent:
+                        executor.current_agent._add_message("user", f'<ps_call_result id="rejected">\n用户建议：{confirm}\n</ps_call_result>')
 
-                if executor.current_agent:
-                    executor.current_agent._add_message("tool", f'<ps_call_result id="executed">\n{output}\n</ps_call_result>')
+                processed_count += 1
 
-            elif confirm_lower == "n":
-                console.print("[info]命令已跳过[/info]\n")
-                # 发送跳过消息给当前Agent
-                if executor.current_agent:
-                    executor.current_agent._add_message("user", f'<ps_call_result id="skip">\n命令已跳过\n</ps_call_result>')
-            else:
-                # 用户输入修改建议
-                console.print("[info]已将您的建议发送给 Agent[/info]\n")
-                if executor.current_agent:
-                    executor.current_agent._add_message("user", f'<ps_call_result id="rejected">\n用户建议：{confirm}\n</ps_call_result>')
-
-            pending_command = None
-            waiting_for_confirm = False
-            continue
-
-        # 提取命令内容（用于确认）
-        if waiting_for_confirm and "命令: " in output:
-            pending_command = output.split("命令: ")[1].strip()
-
-        # 检查是否需要用户输入
-        if "[等待用户输入]" in output:
+        # 检查是否需要等待用户输入
+        if any("[等待用户输入]" in output for output in outputs):
             waiting_for_user_input = True
-
-        console.print(output, end="", soft_wrap=True)
 
     # 如果等待用户输入，继续循环
     while waiting_for_user_input and executor.current_agent:
@@ -332,61 +342,56 @@ def _run_single_task(config: Config, task: str):
             console.print("[warning]空输入，跳过[/warning]\n")
             continue
 
-        if log_file:
-            log_file.write(f"\n[用户输入]\n{user_input}\n")
-            log_file.flush()
-
         # 继续执行
         waiting_for_user_input = False
-        for output in executor.resume(user_input):
-            if log_file:
-                log_file.write(output)
-                log_file.flush()
+        for outputs, result in executor.resume(user_input):
+            # 先显示非命令框的输出
+            for output in outputs:
+                console.print(output, end="", soft_wrap=True)
 
-            # 同样的确认逻辑
-            if "<confirm_required>" in output:
-                waiting_for_confirm = True
-                continue
-            if "<confirm_command_end>" in output and pending_command:
-                _clear_input_buffer()
-                confirm = console.input("[bold yellow]执行命令[y] / 跳过[n] / 修改建议: [/bold yellow]")
-                confirm_lower = confirm.lower().strip()
+            # 逐个显示命令框并确认
+            if result and result.command_blocks:
+                # 新的命令批次
+                if id(result.command_blocks) != command_batch_id:
+                    command_batch_id = id(result.command_blocks)
+                    processed_count = 0
 
-                if confirm_lower == "y":
-                    result = _execute_command(pending_command, config.timeout)
-                    if result.returncode == 0:
-                        if result.stdout:
-                            output = f"命令执行成功，输出：\n{result.stdout}"
+                while processed_count < len(result.command_blocks):
+                    # 显示当前命令框
+                    console.print(result.command_blocks[processed_count], end="")
+
+                    # 获取对应的命令
+                    command = result.pending_commands[processed_count]
+                    _clear_input_buffer()
+                    confirm = console.input("[bold yellow]执行命令[y] / 跳过[n] / 修改建议: [/bold yellow]")
+                    confirm_lower = confirm.lower().strip()
+
+                    if confirm_lower == "y":
+                        cmd_result = _execute_command(command, executor.config.timeout)
+                        if cmd_result.returncode == 0:
+                            if cmd_result.stdout:
+                                result_msg = f"命令执行成功，输出：\n{cmd_result.stdout}"
+                            else:
+                                result_msg = "命令执行成功（无输出）"
                         else:
-                            output = "命令执行成功（无输出）"
+                            result_msg = f"命令执行失败（退出码: {cmd_result.returncode}）：\n{cmd_result.stderr}"
+                        console.print(f"\n[info]{result_msg}[/info]\n")
+                        if executor.current_agent:
+                            executor.current_agent._add_message("tool", f'<ps_call_result id="executed">\n{result_msg}\n</ps_call_result>')
+
+                    elif confirm_lower == "n":
+                        console.print("[info]命令已跳过[/info]\n")
+                        if executor.current_agent:
+                            executor.current_agent._add_message("user", f'<ps_call_result id="skip">\n命令已跳过\n</ps_call_result>')
                     else:
-                        output = f"命令执行失败（退出码: {result.returncode}）：\n{result.stderr}"
-                    if executor.current_agent:
-                        executor.current_agent._add_message("user", f'<ps_call_result id="executed">\n{output}\n</ps_call_result>')
+                        console.print("[info]已将您的建议发送给 Agent[/info]\n")
+                        if executor.current_agent:
+                            executor.current_agent._add_message("user", f'<ps_call_result id="rejected">\n用户建议：{confirm}\n</ps_call_result>')
 
-                elif confirm_lower == "n":
-                    console.print("[info]命令已跳过[/info]\n")
-                    if executor.current_agent:
-                        executor.current_agent._add_message("user", f'<ps_call_result id="skip">\n命令已跳过\n</ps_call_result>')
-                else:
-                    console.print("[info]已将您的建议发送给 Agent[/info]\n")
-                    if executor.current_agent:
-                        executor.current_agent._add_message("user", f'<ps_call_result id="rejected">\n用户建议：{confirm}\n</ps_call_result>')
+                    processed_count += 1
 
-                pending_command = None
-                waiting_for_confirm = False
-                continue
-
-            if waiting_for_confirm and "命令: " in output:
-                pending_command = output.split("命令: ")[1].strip()
-
-            if "[等待用户输入]" in output:
+            if any("[等待用户输入]" in output for output in outputs):
                 waiting_for_user_input = True
-
-            console.print(output, end="", soft_wrap=True)
-
-    if log_file:
-        log_file.close()
 
     console.print("-" * 60)
 
