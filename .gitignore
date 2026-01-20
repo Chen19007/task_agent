@@ -132,3 +132,51 @@ nul
 
 # Session data and AI assistant configuration (user-specific)
 .claude/
+
+# ========================================
+# Additional Language Patterns (from Agent Update)
+# ========================================
+
+# Go
+*.test
+*.out
+go.work
+
+# Rust
+/target/
+
+# Godot Engine
+.godot/
+.import/
+*.import
+*.tmp
+*.tmp.*
+export.cfg
+export_presets.cfg
+*.translation
+
+# ========================================
+# Additional Development Tools
+# ========================================
+.ipynb_checkpoints/
+docs/_build/
+.pyre/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# ========================================
+# Security: Never Commit Secrets
+# ========================================
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.cert
+credentials.json
+secrets.yaml
+*.sqlite
+*.sqlite3
+db.sqlite
+db.sqlite3-journal

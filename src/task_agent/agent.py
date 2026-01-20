@@ -33,6 +33,14 @@ class StepResult:
 
 
 @dataclass
+class ChildTaskRequest:
+    """子任务请求"""
+    task: str  # 任务描述
+    global_count: int  # 全局子 agent 计数
+    agent_name: Optional[str] = None  # 预定义 agent 名称（如果有）
+
+
+@dataclass
 class Message:
     """消息记录"""
     role: str  # system, user, assistant
@@ -81,8 +89,8 @@ class SimpleAgent:
         # 初始化系统消息
         self._init_system_prompt()
 
-        # 待执行的子Agent任务（step()返回时携带）
-        self._pending_child_task: Optional[str] = None
+        # 待执行的子Agent任务请求（step()返回时携带）
+        self._pending_child_request: Optional[ChildTaskRequest] = None
 
     def _init_system_prompt(self):
         """初始化系统提示词"""
@@ -112,10 +120,14 @@ class SimpleAgent:
 - 剩余可用: {context_remaining} tokens
 """
 
+        predefined_agents = self._load_predefined_agent_metadata()
+        predefined_section = self._format_predefined_agent_section(predefined_agents)
+
         # 基础系统提示词（所有Agent共有的核心规则）
         base_system_prompt = f"""你是一个任务执行agent，负责完成用户任务。
 
 {tree_info}
+{predefined_section}
 **重要说明：**
 - 每个 Agent 都有独立的 4k token 上下文窗口
 - 子 Agent 不会消耗父 Agent 的上下文
@@ -192,12 +204,18 @@ $lines.Insert(行号, "新行内容") | Set-Content -Path "文件路径" -Encodi
 - 路径用双引号括起来，包含空格也没问题
 
 **2. 子Agent - 任务拆分（推荐）：**
+
+**普通子任务：**
 <create_agent> 子任务描述 </create_agent>
+
+**预定义子任务（如果有对应 agent）：**
+<create_agent name=agent_name> 任务描述 </create_agent>
 
 **说明：**
 - 每个子Agent是独立的任务分支，有独立的上下文窗口
 - 整个任务最多创建 32 个子任务（全局配额），请合理分配
 - 子Agent完成后会返回摘要，供当前Agent继续决策
+- 预定义子Agent会加载详细的工作流程指令，适合复杂标准化任务
 
 **3. 提问等待用户输入：**
 
@@ -286,6 +304,98 @@ $lines.Insert(行号, "新行内容") | Set-Content -Path "文件路径" -Encodi
 
         self.history.append(Message(role="system", content=base_system_prompt))
 
+    def _load_predefined_agent_metadata(self) -> list[dict[str, str]]:
+        agents_dir = self._get_project_agents_dir()
+        if not agents_dir:
+            return []
+        agents: list[dict[str, str]] = []
+        for filename in sorted(os.listdir(agents_dir)):
+            if not filename.lower().endswith(".md"):
+                continue
+            path = os.path.join(agents_dir, filename)
+            try:
+                with open(path, "r", encoding="utf-8") as handle:
+                    text = handle.read()
+            except (OSError, UnicodeDecodeError):
+                continue
+            metadata = self._parse_agent_frontmatter(text)
+            if "name" not in metadata:
+                metadata["name"] = os.path.splitext(filename)[0]
+            metadata["file"] = filename
+            agents.append(metadata)
+        return agents
+
+    def _get_project_agents_dir(self) -> str:
+        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        agents_dir = os.path.join(project_root, "agents")
+        return agents_dir if os.path.isdir(agents_dir) else ""
+
+    def _parse_agent_frontmatter(self, text: str) -> dict[str, str]:
+        lines = text.splitlines()
+        if not lines or lines[0].strip() != "---":
+            return {}
+        end_index = None
+        for idx in range(1, len(lines)):
+            if lines[idx].strip() == "---":
+                end_index = idx
+                break
+        if end_index is None:
+            return {}
+        metadata: dict[str, str] = {}
+        for line in lines[1:end_index]:
+            if ":" not in line:
+                continue
+            key, value = line.split(":", 1)
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key:
+                metadata[key] = value
+        return metadata
+
+    def _format_predefined_agent_section(self, agents: list[dict[str, str]]) -> str:
+        header = "**预定义子Agent（从 ./agents 读取）**"
+        usage = "调用方式：<create_agent name=agent_name> 任务描述 </create_agent>"
+        if not agents:
+            return f"{header}\n- 当前目录未发现预定义子Agent\n"
+        lines = [header, usage, "可用列表："]
+        for agent in agents:
+            name = agent.get("name", "unknown")
+            description = agent.get("description", "无描述")
+            lines.append(f"- {name}: {description}")
+        return "\n".join(lines) + "\n"
+
+    def _load_agent_full_content(self, agent_name: str) -> Optional[str]:
+        """加载预定义 agent 的完整 markdown 内容（去除 frontmatter）
+
+        Args:
+            agent_name: agent 名称（如 'git-commit'）
+
+        Returns:
+            markdown 正文内容，如果文件不存在则返回 None
+        """
+        agents_dir = self._get_project_agents_dir()
+        if not agents_dir:
+            return None
+
+        # 查找匹配的文件（支持 git-commit.md 或 git_commit.md）
+        for filename in os.listdir(agents_dir):
+            base_name = os.path.splitext(filename)[0].replace('_', '-')
+            if base_name.lower() == agent_name.lower().replace('_', '-'):
+                path = os.path.join(agents_dir, filename)
+                try:
+                    with open(path, "r", encoding="utf-8") as handle:
+                        text = handle.read()
+                    # 去除 YAML frontmatter
+                    lines = text.splitlines()
+                    if lines and lines[0].strip() == "---":
+                        for idx in range(1, len(lines)):
+                            if lines[idx].strip() == "---":
+                                return "\n".join(lines[idx+1:]).strip()
+                    return text.strip()
+                except (OSError, UnicodeDecodeError):
+                    return None
+        return None
+
     def start(self, task: str):
         """开始执行任务（初始化）
 
@@ -326,9 +436,16 @@ $lines.Insert(行号, "新行内容") | Set-Content -Path "文件路径" -Encodi
         outputs.extend(tool_outputs)
 
         # 检查是否需要切换到子Agent
-        if self._pending_child_task:
-            task = self._pending_child_task
-            self._pending_child_task = None
+        if self._pending_child_request:
+            request = self._pending_child_request
+            self._pending_child_request = None
+
+            # 设置正确的 global_count
+            request.global_count = self._global_subagent_count + 1
+
+            task = request.task
+            agent_name = request.agent_name or ""
+            new_global_count = request.global_count
 
             # 检查深度限制
             if self.depth >= self.max_depth:
@@ -357,20 +474,19 @@ $lines.Insert(行号, "新行内容") | Set-Content -Path "文件路径" -Encodi
 
             self.total_sub_agents_created += 1
 
-            # 累加全局计数并传递给子Agent
-            new_global_count = self._global_subagent_count + 1
-
             # 获取元数据用于显示
             context_used = self._estimate_context_tokens()
             context_total = self.config.num_ctx
 
             outputs.append(f"\n{'+'*60}\n")
             outputs.append(f"## [子 Agent #{self.total_sub_agents_created}]\n")
-            outputs.append(f"深度: {self.depth + 1}/{self.max_depth} | 任务: {task}\n")
+            agent_info = f" [{agent_name}]" if agent_name else ""
+            outputs.append(f"深度: {self.depth + 1}/{self.max_depth}{agent_info} | 任务: {task}\n")
             outputs.append(f"上下文: {context_used}/{context_total} | 配额: {new_global_count}/{global_total}\n")
             outputs.append(f"{'+'*60}\n\n")
 
-            return StepResult(outputs=outputs, action=Action.SWITCH_TO_CHILD, data=(task, new_global_count), pending_commands=pending_commands, command_blocks=command_blocks)
+            # 返回 ChildTaskRequest 对象
+            return StepResult(outputs=outputs, action=Action.SWITCH_TO_CHILD, data=request, pending_commands=pending_commands, command_blocks=command_blocks)
 
         # 检查是否完成
         if self._is_completed(response):
@@ -463,10 +579,19 @@ $lines.Insert(行号, "新行内容") | Set-Content -Path "文件路径" -Encodi
             command_blocks.append(block)
             commands.append(command)
 
-        # 创建子Agent（只设置第一个，等待切换）
-        for match in re.finditer(r'<create_agent>\s*(.+?)\s*</create_agent>', response, re.DOTALL):
-            if not self._pending_child_task:  # 只处理第一个
-                self._pending_child_task = match.group(1).strip()
+        # 创建子Agent（解析 name 属性）
+        # 支持格式：<create_agent name=xxx>任务</create_agent> 或 <create_agent>任务</create_agent>
+        for match in re.finditer(r'<create_agent(?:\s+name=(\S+?))?\s*>(.+?)</create_agent>', response, re.DOTALL):
+            if not self._pending_child_request:  # 只处理第一个
+                agent_name = match.group(1)  # name 属性值（如果有）
+                task_content = match.group(2).strip()
+                # 创建 ChildTaskRequest 对象
+                # 注意：global_count 和 new_global_count 在 step() 中设置
+                self._pending_child_request = ChildTaskRequest(
+                    task=task_content,
+                    global_count=0,  # 会在 step() 中更新
+                    agent_name=agent_name
+                )
                 break
 
         return outputs, commands, command_blocks
@@ -573,16 +698,29 @@ class Executor:
             yield (result.outputs, result)
 
             if result.action == Action.SWITCH_TO_CHILD:
-                child_task, new_global_count = result.data
+                # result.data 现在是 ChildTaskRequest 对象
+                request: ChildTaskRequest = result.data
                 self.context_stack.append(self.current_agent)
 
                 self.current_agent = SimpleAgent(
                     config=self.config,
                     depth=self.current_agent.depth + 1,
                     max_depth=self.max_depth,
-                    global_subagent_count=new_global_count
+                    global_subagent_count=request.global_count
                 )
-                self.current_agent.start(child_task)
+
+                # 如果有预定义 agent，加载内容并注入到第一条消息
+                if request.agent_name:
+                    predefined_content = self.current_agent._load_agent_full_content(request.agent_name)
+                    if predefined_content:
+                        # 将预定义内容和用户任务组合
+                        combined_task = f"[预定义 Agent: {request.agent_name}]\n\n{predefined_content}\n\n---\n\n用户任务: {request.task}"
+                        self.current_agent.start(combined_task)
+                    else:
+                        # agent_name 存在但文件未找到，按普通任务处理
+                        self.current_agent.start(request.task)
+                else:
+                    self.current_agent.start(request.task)
 
             elif result.action == Action.COMPLETE:
                 if self.context_stack:

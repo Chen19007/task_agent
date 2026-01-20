@@ -415,8 +415,12 @@ def _execute_command(command: str, timeout: int):
     import subprocess
     import base64
 
+    # 设置 PowerShell 输出编码为 UTF-8，避免中文乱码
+    # Windows 中文系统默认输出是 GBK (CP936)，需要显式设置
+    prefixed_command = f'[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; {command}'
+
     # 使用 UTF-16 LE 编码并 Base64 编码命令，避免引号转义问题
-    encoded_command = base64.b64encode(command.encode('utf-16-le')).decode('ascii')
+    encoded_command = base64.b64encode(prefixed_command.encode('utf-16-le')).decode('ascii')
     full_cmd = f'powershell -NoProfile -EncodedCommand {encoded_command}'
 
     process = subprocess.run(
