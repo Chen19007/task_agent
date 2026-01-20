@@ -61,7 +61,8 @@ class SimpleAgent:
 
     def __init__(self, config: Optional[Config] = None,
                  depth: int = 0, max_depth: int = 4,
-                 global_subagent_count: int = 0):
+                 global_subagent_count: int = 0,
+                 agent_name: Optional[str] = None):
         """初始化 Agent
 
         Args:
@@ -69,6 +70,7 @@ class SimpleAgent:
             depth: 当前深度（0=顶级）
             max_depth: 最大允许深度（默认4层）
             global_subagent_count: 全局已使用的子Agent数量（累加计数）
+            agent_name: 当前 agent 名称（用于过滤 forbidden_agents）
         """
         self.config = config or Config.from_env()
         self.history: list[Message] = []
@@ -78,6 +80,7 @@ class SimpleAgent:
         self.agent_id = str(uuid.uuid4())[:8]
         self.depth = depth
         self.max_depth = max_depth
+        self.agent_name = agent_name  # 当前 agent 名称
 
         # 统计
         self.total_sub_agents_created = 0
@@ -151,43 +154,6 @@ class SimpleAgent:
 ✅ 合法示例：
 <ps_call> Get-ChildItem </ps_call>
 <ps_call> Get-Process | Where-Object {{$_.CPU -gt 10}} </ps_call>
-
-**【文件操作规则】**
-
-**【强制规则】文件修改必须使用 file-edit 子 agent**
-- ❌ 禁止：直接使用 `<ps_call>` 修改文件内容（追加/插入/替换/创建）
-- ✅ 正确：使用 `<create_agent name=file-edit>任务描述</create_agent>`
-- ✅ 允许：直接使用 `<ps_call> Get-Content` 读取文件内容
-
-**读取文件内容（允许直接使用）：**
-<ps_call> Get-Content -Path "文件路径" -Encoding UTF8 </ps_call>
-<ps_call> Get-Content -Path "文件路径" -Raw -Encoding UTF8 </ps_call>  # 一次性读取全部（推荐大文件）
-
-**查看文件是否存在：**
-<ps_call> Test-Path -Path "文件路径" </ps_call>
-
-**获取文件大小/信息：**
-<ps_call> Get-Item "文件路径" | Select-Object Name, Length, LastWriteTime </ps_call>
-
-**查看文件前 N 行：**
-<ps_call> Get-Content -Path "文件路径" -TotalCount 10 -Encoding UTF8 </ps_call>
-
-**查看文件后 N 行：**
-<ps_call> Get-Content -Path "文件路径" -Tail 10 -Encoding UTF8 </ps_call>
-
-**搜索文件内容：**
-<ps_call> Select-String -Path "文件路径" -Pattern "搜索内容" </ps_call>
-
-**删除文件（谨慎使用）：**
-<ps_call> Remove-Item -Path "文件路径" -Force </ps_call>
-
-**创建目录：**
-<ps_call> New-Item -Path "目录路径" -ItemType Directory -Force </ps_call>
-
-⚠️ **重要提示**：
-- 大文件用 `-Raw` 一次性读取
-- 修改文件内容请使用 `<create_agent name=file-edit>`
-- 路径用双引号括起来，包含空格也没问题
 
 **2. 子Agent - 任务拆分（推荐）：**
 
@@ -317,6 +283,7 @@ class SimpleAgent:
         return agents_dir if os.path.isdir(agents_dir) else ""
 
     def _parse_agent_frontmatter(self, text: str) -> dict[str, str]:
+        """解析 YAML frontmatter，支持多行值（使用 | 语法）"""
         lines = text.splitlines()
         if not lines or lines[0].strip() != "---":
             return {}
@@ -328,27 +295,105 @@ class SimpleAgent:
         if end_index is None:
             return {}
         metadata: dict[str, str] = {}
-        for line in lines[1:end_index]:
-            if ":" not in line:
+        i = 1
+        while i < end_index:
+            line = lines[i]
+            # 跳过空行
+            if not line.strip():
+                i += 1
                 continue
-            key, value = line.split(":", 1)
-            key = key.strip()
-            value = value.strip().strip('"').strip("'")
-            if key:
-                metadata[key] = value
+            # 检查是否是键值对
+            if ":" in line:
+                key, value = line.split(":", 1)
+                key = key.strip()
+                value = value.rstrip()
+                # 检查是否是多行值标记
+                if value.strip() == "|":
+                    # 收集后续行作为值（直到下一个键或 ---）
+                    i += 1
+                    multiline_lines = []
+                    while i < end_index:
+                        next_line = lines[i]
+                        # 如果是下一个键（非空行且以非空格开头），停止
+                        if next_line.strip() and not next_line.startswith(" "):
+                            break
+                        # 添加这一行（保留缩进）
+                        multiline_lines.append(next_line)
+                        i += 1
+                    metadata[key] = "\n".join(multiline_lines).strip()
+                    continue
+                else:
+                    # 单行值
+                    value = value.strip().strip('"').strip("'")
+                    if key:
+                        metadata[key] = value
+            i += 1
         return metadata
 
     def _format_predefined_agent_section(self, agents: list[dict[str, str]]) -> str:
-        header = "**预定义子Agent（从 ./agents 读取）**"
-        usage = "调用方式：<create_agent name=agent_name> 任务描述 </create_agent>"
-        if not agents:
-            return f"{header}\n- 当前目录未发现预定义子Agent\n"
-        lines = [header, usage, "可用列表："]
+        """格式化预定义 agent 部分，注入 system_prompt_injection
+
+        遍历所有预定义 agent，检查当前 agent_name 是否在各自的 forbidden_agents 中，
+        如果不在，则收集该 agent 的 system_prompt_injection，最后返回拼接后的注入内容。
+        """
+        # 收集不在 forbidden 中的 system_prompt_injection
+        injections = []
         for agent in agents:
-            name = agent.get("name", "unknown")
-            description = agent.get("description", "无描述")
-            lines.append(f"- {name}: {description}")
-        return "\n".join(lines) + "\n"
+            agent_name = agent.get("name", "")
+            # 解析该 agent 的 forbidden_agents
+            forbidden_str = agent.get("forbidden_agents", "")
+            forbidden_list = []
+            if forbidden_str:
+                # 解析 YAML 列表格式: [a, b, c]
+                forbidden_str = forbidden_str.strip()
+                if forbidden_str.startswith("[") and forbidden_str.endswith("]"):
+                    items = forbidden_str[1:-1].split(",")
+                    forbidden_list = [item.strip().strip("'").strip('"') for item in items if item.strip()]
+                else:
+                    # 单个值
+                    forbidden_list = [forbidden_str.strip().strip(chr(39)).strip(chr(34))]
+
+            # 检查当前 agent_name 是否在该 agent 的 forbidden_agents 中
+            # 如果不在，注入该 agent 的 system_prompt_injection
+            if self.agent_name not in forbidden_list:
+                injection = agent.get("system_prompt_injection", "")
+                if injection:
+                    injections.append(injection)
+
+        # 返回拼接后的注入内容（如果有的话）
+        if injections:
+            return "\n\n".join(injections) + "\n"
+
+        # 如果没有注入内容，返回空字符串
+        return ""
+
+    def _get_agent_forbidden_agents(self, agent_name: str) -> list[str]:
+        """获取指定 agent 的 forbidden_agents 列表"""
+        agents_dir = self._get_project_agents_dir()
+        if not agents_dir:
+            return []
+
+        for filename in os.listdir(agents_dir):
+            base_name = os.path.splitext(filename)[0].replace('_', '-')
+            if base_name.lower() == agent_name.lower().replace('_', '-'):
+                path = os.path.join(agents_dir, filename)
+                try:
+                    with open(path, "r", encoding="utf-8") as handle:
+                        text = handle.read()
+                    metadata = self._parse_agent_frontmatter(text)
+                    # 解析 forbidden_agents 列表
+                    forbidden_str = metadata.get("forbidden_agents", "")
+                    if not forbidden_str:
+                        return []
+                    # 解析 YAML 列表格式: [a, b, c]
+                    forbidden_str = forbidden_str.strip()
+                    if forbidden_str.startswith("[") and forbidden_str.endswith("]"):
+                        items = forbidden_str[1:-1].split(",")
+                        return [item.strip().strip("'").strip('"') for item in items if item.strip()]
+                    return [forbidden_str.strip().strip("'").strip('"')]
+                except (OSError, UnicodeDecodeError):
+                    return []
+        return []
 
     def _load_agent_full_content(self, agent_name: str) -> Optional[str]:
         """加载预定义 agent 的完整 markdown 内容（去除 frontmatter）
@@ -687,24 +732,26 @@ class Executor:
                 request: ChildTaskRequest = result.data
                 self.context_stack.append(self.current_agent)
 
+                # 如果有预定义 agent，加载内容并注入到第一条消息
+                predefined_content = None
+                if request.agent_name:
+                    predefined_content = self.current_agent._load_agent_full_content(request.agent_name)
+
+                # 创建子 agent，传递 agent_name 用于 forbidden_agents 过滤
                 self.current_agent = SimpleAgent(
                     config=self.config,
                     depth=self.current_agent.depth + 1,
                     max_depth=self.max_depth,
-                    global_subagent_count=request.global_count
+                    global_subagent_count=request.global_count,
+                    agent_name=request.agent_name or ""
                 )
 
-                # 如果有预定义 agent，加载内容并注入到第一条消息
-                if request.agent_name:
-                    predefined_content = self.current_agent._load_agent_full_content(request.agent_name)
-                    if predefined_content:
-                        # 将预定义内容和用户任务组合
-                        combined_task = f"[预定义 Agent: {request.agent_name}]\n\n{predefined_content}\n\n---\n\n用户任务: {request.task}"
-                        self.current_agent.start(combined_task)
-                    else:
-                        # agent_name 存在但文件未找到，按普通任务处理
-                        self.current_agent.start(request.task)
+                if predefined_content:
+                    # 将预定义内容和用户任务组合
+                    combined_task = f"[预定义 Agent: {request.agent_name}]\n\n{predefined_content}\n\n---\n\n用户任务: {request.task}"
+                    self.current_agent.start(combined_task)
                 else:
+                    # 如果没有预定义内容，按普通任务处理
                     self.current_agent.start(request.task)
 
             elif result.action == Action.COMPLETE:
