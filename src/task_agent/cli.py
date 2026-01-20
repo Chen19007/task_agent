@@ -6,6 +6,7 @@ import sys
 import time
 
 from rich.console import Console
+from rich.markup import escape as rich_escape
 from rich.panel import Panel
 from rich.text import Text
 from rich.theme import Theme
@@ -348,7 +349,7 @@ def main():
             break
 
         except Exception as e:
-            console.print(f"\n[error]错误：{str(e)}[/error]")
+            console.print(f"\n[error]错误：{rich_escape(str(e))}[/error]")
             if args.verbose:
                 import traceback
                 console.print(traceback.format_exc())
