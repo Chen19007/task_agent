@@ -13,6 +13,7 @@ from rich.theme import Theme
 from .agent import Executor
 from .config import Config
 from .llm import create_client
+from .session import SessionManager
 
 # 自定义主题
 custom_theme = Theme(
@@ -122,9 +123,12 @@ def print_help():
                 """[bold cyan]命令列表[/bold cyan]
 
 [bold yellow]交互模式命令：[/bold yellow]
-  help, h      - 显示此帮助信息
-  q, quit, exit - 退出程序
-  <任务描述>    - 执行指定任务
+  help, h       - 显示此帮助信息
+  q, quit, exit - 退出程序（会自动保存当前会话）
+  /list         - 列出所有保存的会话
+  /new          - 创建新会话（自动保存当前会话）
+  /resume <id>  - 恢复指定ID的会话
+  <任务描述>     - 执行指定任务
 
 [bold yellow]命令行参数：[/bold yellow]
   -m, --model   - 指定模型名称（默认：qwen3:4b）
@@ -148,7 +152,12 @@ def print_help():
   - 最大支持4层深度（最多16个子Agent）
   - 使用 <ps_call> 执行命令
   - 使用 <create_agent> 创建子Agent
-  - 使用 <completion> 标记任务完成""",
+  - 使用 <completion> 标记任务完成
+
+[bold yellow]会话管理：[/bold yellow]
+  - 每次执行任务后自动保存当前会话
+  - 退出程序时自动保存当前会话
+  - 会话存储在 sessions/ 目录""",
                 justify="left",
                 style="white",
             ),
@@ -206,9 +215,20 @@ def main():
         return
 
     # 交互模式
+    session_manager = SessionManager()
     executor = Executor(config)  # 保持 Executor 实例，保留上下文
+
     while True:
         try:
+            # 检查是否有待切换的executor（从等待输入循环中的会话操作）
+            pending = session_manager.get_pending_executor()
+            if pending:
+                executor = pending
+                if session_manager.current_session_id:
+                    console.print(f"\n[dim]已切换到会话: {session_manager.current_session_id}[/dim]\n")
+                else:
+                    console.print(f"\n[dim]当前会话：临时（未保存）[/dim]\n")
+
             _clear_input_buffer()
             task = console.input("[user]请输入任务（q退出）：[/user]")
 
@@ -223,7 +243,92 @@ def main():
                 print_help()
                 continue
 
-            _run_single_task(config, task, executor)
+            # 处理会话管理命令
+            if task.startswith("/"):
+                if task.lower() == "/list":
+                    sessions = session_manager.list_sessions()
+                    console.print("\n[bold cyan]保存的会话：[/bold cyan]\n")
+                    if not sessions:
+                        console.print("[dim]  （暂无保存的会话）[/dim]\n")
+                    for s in sessions:
+                        msg_preview = s.get('first_message', '')
+                        if msg_preview:
+                            console.print(f"  会话 {s['session_id']} | {s['updated_at'][:19]} | 消息数: {s['message_count']} | 深度: {s['depth']} | [dim]{msg_preview}[/dim]")
+                        else:
+                            console.print(f"  会话 {s['session_id']} | {s['updated_at'][:19]} | 消息数: {s['message_count']} | 深度: {s['depth']}")
+                    console.print("")
+                    continue
+
+                if task.lower() == "/new":
+                    new_id, new_executor = session_manager.create_new_session(executor)
+                    executor = new_executor  # 更新 executor 为新的空实例
+                    console.print(f"\n[success]新会话已创建: {new_id}[/success]\n")
+                    continue
+
+                parts = task.split()
+                if len(parts) == 2 and parts[0].lower() == "/resume":
+                    try:
+                        session_id = int(parts[1])
+                        new_executor = session_manager.load_session(session_id, config)
+                        if new_executor:
+                            executor = new_executor
+                            console.print(f"\n[success]会话已恢复: {session_id}[/success]\n")
+
+                            # 显示历史上下文摘要
+                            if executor.current_agent and executor.current_agent.history:
+                                console.print("[dim]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[/dim]")
+                                console.print("[bold cyan]历史上下文：[/bold cyan]\n")
+
+                                history = executor.current_agent.history
+                                total = len(history)
+
+                                for i, msg in enumerate(history):
+                                    role = msg.role
+                                    content = msg.content.strip()
+
+                                    # 跳过系统提示词和会话ID消息
+                                    if role == "system":
+                                        if content.startswith("你是一个任务执行agent") or content.startswith("会话ID:"):
+                                            continue
+
+                                    # 最后一条消息完整显示
+                                    is_last = (i == total - 1)
+
+                                    # 格式化显示（使用原始序号 i+1）
+                                    if role == "user":
+                                        if is_last:
+                                            # 最后一条用户消息完整显示
+                                            console.print(f"[dim]{i+1}. [/dim][user]用户:[/user]")
+                                            console.print(f"{content}\n")
+                                        else:
+                                            console.print(f"[dim]{i+1}. [/dim][user]用户:[/user] {content[:100]}{'...' if len(content) > 100 else ''}")
+                                    elif role == "assistant":
+                                        if is_last:
+                                            # 最后一条助手消息完整显示
+                                            console.print(f"[dim]{i+1}. [/dim][assistant]助手:[/assistant]")
+                                            console.print(f"{content}\n")
+                                        else:
+                                            # 非最后一条只显示预览
+                                            preview = content[:50].replace('\n', ' ')
+                                            console.print(f"[dim]{i+1}. [/dim][assistant]助手:[/assistant] [dim]{preview}...[/dim]")
+                                    elif role == "tool":
+                                        console.print(f"[dim]{i+1}. [/dim][info]工具: {content[:80]}...[/info]")
+                                    elif role == "system":
+                                        # 其他 system 消息正常显示
+                                        console.print(f"[dim]{i+1}. [/dim][dim]系统: {content}[/dim]")
+
+                                console.print("[dim]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[/dim]\n")
+                                console.print(f"[info]已加载 {total} 条历史消息[/info]\n")
+                        else:
+                            console.print("\n[error]恢复失败[/error]\n")
+                    except ValueError:
+                        console.print(f"\n[error]无效的会话ID: {parts[1]}[/error]\n")
+                    continue
+
+                console.print("[error]未知命令。可用命令: /list, /new, /clear, /resume <id>[/error]\n")
+                continue
+
+            _run_single_task(config, task, executor, session_manager)
 
         except KeyboardInterrupt:
             console.print("\n\n[info]任务已中断[/info]")
@@ -236,13 +341,38 @@ def main():
                 console.print(traceback.format_exc())
 
 
-def _run_single_task(config: Config, task: str, executor: 'Executor' = None):
+def _save_session_if_needed(session_manager: 'SessionManager', executor: 'Executor'):
+    """保存会话（如果需要）
+
+    Args:
+        session_manager: 会话管理器
+        executor: 执行器
+    """
+    if not session_manager or not executor:
+        return
+
+    # 如果 executor 为空（新会话），不保存（避免创建空会话文件）
+    if not executor.current_agent:
+        return
+
+    # 首次创建会话
+    if session_manager.current_session_id is None:
+        new_id = session_manager.get_next_session_id()
+        session_manager.current_session_id = new_id
+        # 不再添加会话ID系统消息，因为没什么用
+
+    # 保存会话
+    session_manager.save_session(executor, session_manager.current_session_id)
+
+
+def _run_single_task(config: Config, task: str, executor: 'Executor' = None, session_manager: 'SessionManager' = None):
     """执行单个任务
 
     Args:
         config: 配置对象
         task: 任务描述
         executor: 可选的现有 Executor（用于交互模式保留上下文）
+        session_manager: 可选的会话管理器
     """
     console.print("-" * 60)
 
@@ -320,6 +450,9 @@ def _run_single_task(config: Config, task: str, executor: 'Executor' = None):
         if any("[等待用户输入]" in output for output in outputs):
             waiting_for_user_input = True
 
+            # 进入等待状态前保存会话
+            _save_session_if_needed(session_manager, executor)
+
     # 如果等待用户输入，继续循环
     while waiting_for_user_input and executor.current_agent:
         console.print("\n[info]请输入内容（空行结束，q 退出）：[/info]")
@@ -334,6 +467,25 @@ def _run_single_task(config: Config, task: str, executor: 'Executor' = None):
                     console.print("[info]任务已终止[/info]")
                     waiting_for_user_input = False
                     break
+
+                # 检查是否是会话命令（在收集到完整输入前就检查）
+                if line.startswith("/"):
+                    if line.lower() == "/list":
+                        sessions = session_manager.list_sessions()
+                        console.print("\n[bold cyan]保存的会话：[/bold cyan]\n")
+                        if not sessions:
+                            console.print("[dim]  （暂无保存的会话）[/dim]\n")
+                        for s in sessions:
+                            msg_preview = s.get('first_message', '')
+                            if msg_preview:
+                                console.print(f"  会话 {s['session_id']} | {s['updated_at'][:19]} | 消息数: {s['message_count']} | 深度: {s['depth']} | [dim]{msg_preview}[/dim]")
+                            else:
+                                console.print(f"  会话 {s['session_id']} | {s['updated_at'][:19]} | 消息数: {s['message_count']} | 深度: {s['depth']}")
+                        console.print("")
+                        continue  # 继续等待输入
+                    else:
+                        console.print("[warning]提示：在等待输入模式下，只支持 /list 命令[/warning]\n")
+                        continue  # 继续等待输入
 
                 if not line:  # 空行，结束输入
                     # 清空当前行的提示信息
@@ -355,6 +507,11 @@ def _run_single_task(config: Config, task: str, executor: 'Executor' = None):
         if not user_input:
             console.print("[warning]空输入，跳过[/warning]\n")
             continue
+
+        if user_input.lower() in ["q", "quit", "exit"]:
+            console.print("[info]输入已取消[/info]\n")
+            waiting_for_user_input = False
+            break
 
         # 继续执行
         waiting_for_user_input = False
@@ -406,6 +563,17 @@ def _run_single_task(config: Config, task: str, executor: 'Executor' = None):
 
             if any("[等待用户输入]" in output for output in outputs):
                 waiting_for_user_input = True
+
+    # 自动保存当前会话
+    # 检查是否有待切换的 executor（如果有，说明在等待输入时执行了 /clear）
+    if session_manager:
+        pending = session_manager.get_pending_executor()
+        if pending:
+            # 使用新的 executor（空的）保存，这样不会覆盖旧会话
+            _save_session_if_needed(session_manager, pending)
+        else:
+            # 使用当前的 executor 保存
+            _save_session_if_needed(session_manager, executor)
 
     console.print("-" * 60)
 
