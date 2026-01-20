@@ -485,7 +485,7 @@ class SimpleAgent:
                 outputs.append(f"\n!! [深度限制]\n")
                 outputs.append(f"已达到最大深度 {self.max_depth}，由当前Agent执行\n")
                 outputs.append(f"{'═'*50}\n\n")
-                return StepResult(outputs=outputs, action=Action.CONTINUE, pending_commands=pending_commands, command_blocks=command_blocks)
+                return StepResult(outputs=self._add_depth_prefix(outputs), action=Action.CONTINUE, pending_commands=pending_commands, command_blocks=command_blocks)
 
             # 检查本地配额限制
             if self.total_sub_agents_created >= self.max_depth ** 2:
@@ -493,7 +493,7 @@ class SimpleAgent:
                 outputs.append(f"当前Agent已用完 {self.max_depth ** 2} 个子Agent配额\n")
                 outputs.append(f"{'═'*50}\n\n")
                 self._add_message("user", f"[本地配额限制] 请直接执行任务: {task}")
-                return StepResult(outputs=outputs, action=Action.CONTINUE, pending_commands=pending_commands, command_blocks=command_blocks)
+                return StepResult(outputs=self._add_depth_prefix(outputs), action=Action.CONTINUE, pending_commands=pending_commands, command_blocks=command_blocks)
 
             # 检查全局配额限制（防止层级间循环）- 累加计数
             global_total = self.max_depth ** 2 * 2
@@ -502,7 +502,7 @@ class SimpleAgent:
                 outputs.append(f"整个任务已用完所有 {global_total} 个子Agent配额\n")
                 outputs.append(f"{'═'*50}\n\n")
                 self._add_message("user", f"[全局配额限制] 请直接执行任务: {task}")
-                return StepResult(outputs=outputs, action=Action.CONTINUE, pending_commands=pending_commands, command_blocks=command_blocks)
+                return StepResult(outputs=self._add_depth_prefix(outputs), action=Action.CONTINUE, pending_commands=pending_commands, command_blocks=command_blocks)
 
             self.total_sub_agents_created += 1
 
@@ -517,21 +517,21 @@ class SimpleAgent:
             outputs.append(f"{'+'*60}\n\n")
 
             # 返回 ChildTaskRequest 对象
-            return StepResult(outputs=outputs, action=Action.SWITCH_TO_CHILD, data=request, pending_commands=pending_commands, command_blocks=command_blocks)
+            return StepResult(outputs=self._add_depth_prefix(outputs), action=Action.SWITCH_TO_CHILD, data=request, pending_commands=pending_commands, command_blocks=command_blocks)
 
         # 检查是否完成
         if self._is_completed(response):
             summary = self._extract_completion(response)
-            return StepResult(outputs=outputs, action=Action.COMPLETE, data=summary, pending_commands=pending_commands, command_blocks=command_blocks)
+            return StepResult(outputs=self._add_depth_prefix(outputs), action=Action.COMPLETE, data=summary, pending_commands=pending_commands, command_blocks=command_blocks)
 
         # 检查是否需要等待用户输入
         # 只有当没有任何标签时才等待（reasoning 不影响）
         if not self._has_action_tags(response) and not tool_outputs:
             outputs.append(f"\n?? 等待用户输入...\n")
             outputs.append("[等待用户输入]\n")  # 保留供 cli.py 检测
-            return StepResult(outputs=outputs, action=Action.WAIT, pending_commands=pending_commands, command_blocks=command_blocks)
+            return StepResult(outputs=self._add_depth_prefix(outputs), action=Action.WAIT, pending_commands=pending_commands, command_blocks=command_blocks)
 
-        return StepResult(outputs=outputs, action=Action.CONTINUE, pending_commands=pending_commands, command_blocks=command_blocks)
+        return StepResult(outputs=self._add_depth_prefix(outputs), action=Action.CONTINUE, pending_commands=pending_commands, command_blocks=command_blocks)
 
     def on_child_completed(self, summary: str, global_count: int):
         """子Agent完成时的回调
@@ -550,6 +550,27 @@ class SimpleAgent:
         """添加消息到历史记录"""
         self.history.append(Message(role=role, content=content))
 
+    def _add_depth_prefix(self, outputs: list[str]) -> list[str]:
+        """给所有输出添加深度前缀（+号）
+
+        Args:
+            outputs: 原始输出列表
+
+        Returns:
+            添加了深度前缀的输出列表
+        """
+        prefix = "+" * self.depth + " " if self.depth > 0 else ""
+        if not prefix:
+            return outputs
+
+        result = []
+        for output in outputs:
+            # 按行分割，给每行添加前缀
+            lines = output.split('\n')
+            prefixed_lines = [prefix + line if line.strip() else line for line in lines]
+            result.append('\n'.join(prefixed_lines))
+        return result
+
     def _estimate_context_tokens(self) -> int:
         """估算当前上下文使用的 token 数
 
@@ -565,15 +586,9 @@ class SimpleAgent:
         # 使用 LLM 客户端
         client = create_client(self.config)
 
-        content = ""
-        reasoning = ""
-
         try:
-            for chunk in client.chat(messages, self.config.max_output_tokens):
-                content += chunk.content
-                reasoning += chunk.reasoning
-
-            return content, reasoning
+            response = client.chat(messages, self.config.max_output_tokens)
+            return response.content, response.reasoning
         except Exception as e:
             raise RuntimeError(f"调用LLM失败: {e}")
 
@@ -607,6 +622,12 @@ class SimpleAgent:
 
             # 命令框单独存储，不放入 outputs
             block = f"\n>> [待执行命令 #{self.total_commands_executed}]\n命令: {command}\n{'━'*50}\n\n"
+            # 添加深度前缀到命令框
+            prefix = "+" * self.depth + " " if self.depth > 0 else ""
+            if prefix:
+                lines = block.split('\n')
+                prefixed_lines = [prefix + line if line.strip() else line for line in lines]
+                block = '\n'.join(prefixed_lines)
             command_blocks.append(block)
             commands.append(command)
 
@@ -748,8 +769,8 @@ class Executor:
                 )
 
                 if predefined_content:
-                    # 将预定义内容和用户任务组合
-                    combined_task = f"[预定义 Agent: {request.agent_name}]\n\n{predefined_content}\n\n---\n\n用户任务: {request.task}"
+                    # 将预定义内容和用户任务组合（不包含 agent 名称，避免自调用）
+                    combined_task = f"{predefined_content}\n\n---\n\n用户任务: {request.task}"
                     self.current_agent.start(combined_task)
                 else:
                     # 如果没有预定义内容，按普通任务处理

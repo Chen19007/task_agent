@@ -1,26 +1,24 @@
 """OpenAI API 客户端"""
 
 import json
-import sys
-from typing import Generator
 
 import requests
 
-from .base import LLMClient, StreamChunk
+from .base import LLMClient, ChatResponse
 
 
 class OpenAIClient(LLMClient):
     """OpenAI API 客户端"""
 
-    def chat(self, messages: list, max_tokens: int) -> Generator[StreamChunk, None, None]:
-        """流式聊天
+    def chat(self, messages: list, max_tokens: int) -> ChatResponse:
+        """聊天
 
         Args:
             messages: 消息历史
             max_tokens: 最大输出 token 数
 
-        Yields:
-            StreamChunk: 流式输出块
+        Returns:
+            ChatResponse: 聊天响应
         """
         url = f"{self.config.openai_base_url}/chat/completions"
 
@@ -32,53 +30,24 @@ class OpenAIClient(LLMClient):
         payload = {
             "model": self.config.model,
             "messages": messages,
-            "stream": True,
+            "stream": False,  # 非流式
             "max_completion_tokens": max_tokens,
         }
 
         try:
-            with requests.post(url, json=payload, headers=headers, timeout=self.config.timeout, stream=True) as response:
-                response.raise_for_status()
+            response = requests.post(url, json=payload, headers=headers, timeout=self.config.timeout)
+            response.raise_for_status()
+            data = response.json()
 
-                # OpenAI 使用 SSE 格式 (data: {...}\n\n)
-                for line in response.iter_lines():
-                    if line:
-                        line = line.decode('utf-8')
+            choices = data.get("choices", [])
+            if not choices:
+                return ChatResponse(content="")
 
-                        # 跳过空行和 [DONE] 标记
-                        if not line or line.startswith(":"):
-                            continue
+            message = choices[0].get("message", {})
+            content = message.get("content", "")
+            reasoning = message.get("reasoning_content", "")
 
-                        # 移除 "data: " 前缀
-                        if line.startswith("data: "):
-                            line = line[6:]
-
-                        # 检查结束标记
-                        if line.strip() == "[DONE]":
-                            break
-
-                        try:
-                            data = json.loads(line)
-                            choices = data.get("choices", [])
-
-                            # 跳过 choices 为空的情况（通常是最后的 usage 数据）
-                            if not choices:
-                                continue
-
-                            delta = choices[0].get("delta", {})
-
-                            # 处理 content 字段
-                            content = delta.get("content", "")
-
-                            # 处理推理内容（某些模型返回 reasoning_content）
-                            reasoning = delta.get("reasoning_content", "")
-
-                            if content or reasoning:
-                                yield StreamChunk(content=content, reasoning=reasoning)
-
-                        except (json.JSONDecodeError, KeyError, IndexError):
-                            # 跳过无法解析的行
-                            continue
+            return ChatResponse(content=content, reasoning=reasoning)
 
         except requests.HTTPError as e:
             raise RuntimeError(f"OpenAI API 请求失败: {e}")

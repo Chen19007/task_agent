@@ -2,15 +2,15 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Generator, Optional
+from typing import Optional
 
 from ..config import Config
 
 
 @dataclass
-class StreamChunk:
-    """流式输出块"""
-    content: str           # 增量内容（必填）
+class ChatResponse:
+    """聊天响应"""
+    content: str           # 响应内容
     reasoning: str = ""    # 推理过程（可选，用于调试）
 
 
@@ -26,15 +26,15 @@ class LLMClient(ABC):
         self.config = config
 
     @abstractmethod
-    def chat(self, messages: list, max_tokens: int) -> Generator[StreamChunk, None, None]:
-        """流式聊天
+    def chat(self, messages: list, max_tokens: int) -> ChatResponse:
+        """聊天
 
         Args:
             messages: 消息历史 [{"role": "user", "content": "..."}]
             max_tokens: 最大输出 token 数
 
-        Yields:
-            StreamChunk: 流式输出块
+        Returns:
+            ChatResponse: 聊天响应
         """
         pass
 

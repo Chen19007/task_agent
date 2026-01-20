@@ -1,33 +1,31 @@
 """Ollama API 客户端"""
 
 import json
-import sys
-from typing import Generator
 
 import requests
 
-from .base import LLMClient, StreamChunk
+from .base import LLMClient, ChatResponse
 
 
 class OllamaClient(LLMClient):
     """Ollama API 客户端"""
 
-    def chat(self, messages: list, max_tokens: int) -> Generator[StreamChunk, None, None]:
-        """流式聊天
+    def chat(self, messages: list, max_tokens: int) -> ChatResponse:
+        """聊天
 
         Args:
             messages: 消息历史
             max_tokens: 最大输出 token 数
 
-        Yields:
-            StreamChunk: 流式输出块
+        Returns:
+            ChatResponse: 聊天响应
         """
         url = f"{self.config.ollama_host}/api/chat"
 
         payload = {
             "model": self.config.model,
             "messages": messages,
-            "stream": True,
+            "stream": False,  # 非流式
             "options": {
                 "num_predict": max_tokens,
                 "num_ctx": self.config.num_ctx,
@@ -35,20 +33,15 @@ class OllamaClient(LLMClient):
         }
 
         try:
-            with requests.post(url, json=payload, timeout=self.config.timeout, stream=True) as response:
-                for line in response.iter_lines():
-                    if line:
-                        data = json.loads(line.decode('utf-8'))
-                        message = data.get("message", {})
+            response = requests.post(url, json=payload, timeout=self.config.timeout)
+            response.raise_for_status()
+            data = response.json()
 
-                        # Ollama/Qwen3 格式
-                        content = message.get("content", "")
-                        reasoning = message.get("thinking", "")
+            message = data.get("message", {})
+            content = message.get("content", "")
+            reasoning = message.get("thinking", "")
 
-                        # Ollama/Qwen3 格式：思考时 content 为空，回答时 thinking 为空
-                        # 只要有 content 或 thinking 就输出（与 OpenAI 客户端保持一致）
-                        if content or reasoning:
-                            yield StreamChunk(content=content, reasoning=reasoning)
+            return ChatResponse(content=content, reasoning=reasoning)
 
         except Exception as e:
             raise RuntimeError(f"Ollama API 调用失败: {e}")

@@ -344,6 +344,15 @@ def main():
 
             _run_single_task(config, task, executor, session_manager)
 
+            # 确保 executor 回到根 agent（修复崩溃残留问题）
+            # 从 context_stack 中逐层取出父 agent，恢复为 current_agent
+            while executor.context_stack:
+                parent = executor.context_stack.pop()
+                # 传递子 agent 的 global_count（不是父 agent 的），确保计数器同步
+                child_global_count = executor.current_agent._global_subagent_count
+                parent.on_child_completed("任务中断", child_global_count)
+                executor.current_agent = parent
+
         except KeyboardInterrupt:
             console.print("\n\n[info]任务已中断[/info]")
             break
@@ -475,6 +484,7 @@ def _run_single_task(config: Config, task: str, executor: 'Executor' = None, ses
         console.print("=" * 60 + "\n")
 
         lines = []
+
         while True:
             try:
                 _clear_input_buffer()
@@ -512,6 +522,7 @@ def _run_single_task(config: Config, task: str, executor: 'Executor' = None, ses
                     break
 
                 lines.append(line)
+
             except KeyboardInterrupt:
                 console.print("\n[warning]输入已取消[/warning]")
                 break
@@ -608,10 +619,25 @@ def _execute_command(command: str, timeout: int):
     encoded_command = base64.b64encode(prefixed_command.encode('utf-16-le')).decode('ascii')
     full_cmd = f'powershell -EncodedCommand {encoded_command}'
 
-    process = subprocess.run(
-        full_cmd, shell=True, capture_output=True,
-        timeout=timeout
-    )
+    try:
+        process = subprocess.run(
+            full_cmd, shell=True, capture_output=True,
+            timeout=timeout
+        )
+    except (subprocess.SubprocessError, OSError, FileNotFoundError) as e:
+        # 捕获命令执行异常（如命令行太长、文件未找到等）
+        # 创建一个错误结果对象
+        class Result:
+            def __init__(self, stdout, stderr, returncode):
+                self.stdout = stdout
+                self.stderr = stderr
+                self.returncode = returncode
+
+        return Result(
+            stdout="",
+            stderr=str(e),
+            returncode=1
+        )
 
     # 手动解码，处理编码错误
     stdout = process.stdout.decode('utf-8', errors='replace')
