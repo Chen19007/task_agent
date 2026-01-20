@@ -413,7 +413,8 @@ $lines.Insert(行号, "新行内容") | Set-Content -Path "文件路径" -Encodi
             print(preview, file=sys.stderr)
             print(f"\n{'='*60}\n", file=sys.stderr)
 
-            self._add_message("user", summary)
+            # 子Agent结果是工具执行的输出，用tool角色
+            self._add_message("tool", summary)
         # 同步全局计数
         self._global_subagent_count = global_count
 

@@ -269,7 +269,7 @@ def _run_single_task(config: Config, task: str):
                     output = f"命令执行失败（退出码: {result.returncode}）：\n{result.stderr}"
 
                 if executor.current_agent:
-                    executor.current_agent._add_message("assistant", f'<ps_call_result id="executed">\n{output}\n</ps_call_result>')
+                    executor.current_agent._add_message("tool", f'<ps_call_result id="executed">\n{output}\n</ps_call_result>')
 
             elif confirm_lower == "n":
                 console.print("[info]命令已跳过[/info]\n")
