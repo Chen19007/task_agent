@@ -4,6 +4,7 @@ import re
 import sys
 import time
 import uuid
+import os
 from dataclasses import dataclass, field
 from typing import Generator, Optional, Any
 from enum import Enum
@@ -98,6 +99,7 @@ class SimpleAgent:
 
         tree_info = f"""
 **当前状态：**
+- 当前工作目录: {os.getcwd()}
 - Agent ID: {self.agent_id}
 - 当前深度: {self.depth}
 - 最大深度: {self.max_depth}
@@ -108,15 +110,18 @@ class SimpleAgent:
 - 剩余可用: {context_remaining} tokens
 """
 
-        system_prompt = """你是一个任务执行agent，负责完成用户任务。
+        # 基础系统提示词（所有Agent共有的核心规则）
+        base_system_prompt = f"""你是一个任务执行agent，负责完成用户任务。
 
-""" + tree_info + """
+{tree_info}
 **重要说明：**
 - 每个 Agent 都有独立的 4k token 上下文窗口
 - 子 Agent 不会消耗父 Agent 的上下文
 - 鼓励通过创建子 Agent 来拆分复杂任务，充分利用独立上下文
 
 **你的工具：**
+
+**1. 命令执行（PowerShell）：
 
 **1. 命令执行（PowerShell）：**
 <ps_call> 直接写PowerShell命令 </ps_call>
@@ -132,7 +137,7 @@ class SimpleAgent:
 ✅ 合法示例：
 <ps_call> Get-ChildItem </ps_call>
 <ps_call> Set-Content -Path test.txt -Value "hello" </ps_call>
-<ps_call> Get-Process | Where-Object {$_.CPU -gt 10} </ps_call>
+<ps_call> Get-Process | Where-Object {{$_.CPU -gt 10}} </ps_call>
 
 **【常用文件操作命令速查】**
 
@@ -245,12 +250,15 @@ $lines.Insert(行号, "新行内容") | Set-Content -Path "文件路径" -Encodi
 </completion>
 
 **规则：**
-1. 深度优先遍历：先完成一个分支的所有子任务，创建子Agent后必须等待其完全完成才能创建下一个（你是深度优先遍历的 Agent）
-2. 每个子Agent有独立4k上下文，合理拆分任务
-3. 整个任务最多使用 32 个子任务（全局配额），每个Agent最多使用 16 个（本地配额）
-4. 命令执行后会收到结果反馈，根据结果决定下一步
-5. 完成所有工作后必须使用 `<completion>` 标记
-6. 用户可以随时输入任务或调整方向
+1. 子Agent之间互相不知道对方的结果，每个子Agent都是独立执行
+   - **无依赖的子Task**：可以同时创建（一起创建多个子Agent）
+   - **有依赖的子Task**：必须分开创建（先创建A，等待A完成后，再创建依赖A结果的B）
+2. 深度优先遍历：先完成一个分支的所有子任务，创建子Agent后必须等待其完全完成才能创建下一个（你是深度优先遍历的 Agent）
+3. 每个子Agent有独立4k上下文，合理拆分任务
+4. 整个任务最多使用 32 个子任务（全局配额），每个Agent最多使用 16 个（本地配额）
+5. 命令执行后会收到结果反馈，根据结果决定下一步
+6. 完成所有工作后必须使用 `<completion>` 标记
+7. 用户可以随时输入任务或调整方向
 
 **【全局配额用完时的处理】**
 
@@ -274,7 +282,7 @@ $lines.Insert(行号, "新行内容") | Set-Content -Path "文件路径" -Encodi
 ```
 """
 
-        self.history.append(Message(role="system", content=system_prompt))
+        self.history.append(Message(role="system", content=base_system_prompt))
 
     def start(self, task: str):
         """开始执行任务（初始化）
@@ -283,6 +291,29 @@ $lines.Insert(行号, "新行内容") | Set-Content -Path "文件路径" -Encodi
             task: 用户任务描述
         """
         self.start_time = time.time()
+
+        # 打印调试信息：基础系统提示词和聚合上下文
+        print(f"\n{'='*60}", file=sys.stderr)
+        print(f"[Agent #{self.agent_id} 深度 {self.depth}] 初始化", file=sys.stderr)
+        print(f"{'='*60}", file=sys.stderr)
+        print(f"\n--- [1/2] 基础系统提示词 (核心规则) ---", file=sys.stderr)
+        print(self.history[0].content[:500] + "..." if len(self.history[0].content) > 500 else self.history[0].content, file=sys.stderr)
+
+        # 打印聚合的上下文（来自父Agent的消息）
+        aggregated = [msg for msg in self.history[1:] if msg.role == "user"]
+        if aggregated:
+            print(f"\n--- [2/2] 聚合上下文 ({len(aggregated)} 条来自父Agent) ---", file=sys.stderr)
+            for i, msg in enumerate(aggregated, 1):
+                preview = msg.content[:200] + "..." if len(msg.content) > 200 else msg.content
+                print(f"[{i}] {preview}", file=sys.stderr)
+        else:
+            print(f"\n--- [2/2] 聚合上下文 ---", file=sys.stderr)
+            print("(无，直接执行用户任务)", file=sys.stderr)
+
+        print(f"\n{'='*60}", file=sys.stderr)
+        print(f"用户任务: {task[:100]}{'...' if len(task) > 100 else ''}", file=sys.stderr)
+        print(f"{'='*60}\n", file=sys.stderr)
+
         self._add_message("user", task)
 
     def step(self) -> StepResult:
@@ -372,7 +403,16 @@ $lines.Insert(行号, "新行内容") | Set-Content -Path "文件路径" -Encodi
             summary: 子Agent的完成摘要
             global_count: 同步全局子Agent计数
         """
+        # 打印子Agent返回的摘要
         if summary:
+            print(f"\n{'='*60}", file=sys.stderr)
+            print(f"[Agent #{self.agent_id} 深度 {self.depth}] 收到子Agent返回", file=sys.stderr)
+            print(f"{'='*60}", file=sys.stderr)
+            print(f"\n--- 子Agent 完成摘要 ---", file=sys.stderr)
+            preview = summary[:500] + "..." if len(summary) > 500 else summary
+            print(preview, file=sys.stderr)
+            print(f"\n{'='*60}\n", file=sys.stderr)
+
             self._add_message("user", summary)
         # 同步全局计数
         self._global_subagent_count = global_count
@@ -539,6 +579,14 @@ class Executor:
             if result.action == Action.SWITCH_TO_CHILD:
                 child_task, new_global_count = result.data
                 self.context_stack.append(self.current_agent)
+
+                # 打印切换日志
+                print(f"\n{'='*60}", file=sys.stderr)
+                print(f"[Agent #{self.current_agent.agent_id} 深度 {self.current_agent.depth}] 创建子Agent", file=sys.stderr)
+                print(f"{'='*60}", file=sys.stderr)
+                print(f"任务: {child_task[:100]}{'...' if len(child_task) > 100 else ''}", file=sys.stderr)
+                print(f"{'='*60}\n", file=sys.stderr)
+
                 self.current_agent = SimpleAgent(
                     config=self.config,
                     depth=self.current_agent.depth + 1,
