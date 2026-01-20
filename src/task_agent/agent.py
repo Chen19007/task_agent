@@ -351,14 +351,15 @@ class SimpleAgent:
                     forbidden_list = [item.strip().strip("'").strip('"') for item in items if item.strip()]
                 else:
                     # 单个值
-                    forbidden_list = [forbidden_str.strip().strip(chr(39)).strip(chr(34))]
+                    forbidden_list = [forbidden_str.strip().strip("'").strip('"')]
 
             # 检查当前 agent_name 是否在该 agent 的 forbidden_agents 中
             # 如果不在，注入该 agent 的 system_prompt_injection
-            if self.agent_name not in forbidden_list:
-                injection = agent.get("system_prompt_injection", "")
-                if injection:
-                    injections.append(injection)
+            should_inject = self.agent_name not in forbidden_list
+            injection = agent.get("system_prompt_injection", "")
+
+            if should_inject and injection:
+                injections.append(injection)
 
         # 返回拼接后的注入内容（如果有的话）
         if injections:
