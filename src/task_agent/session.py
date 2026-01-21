@@ -139,8 +139,20 @@ class SessionManager:
             return False
 
     def save_session(self, executor: Executor, session_id: int) -> bool:
-        """保存会话（兼容旧接口，保存为快照索引0）"""
-        return self.save_snapshot(executor, session_id, 0)
+        """保存会话（使用当前 snapshot_index）
+
+        Args:
+            executor: 执行器
+            session_id: 会话ID
+
+        Returns:
+            bool: 是否保存成功
+        """
+        # 使用 executor 的当前 snapshot_index（双快照模式下是下一个可用索引）
+        # 如果需要追加新快照，使用 executor._snapshot_index
+        # 如果需要更新最后一个快照，使用 self.current_snapshot_index.get(session_id, 0)
+        snapshot_index = executor._snapshot_index
+        return self.save_snapshot(executor, session_id, snapshot_index)
 
 
     def _deserialize_agent(self, agent_data: dict, config: Config, global_count: int) -> SimpleAgent:
