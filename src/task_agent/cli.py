@@ -391,9 +391,9 @@ def main():
                     for s in sessions:
                         msg_preview = s.get('first_message', '')
                         if msg_preview:
-                            console.print(f"  会话 {s['session_id']} | {s['updated_at'][:19]} | 消息数: {s['message_count']} | 深度: {s['depth']} | [dim]{msg_preview}[/dim]")
+                            console.print(f"  会话 {s['session_id']} | {s['created_at'][:19]} | 消息数: {s['message_count']} | 深度: {s['depth']} | [dim]{msg_preview}[/dim]")
                         else:
-                            console.print(f"  会话 {s['session_id']} | {s['updated_at'][:19]} | 消息数: {s['message_count']} | 深度: {s['depth']}")
+                            console.print(f"  会话 {s['session_id']} | {s['created_at'][:19]} | 消息数: {s['message_count']} | 深度: {s['depth']}")
                     console.print("")
                     continue
 
@@ -668,9 +668,9 @@ def _run_single_task(config: Config, task: str, executor: 'Executor' = None, ses
                         for s in sessions:
                             msg_preview = s.get('first_message', '')
                             if msg_preview:
-                                console.print(f"  会话 {s['session_id']} | {s['updated_at'][:19]} | 消息数: {s['message_count']} | 深度: {s['depth']} | [dim]{msg_preview}[/dim]")
+                                console.print(f"  会话 {s['session_id']} | {s['created_at'][:19]} | 消息数: {s['message_count']} | 深度: {s['depth']} | [dim]{msg_preview}[/dim]")
                             else:
-                                console.print(f"  会话 {s['session_id']} | {s['updated_at'][:19]} | 消息数: {s['message_count']} | 深度: {s['depth']}")
+                                console.print(f"  会话 {s['session_id']} | {s['created_at'][:19]} | 消息数: {s['message_count']} | 深度: {s['depth']}")
                         console.print("")
                         continue  # 继续等待输入
                     else:
