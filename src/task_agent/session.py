@@ -13,10 +13,39 @@ class SessionManager:
         self.session_dir.mkdir(parents=True, exist_ok=True)
         self.current_session_id: Optional[int] = None
         self._pending_executor: Optional[Executor] = None  # 待切换的 executor
+        self.current_snapshot_index: dict[int, int] = {}  # session_id -> snapshot_index
 
+
+    def get_snapshot_path(self, session_id: int, snapshot_index: int) -> Path:
+        """获取快照文件路径"""
+        return self.session_dir / f"{session_id}.{snapshot_index}.json"
 
     def get_session_path(self, session_id: int) -> Path:
-        return self.session_dir / f"{session_id}.json"
+        """获取会话路径（兼容旧接口，返回最新快照）"""
+        # 查找该会话的最大 snapshot_index
+        max_index = self._get_max_snapshot_index(session_id)
+        if max_index is None:
+            # 如果没有快照，返回一个默认路径（不会实际使用）
+            return self.session_dir / f"{session_id}.0.json"
+        return self.get_snapshot_path(session_id, max_index)
+
+    def _get_max_snapshot_index(self, session_id: int) -> Optional[int]:
+        """获取指定会话的最大快照索引"""
+        pattern = f"{session_id}.*.json"
+        snapshots = list(self.session_dir.glob(pattern))
+        if not snapshots:
+            return None
+        max_index = 0
+        for f in snapshots:
+            try:
+                # 文件名格式: session_id.snapshot_index.json
+                parts = f.stem.split(".")
+                if len(parts) == 2:
+                    index = int(parts[1])
+                    max_index = max(max_index, index)
+            except (ValueError, IndexError):
+                continue
+        return max_index
 
     def set_pending_executor(self, executor: Executor):
         """设置待切换的executor（用于在等待输入循环中切换会话）"""
@@ -32,7 +61,14 @@ class SessionManager:
         used_ids = set()
         for f in self.session_dir.glob("*.json"):
             try:
-                used_ids.add(int(f.stem))
+                # 支持快照格式: session_id.snapshot_index.json
+                parts = f.stem.split(".")
+                if len(parts) == 2:
+                    # 快照文件，提取 session_id
+                    used_ids.add(int(parts[0]))
+                else:
+                    # 旧格式: session_id.json
+                    used_ids.add(int(f.stem))
             except ValueError:
                 continue
         for i in range(1, 1001):
@@ -51,9 +87,19 @@ class SessionManager:
             ]
         }
     
-    def save_session(self, executor: Executor, session_id: int) -> bool:
+    def save_snapshot(self, executor: Executor, session_id: int, snapshot_index: int) -> bool:
+        """保存会话快照
+
+        Args:
+            executor: 执行器
+            session_id: 会话ID
+            snapshot_index: 快照索引（第几个LLM调用）
+
+        Returns:
+            bool: 是否保存成功
+        """
         try:
-            session_path = self.get_session_path(session_id)
+            snapshot_path = self.get_snapshot_path(session_id, snapshot_index)
             stack_data = []
             for agent in executor.context_stack:
                 stack_data.append(self._serialize_agent(agent))
@@ -76,19 +122,25 @@ class SessionManager:
                     current_data["history"] = list(reversed(filtered_history))
             data = {
                 "session_id": session_id,
+                "snapshot_index": snapshot_index,
                 "created_at": datetime.now().isoformat(),
-                "updated_at": datetime.now().isoformat(),
                 "global_subagent_count": executor._global_subagent_count,
                 "context_stack": stack_data,
                 "current_agent": current_data,
+                "auto_approve": getattr(executor, 'auto_approve', False),
             }
-            with open(session_path, "w", encoding="utf-8") as f:
+            with open(snapshot_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
             self.current_session_id = session_id
+            self.current_snapshot_index[session_id] = snapshot_index
             return True
         except Exception as e:
-            print(f"[error]保存会话失败: {e}[/error]")
+            print(f"[error]保存快照失败: {e}[/error]")
             return False
+
+    def save_session(self, executor: Executor, session_id: int) -> bool:
+        """保存会话（兼容旧接口，保存为快照索引0）"""
+        return self.save_snapshot(executor, session_id, 0)
 
 
     def _deserialize_agent(self, agent_data: dict, config: Config, global_count: int) -> SimpleAgent:
@@ -110,23 +162,33 @@ class SessionManager:
 
     def load_session(self, session_id: int, config: Config) -> Optional[Executor]:
         try:
-            session_path = self.get_session_path(session_id)
-            if not session_path.exists():
+            # 查找该会话的最大快照索引
+            max_index = self._get_max_snapshot_index(session_id)
+            if max_index is None:
                 print(f"[error]会话不存在: {session_id}[/error]")
                 return None
-            with open(session_path, "r", encoding="utf-8") as f:
+
+            snapshot_path = self.get_snapshot_path(session_id, max_index)
+            with open(snapshot_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            executor = Executor(config)
+            executor = Executor(config, session_manager=self)
             executor._global_subagent_count = data.get("global_subagent_count", 0)
+            executor.auto_approve = data.get("auto_approve", False)
+            executor._snapshot_index = data.get("snapshot_index", max_index) + 1  # 下一个快照索引
             executor.context_stack = []
             for agent_data in data.get("context_stack", []):
                 agent = self._deserialize_agent(agent_data, config, executor._global_subagent_count)
+                # 恢复回调
+                agent.set_before_llm_callback(executor._save_snapshot_callback)
                 executor.context_stack.append(agent)
             if data.get("current_agent"):
                 executor.current_agent = self._deserialize_agent(
                     data["current_agent"], config, executor._global_subagent_count
                 )
+                # 恢复回调
+                executor.current_agent.set_before_llm_callback(executor._save_snapshot_callback)
             self.current_session_id = session_id
+            self.current_snapshot_index[session_id] = data.get("snapshot_index", max_index)
             return executor
         except Exception as e:
             print(f"[error]加载会话失败: {e}[/error]")
@@ -134,53 +196,71 @@ class SessionManager:
 
 
     def list_sessions(self) -> list:
-        sessions = []
+        """列出所有会话（每个会话只显示最新快照）"""
+        # 收集所有会话的最新快照
+        session_latest_snapshots = {}  # session_id -> (snapshot_file, snapshot_index)
+
         for session_file in self.session_dir.glob("*.json"):
             try:
-                with open(session_file, "r", encoding="utf-8") as f:
+                parts = session_file.stem.split(".")
+                if len(parts) == 2:
+                    # 快照格式: session_id.snapshot_index.json
+                    session_id = int(parts[0])
+                    snapshot_index = int(parts[1])
+                    # 只保留最大索引
+                    if session_id not in session_latest_snapshots or snapshot_index > session_latest_snapshots[session_id][1]:
+                        session_latest_snapshots[session_id] = (session_file, snapshot_index)
+                else:
+                    # 旧格式: session_id.json（兼容）
+                    session_id = int(parts[0])
+                    if session_id not in session_latest_snapshots:
+                        session_latest_snapshots[session_id] = (session_file, 0)
+            except (ValueError, IndexError):
+                continue
+
+        # 读取最新快照并构建会话列表
+        sessions = []
+        for session_id, (snapshot_file, snapshot_index) in session_latest_snapshots.items():
+            try:
+                with open(snapshot_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 current = data.get("current_agent", {})
                 history = current.get("history", [])
                 context_stack = data.get("context_stack", [])
 
                 # 提取首条用户消息作为标题
-                # 优先从 context_stack 中提取（如果有的话），因为那是顶层任务
                 first_message = ""
                 if context_stack:
-                    # 从顶层 agent 的 history 中查找第一条用户消息
                     stack_history = context_stack[0].get("history", [])
                     for msg in stack_history:
                         if msg.get("role") == "user":
                             content = msg.get("content", "")
-                            # 清理换行符并截断
                             first_message = content.replace("\n", " ").strip()[:50]
                             if len(content) > 50:
                                 first_message += "..."
                             break
 
-                # 如果 context_stack 中没找到，从 current_agent 中查找
                 if not first_message:
                     for msg in history:
                         if msg.get("role") == "user":
                             content = msg.get("content", "")
-                            # 清理换行符并截断
                             first_message = content.replace("\n", " ").strip()[:50]
                             if len(content) > 50:
                                 first_message += "..."
                             break
 
                 summary = {
-                    "session_id": data.get("session_id", 0),
+                    "session_id": session_id,
+                    "snapshot_index": snapshot_index,
                     "created_at": data.get("created_at", "Unknown"),
-                    "updated_at": data.get("updated_at", "Unknown"),
                     "message_count": len(history),
-                    # 深度：如果有 context_stack，则为当前深度；否则为 0
                     "depth": current.get("depth", 0) if current else 0,
                     "first_message": first_message,
                 }
                 sessions.append(summary)
             except Exception:
                 continue
+
         sessions.sort(key=lambda x: x["session_id"])
         return sessions
 
@@ -201,9 +281,9 @@ class SessionManager:
         if save_old and self.current_session_id:
             self.save_session(executor, self.current_session_id)
 
-        # 创建新 executor
+        # 创建新 executor（传递 session_manager 以支持快照保存）
         config = executor.config
-        new_executor = Executor(config)
+        new_executor = Executor(config, session_manager=self)
 
         if temp:
             # 临时会话：不分配 ID，等用户执行任务后再分配

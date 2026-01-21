@@ -2,6 +2,7 @@
 
 import argparse
 import os
+import re
 import sys
 import time
 
@@ -35,6 +36,128 @@ def _clear_input_buffer():
     """清空 stdin 中的残留输入（Windows）"""
     while msvcrt.kbhit():
         msvcrt.getch()
+
+
+def _resolve_file_references(text: str) -> tuple[str, list[str]]:
+    """解析输入中的 @ 文件引用，返回替换后的文本和错误列表
+
+    Args:
+        text: 包含 @ 引用的输入文本
+
+    Returns:
+        (替换后的文本, 错误列表)
+    """
+    errors = []
+    # 匹配 @filename 格式（@ 后跟非空白字符）
+    pattern = r'@(\S+)'
+
+    def replace_match(match):
+        file_path = match.group(1)
+        # 检查是否为目录
+        if os.path.isdir(file_path):
+            errors.append(f"[warning]路径是目录而非文件: @{file_path}[/warning]")
+            return match.group(0)  # 保留原 @path
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            # 只返回文件内容，不包含文件名
+            return content
+        except FileNotFoundError:
+            errors.append(f"[warning]文件不存在: @{file_path}[/warning]")
+            return match.group(0)  # 保留原 @path
+        except PermissionError:
+            errors.append(f"[warning]无权限访问: @{file_path}[/warning]")
+            return match.group(0)  # 保留原 @path
+        except Exception as e:
+            errors.append(f"[error]读取文件 @{file_path} 失败: {e}[/error]")
+            return match.group(0)  # 保留原 @path
+
+    result = re.sub(pattern, replace_match, text)
+    return result, errors
+
+
+def _extract_paths_from_command(command: str) -> list[str]:
+    """从命令中提取路径参数
+
+    Args:
+        command: PowerShell 命令
+
+    Returns:
+        提取的路径列表
+    """
+    paths = []
+    # 匹配 -Path 后的参数（带引号和不带引号）
+    paths.extend(re.findall(r'-Path\s+"([^"]+)"', command))
+    paths.extend(re.findall(r'-Path\s+(\S+)', command))
+    # 匹配 -LiteralPath 后的参数
+    paths.extend(re.findall(r'-LiteralPath\s+"([^"]+)"', command))
+    paths.extend(re.findall(r'-LiteralPath\s+(\S+)', command))
+    # 匹配 -Destination 后的参数
+    paths.extend(re.findall(r'-Destination\s+"([^"]+)"', command))
+    paths.extend(re.findall(r'-Destination\s+(\S+)', command))
+    # 匹配直接作为参数的路径（带引号的文件路径）
+    paths.extend(re.findall(r'"([a-zA-Z]:[\\/][^"]+)"', command))
+    paths.extend(re.findall(r'"(\.\.[\\/][^"]+)"', command))
+    paths.extend(re.findall(r'"(\.[\\/][^"]+)"', command))
+    # 匹配 git 命令中的文件参数
+    git_match = re.search(r'git\s+\w+\s+(.+)', command)
+    if git_match:
+        git_args = git_match.group(1).strip()
+        # 简单处理：按空格分割，去除引号
+        for arg in git_args.split():
+            arg = arg.strip('"\'')
+            if arg and not arg.startswith('-'):
+                paths.append(arg)
+    return paths
+
+
+def _is_safe_command(command: str, current_dir: str) -> bool:
+    """检查命令是否为安全的文件操作且在当前目录内
+
+    安全规则：
+    1. 不包含危险命令（删除、移动等）
+    2. 所有路径都在当前目录及其子目录内
+
+    Args:
+        command: PowerShell 命令
+        current_dir: 当前工作目录
+
+    Returns:
+        是否为安全命令
+    """
+    # 危险命令模式（需要确认）
+    dangerous_patterns = [
+        'Remove-Item', 'rm ', 'rmdir ', 'del ',
+        'Move-Item', 'mv ', 'move ',
+        'Rename-Item', 'ren ',
+        'sudo ',  # Linux 提权命令
+        'Remove-Item',
+    ]
+
+    command_lower = command.lower()
+    for pattern in dangerous_patterns:
+        if pattern.lower() in command_lower:
+            return False
+
+    # 提取路径并检查范围
+    paths = _extract_paths_from_command(command)
+    if paths:
+        current_abs = os.path.abspath(current_dir)
+        for path in paths:
+            # 跳过相对路径中的 "." 和 ".." 作为单独参数的情况
+            if path in ['.', '..']:
+                continue
+            # 解析为绝对路径
+            try:
+                abs_path = os.path.abspath(path)
+                # 检查是否在当前目录下
+                if not abs_path.startswith(current_abs):
+                    return False
+            except Exception:
+                # 路径解析失败，保守起见需要确认
+                return False
+
+    return True
 
 
 console = Console(theme=custom_theme)
@@ -160,7 +283,7 @@ def print_help():
   - 最大支持4层深度（最多16个子Agent）
   - 使用 <ps_call> 执行命令
   - 使用 <create_agent> 创建子Agent
-  - 使用 <completion> 标记任务完成
+  - 使用 <return> 标记任务完成
 
 [bold yellow]会话管理：[/bold yellow]
   - 主循环输入任务默认使用当前会话
@@ -224,7 +347,7 @@ def main():
 
     # 交互模式
     session_manager = SessionManager()
-    executor = Executor(config)  # 保持 Executor 实例，保留上下文
+    executor = Executor(config, session_manager=session_manager)  # 保持 Executor 实例，保留上下文
 
     while True:
         try:
@@ -238,10 +361,11 @@ def main():
                     console.print(f"\n[dim]当前会话：临时（未保存）[/dim]\n")
 
             # 显示当前会话状态
+            auto_status = " | [success]自动同意: 启[/success]" if executor.auto_approve else ""
             if session_manager.current_session_id:
-                console.print(f"[dim]当前会话 #{session_manager.current_session_id} | 输入任务继续，/new 新建，/list 列表[/dim]")
+                console.print(f"[dim]当前会话 #{session_manager.current_session_id} | 输入任务继续，/new 新建，/list 列表，/auto 切换自动同意{auto_status}[/dim]")
             else:
-                console.print(f"[dim]临时会话 | 输入任务创建会话，/list 列表[/dim]")
+                console.print(f"[dim]临时会话 | 输入任务创建会话，/list 列表，/auto 切换自动同意{auto_status}[/dim]")
 
             _clear_input_buffer()
             task = console.input("[user]任务> [/user]")
@@ -275,7 +399,7 @@ def main():
 
                 if task.lower() == "/new":
                     new_id, new_executor = session_manager.create_new_session(executor)
-                    executor = new_executor  # 更新 executor 为新的空实例
+                    executor = new_executor
                     console.print(f"\n[success]新会话已创建: {new_id}[/success]\n")
                     continue
 
@@ -288,7 +412,6 @@ def main():
                             executor = new_executor
                             console.print(f"\n[success]会话已恢复: {session_id}[/success]\n")
 
-                            # 显示历史上下文摘要
                             if executor.current_agent and executor.current_agent.history:
                                 console.print("[dim]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[/dim]")
                                 console.print("[bold cyan]历史上下文：[/bold cyan]\n")
@@ -300,35 +423,28 @@ def main():
                                     role = msg.role
                                     content = msg.content.strip()
 
-                                    # 跳过系统提示词和会话ID消息
                                     if role == "system":
                                         if content.startswith("你是一个任务执行agent") or content.startswith("会话ID:"):
                                             continue
 
-                                    # 最后一条消息完整显示
                                     is_last = (i == total - 1)
 
-                                    # 格式化显示（使用原始序号 i+1）
                                     if role == "user":
                                         if is_last:
-                                            # 最后一条用户消息完整显示
                                             console.print(f"[dim]{i+1}. [/dim][user]用户:[/user]")
                                             console.print(f"{content}\n")
                                         else:
                                             console.print(f"[dim]{i+1}. [/dim][user]用户:[/user] {content[:100]}{'...' if len(content) > 100 else ''}")
                                     elif role == "assistant":
                                         if is_last:
-                                            # 最后一条助手消息完整显示
                                             console.print(f"[dim]{i+1}. [/dim][assistant]助手:[/assistant]")
                                             console.print(f"{content}\n")
                                         else:
-                                            # 非最后一条只显示预览
                                             preview = content[:50].replace('\n', ' ')
                                             console.print(f"[dim]{i+1}. [/dim][assistant]助手:[/assistant] [dim]{preview}...[/dim]")
                                     elif role == "tool":
                                         console.print(f"[dim]{i+1}. [/dim][info]工具: {content[:80]}...[/info]")
                                     elif role == "system":
-                                        # 其他 system 消息正常显示
                                         console.print(f"[dim]{i+1}. [/dim][dim]系统: {content}[/dim]")
 
                                 console.print("[dim]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[/dim]\n")
@@ -339,8 +455,20 @@ def main():
                         console.print(f"\n[error]无效的会话ID: {parts[1]}[/error]\n")
                     continue
 
-                console.print("[error]未知命令。可用命令: /list, /new, /clear, /resume <id>[/error]\n")
+                if task.lower() == "/auto":
+                    executor.auto_approve = not executor.auto_approve
+                    status = "启用" if executor.auto_approve else "禁用"
+                    console.print(f"\n[success]自动同意已{status}[/success]\n")
+                    continue
+
+                console.print("[error]未知命令。可用命令: /list, /new, /clear, /resume <id>, /auto[/error]\n")
                 continue
+
+            # 解析 @ 文件引用
+            task, errors = _resolve_file_references(task)
+            if errors:
+                for error in errors:
+                    console.print(error)
 
             _run_single_task(config, task, executor, session_manager)
 
@@ -378,13 +506,12 @@ def _save_session_if_needed(session_manager: 'SessionManager', executor: 'Execut
     if not executor.current_agent:
         return
 
-    # 首次创建会话
+    # 如果没有会话ID，分配一个
     if session_manager.current_session_id is None:
         new_id = session_manager.get_next_session_id()
         session_manager.current_session_id = new_id
-        # 不再添加会话ID系统消息，因为没什么用
 
-    # 保存会话
+    # 保存会话（保存为快照索引0，兼容旧接口）
     session_manager.save_session(executor, session_manager.current_session_id)
 
 
@@ -406,12 +533,17 @@ def _run_single_task(config: Config, task: str, executor: 'Executor' = None, ses
 
     # 创建或复用执行器
     if executor is None:
-        executor = Executor(config)
+        executor = Executor(config, session_manager=session_manager)
 
     # 用于命令确认的状态
     command_batch_id = 0  # 当前处理的命令批次ID
     processed_count = 0  # 已处理的命令数量
     waiting_for_user_input = False  # 等待用户输入标志
+
+    # 首次创建会话ID（确保快照能正常保存）
+    if session_manager and session_manager.current_session_id is None:
+        new_id = session_manager.get_next_session_id()
+        session_manager.current_session_id = new_id
 
     # 执行任务
     for outputs, result in executor.run(task):
@@ -433,16 +565,16 @@ def _run_single_task(config: Config, task: str, executor: 'Executor' = None, ses
                 # 获取对应的命令
                 command = result.pending_commands[processed_count]
 
-                # 等待用户确认
-                _clear_input_buffer()
-                confirm = console.input("[bold yellow]执行命令[y] / 跳过[n] / 修改建议: [/bold yellow]")
-                confirm_lower = confirm.lower().strip()
+                # 检查是否自动执行
+                current_dir = os.getcwd()
+                auto_execute = executor.auto_approve and _is_safe_command(command, current_dir)
 
-                if confirm_lower == "y":
-                    # 用户确认，执行命令
+                if auto_execute:
+                    # 自动执行安全命令
+                    console.print("[dim](自动执行)[/dim]\n", end="")
                     cmd_result = _execute_command(command, executor.config.timeout)
 
-                    # 构建明确的结果消息
+                    # 构建结果消息
                     if cmd_result.returncode == 0:
                         if cmd_result.stdout:
                             result_msg = f"命令执行成功，输出：\n{cmd_result.stdout}"
@@ -451,21 +583,52 @@ def _run_single_task(config: Config, task: str, executor: 'Executor' = None, ses
                     else:
                         result_msg = f"命令执行失败（退出码: {cmd_result.returncode}）：\n{cmd_result.stderr}"
 
-                    console.print(f"\n[info]{result_msg}[/info]\n")
+                    console.print(f"[dim]{result_msg}[/dim]\n")
 
                     if executor.current_agent:
-                        executor.current_agent._add_message("tool", f'<ps_call_result id="executed">\n{result_msg}\n</ps_call_result>')
-
-                elif confirm_lower == "n":
-                    console.print("[info]命令已跳过[/info]\n")
-                    # 发送跳过消息给当前Agent
-                    if executor.current_agent:
-                        executor.current_agent._add_message("user", f'<ps_call_result id="skip">\n命令已跳过\n</ps_call_result>')
+                        executor.current_agent._add_message("user", f'<ps_call_result id="executed">\n{result_msg}\n</ps_call_result>')
                 else:
-                    # 用户输入修改建议
-                    console.print("[info]已将您的建议发送给 Agent[/info]\n")
-                    if executor.current_agent:
-                        executor.current_agent._add_message("user", f'<ps_call_result id="rejected">\n用户建议：{confirm}\n</ps_call_result>')
+                    # 等待用户确认
+                    _clear_input_buffer()
+                    auto_status = " [dim](自动: 启)[/dim]" if executor.auto_approve else ""
+                    confirm = console.input(f"[bold yellow]执行命令[y] / 跳过[n] / 修改建议: [a]自动{auto_status} [/bold yellow]")
+                    confirm_lower = confirm.lower().strip()
+
+                    if confirm_lower == "a":
+                        # 切换自动同意
+                        executor.auto_approve = not executor.auto_approve
+                        new_status = "启用" if executor.auto_approve else "禁用"
+                        console.print(f"[success]自动同意已{new_status}[/success]\n")
+                        continue  # 重新询问
+
+                    if confirm_lower == "y":
+                        # 用户确认，执行命令
+                        cmd_result = _execute_command(command, executor.config.timeout)
+
+                        # 构建明确的结果消息
+                        if cmd_result.returncode == 0:
+                            if cmd_result.stdout:
+                                result_msg = f"命令执行成功，输出：\n{cmd_result.stdout}"
+                            else:
+                                result_msg = "命令执行成功（无输出）"
+                        else:
+                            result_msg = f"命令执行失败（退出码: {cmd_result.returncode}）：\n{cmd_result.stderr}"
+
+                        console.print(f"\n[info]{result_msg}[/info]\n")
+
+                        if executor.current_agent:
+                            executor.current_agent._add_message("user", f'<ps_call_result id="executed">\n{result_msg}\n</ps_call_result>')
+
+                    elif confirm_lower == "n":
+                        console.print("[info]命令已跳过[/info]\n")
+                        # 发送跳过消息给当前Agent
+                        if executor.current_agent:
+                            executor.current_agent._add_message("user", f'<ps_call_result id="skip">\n命令已跳过\n</ps_call_result>')
+                    else:
+                        # 用户输入修改建议
+                        console.print("[info]已将您的建议发送给 Agent[/info]\n")
+                        if executor.current_agent:
+                            executor.current_agent._add_message("user", f'<ps_call_result id="rejected">\n用户建议：{confirm}\n</ps_call_result>')
 
                 processed_count += 1
 
@@ -541,6 +704,12 @@ def _run_single_task(config: Config, task: str, executor: 'Executor' = None, ses
             waiting_for_user_input = False
             break
 
+        # 解析 @ 文件引用
+        user_input, errors = _resolve_file_references(user_input)
+        if errors:
+            for error in errors:
+                console.print(error)
+
         # 继续执行
         waiting_for_user_input = False
         for outputs, result in executor.resume(user_input):
@@ -561,12 +730,17 @@ def _run_single_task(config: Config, task: str, executor: 'Executor' = None, ses
 
                     # 获取对应的命令
                     command = result.pending_commands[processed_count]
-                    _clear_input_buffer()
-                    confirm = console.input("[bold yellow]执行命令[y] / 跳过[n] / 修改建议: [/bold yellow]")
-                    confirm_lower = confirm.lower().strip()
 
-                    if confirm_lower == "y":
+                    # 检查是否自动执行
+                    current_dir = os.getcwd()
+                    auto_execute = executor.auto_approve and _is_safe_command(command, current_dir)
+
+                    if auto_execute:
+                        # 自动执行安全命令
+                        console.print("[dim](自动执行)[/dim]\n", end="")
                         cmd_result = _execute_command(command, executor.config.timeout)
+
+                        # 构建结果消息
                         if cmd_result.returncode == 0:
                             if cmd_result.stdout:
                                 result_msg = f"命令执行成功，输出：\n{cmd_result.stdout}"
@@ -574,18 +748,44 @@ def _run_single_task(config: Config, task: str, executor: 'Executor' = None, ses
                                 result_msg = "命令执行成功（无输出）"
                         else:
                             result_msg = f"命令执行失败（退出码: {cmd_result.returncode}）：\n{cmd_result.stderr}"
-                        console.print(f"\n[info]{result_msg}[/info]\n")
-                        if executor.current_agent:
-                            executor.current_agent._add_message("tool", f'<ps_call_result id="executed">\n{result_msg}\n</ps_call_result>')
 
-                    elif confirm_lower == "n":
-                        console.print("[info]命令已跳过[/info]\n")
+                        console.print(f"[dim]{result_msg}[/dim]\n")
                         if executor.current_agent:
-                            executor.current_agent._add_message("user", f'<ps_call_result id="skip">\n命令已跳过\n</ps_call_result>')
+                            executor.current_agent._add_message("user", f'<ps_call_result id="executed">\n{result_msg}\n</ps_call_result>')
                     else:
-                        console.print("[info]已将您的建议发送给 Agent[/info]\n")
-                        if executor.current_agent:
-                            executor.current_agent._add_message("user", f'<ps_call_result id="rejected">\n用户建议：{confirm}\n</ps_call_result>')
+                        _clear_input_buffer()
+                        auto_status = " [dim](自动: 启)[/dim]" if executor.auto_approve else ""
+                        confirm = console.input(f"[bold yellow]执行命令[y] / 跳过[n] / 修改建议: [a]自动{auto_status} [/bold yellow]")
+                        confirm_lower = confirm.lower().strip()
+
+                        if confirm_lower == "a":
+                            # 切换自动同意
+                            executor.auto_approve = not executor.auto_approve
+                            new_status = "启用" if executor.auto_approve else "禁用"
+                            console.print(f"[success]自动同意已{new_status}[/success]\n")
+                            continue  # 重新询问
+
+                        if confirm_lower == "y":
+                            cmd_result = _execute_command(command, executor.config.timeout)
+                            if cmd_result.returncode == 0:
+                                if cmd_result.stdout:
+                                    result_msg = f"命令执行成功，输出：\n{cmd_result.stdout}"
+                                else:
+                                    result_msg = "命令执行成功（无输出）"
+                            else:
+                                result_msg = f"命令执行失败（退出码: {cmd_result.returncode}）：\n{cmd_result.stderr}"
+                            console.print(f"\n[info]{result_msg}[/info]\n")
+                            if executor.current_agent:
+                                executor.current_agent._add_message("user", f'<ps_call_result id="executed">\n{result_msg}\n</ps_call_result>')
+
+                        elif confirm_lower == "n":
+                            console.print("[info]命令已跳过[/info]\n")
+                            if executor.current_agent:
+                                executor.current_agent._add_message("user", f'<ps_call_result id="skip">\n命令已跳过\n</ps_call_result>')
+                        else:
+                            console.print("[info]已将您的建议发送给 Agent[/info]\n")
+                            if executor.current_agent:
+                                executor.current_agent._add_message("user", f'<ps_call_result id="rejected">\n用户建议：{confirm}\n</ps_call_result>')
 
                     processed_count += 1
 

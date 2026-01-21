@@ -1,4 +1,4 @@
-# Git-Commit Agent
+# Git-Commit Flow
 
 自动化 Git 仓库初始化和提交流程，包含智能文件过滤、全面的 .gitignore 生成和隐私安全检查。
 

@@ -1,4 +1,4 @@
-# Web-Search Agent
+# Web-Search Flow
 
 联网搜索和信息查询工具，通过 MCP Proxy 调用 Google 搜索和网页抓取服务。
 
@@ -110,12 +110,10 @@ web-search google_search "Claude Code 官方文档" --num 10 --gl us --hl zh
 web-search scrape "https://目标链接" --includeMarkdown
 ```
 
-## 任务完成
+## 任务完成返回的内容
 
-使用 `<completion>` 标记任务完成：
-
-```markdown
-<completion>
+```
+<return>
 # 搜索完成
 
 ## 查询: "xxx"
@@ -134,7 +132,7 @@ web-search scrape "https://目标链接" --includeMarkdown
 
 ## 抓取的网页内容摘要
 [如果抓取了网页]
-</completion>
+</return>
 ```
 
 ## 重要约束
@@ -174,6 +172,5 @@ web-search scrape "https://目标链接" --includeMarkdown
 | 错误类型 | 处理方式 |
 |----------|----------|
 | 无搜索结果 | 尝试不同的关键词或更通用的搜索 |
-| 网络错误 | 检查 MCP Proxy 是否运行，重试 |
 | 网页无法访问 | 跳过该链接，使用其他来源 |
 | 参数错误 | 检查参数格式，使用 `--help` 查看帮助 |

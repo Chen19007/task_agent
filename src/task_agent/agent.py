@@ -96,6 +96,17 @@ class SimpleAgent:
         # 待执行的子Agent任务请求（step()返回时携带）
         self._pending_child_request: Optional[ChildTaskRequest] = None
 
+        # LLM调用前的回调函数（用于保存快照）
+        self._before_llm_callback: Optional[callable] = None
+
+    def set_before_llm_callback(self, callback: callable):
+        """设置LLM调用前的回调函数
+
+        Args:
+            callback: 回调函数，签名为 callback(agent: SimpleAgent) -> None
+        """
+        self._before_llm_callback = callback
+
     def _init_system_prompt(self):
         """初始化系统提示词"""
         max_agents = self.max_depth ** 2
@@ -127,133 +138,12 @@ class SimpleAgent:
         predefined_agents = self._load_predefined_agent_metadata()
         predefined_section = self._format_predefined_agent_section(predefined_agents)
 
-        # 基础系统提示词（所有Agent共有的核心规则）
-        base_system_prompt = f"""你是一个任务执行agent，负责完成用户任务。
-
-{tree_info}
-{predefined_section}
-**重要说明：**
-- 每个 Agent 都有独立的 4k token 上下文窗口
-- 子 Agent 不会消耗父 Agent 的上下文
-- 鼓励通过创建子 Agent 来拆分复杂任务，充分利用独立上下文
-
-**你的工具：**
-
-**1. 命令执行（PowerShell）：
-
-**1. 命令执行（PowerShell）：**
-<ps_call> 直接写PowerShell命令 </ps_call>
-
-**重要约束：只使用非交互式命令**
-- ❌ 禁止：Read-Host、交互式确认、等待中途输入的命令
-- ✅ 正确：需要用户信息时，先在对话中询问，再生成命令
-
-示例对比：
-❌ 错误：<ps_call> Read-Host "请输入姓名" </ps_call>  （会卡住等待输入）
-✅ 正确：先问用户"请提供姓名"，再生成 <ps_call> Add-Content -Path name.txt -Value "张三" -Encoding UTF8 </ps_call>
-
-✅ 合法示例：
-<ps_call> Get-ChildItem </ps_call>
-<ps_call> Get-Process | Where-Object {{$_.CPU -gt 10}} </ps_call>
-
-**2. 子Agent - 任务拆分（推荐）：**
-
-**普通子任务：**
-<create_agent> 子任务描述 </create_agent>
-
-**预定义子任务（如果有对应 agent）：**
-<create_agent name=agent_name> 任务描述 </create_agent>
-
-**说明：**
-- 每个子Agent是独立的任务分支，有独立的上下文窗口
-- 整个任务最多创建 32 个子任务（全局配额），请合理分配
-- 子Agent完成后会返回摘要，供当前Agent继续决策
-- 预定义子Agent会加载详细的工作流程指令，适合复杂标准化任务
-
-**3. 提问等待用户输入：**
-
-当需要用户提供信息才能继续时，直接提问即可。
-
-✅ 正确用法：
-- 需要知道文件名时："请问您要创建的文件名是什么？"
-- 需要知道用户偏好时："您希望使用哪种编程语言（Python/JavaScript/Go）？"
-- 需要确认方案时："方案A侧重性能，方案B侧重开发速度，您倾向哪个？"
-
-⚠️ **注意**：提问后 Agent 会暂停，等待用户输入后自动继续执行。
-
-❌ 错误做法：
-- 提问后紧接着输出 `<completion>` - 这是矛盾的，提问意味着未完成
-- 使用 `<ps_call> Read-Host "xxx" </ps_call>` - 这是交互式命令，会卡住
-
-**4. 任务完成标记 <completion>（重要）：**
-
-<completion> 任务总结内容 </completion>
-
-【上下文传递机制】
-- ⚠️ **只有 <completion> 标签内的内容会被传递给父Agent或下一个任务**
-- 中间的对话、命令输出、提问等内容不会被传递
-- 父Agent只会看到你的 completion 内容，然后根据它决定下一步
-
-【关键约束】
-- ❌ **禁止在任务未完成时使用 <completion>**
-- ❌ **有疑问或需要用户确认时，禁止使用 <completion>** - 应该直接提问并等待用户回复
-- ✅ 只有在以下情况才能使用：
-  1. 所有子Agent都已返回结果
-  2. 所有计划的工作都已执行完毕
-  3. 没有待处理的命令或待创建的子Agent
-  4. 确定任务已完成，不需要进一步用户输入
-- ⚠️ 一旦输出 <completion>，Agent将立即停止，无法继续执行
-
-【正确用法示例】
-✅ 完成撰写两个文档后：
-<completion>
-# 完成的工作
-- 撰写游戏概念章节
-- 撰写核心玩法章节
-
-# 产出物
-- game_concept.md
-- core_mechanics.md
-</completion>
-
-❌ 错误用法（任务未完成）：
-<completion>
-# 准备开始工作
-# 产出物：无
-</completion>
-
-**规则：**
-1. 子Agent之间互相不知道对方的结果，每个子Agent都是独立执行
-   - **无依赖的子Task**：可以同时创建（一起创建多个子Agent）
-   - **有依赖的子Task**：必须分开创建（先创建A，等待A完成后，再创建依赖A结果的B）
-2. 深度优先遍历：先完成一个分支的所有子任务，创建子Agent后必须等待其完全完成才能创建下一个（你是深度优先遍历的 Agent）
-3. 每个子Agent有独立4k上下文，合理拆分任务
-4. 整个任务最多使用 32 个子任务（全局配额），每个Agent最多使用 16 个（本地配额）
-5. 命令执行后会收到结果反馈，根据结果决定下一步
-6. 完成所有工作后必须使用 `<completion>` 标记
-7. 用户可以随时输入任务或调整方向
-
-**【全局配额用完时的处理】**
-
-当收到 `[全局配额限制]` 消息时：
-- **禁止**输出解释、闲聊、道歉或询问用户
-- **必须**立即使用 `<ps_call>` 执行任务
-- 任务完成后**必须**使用 `<completion>` 标记结束
-
-❌ 错误示例：
-```
-我理解您的需求，但由于配额限制，我将直接执行任务...
-请问您需要我做什么？
-```
-
-✅ 正确示例：
-```
-<ps_call> Get-Content -Path "文件路径" -Encoding UTF8 </ps_call>
-<completion>
-任务完成
-</completion>
-```
-"""
+        # 加载模板并渲染
+        template = self._load_system_prompt_template()
+        base_system_prompt = template.format(
+            tree_info=tree_info,
+            predefined_section=predefined_section
+        )
 
         self.history.append(Message(role="system", content=base_system_prompt))
 
@@ -288,6 +178,26 @@ class SimpleAgent:
         project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
         agents_dir = os.path.join(project_root, "agents")
         return agents_dir if os.path.isdir(agents_dir) else ""
+
+    def _get_templates_dir(self) -> str:
+        """获取模板目录路径"""
+        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        templates_dir = os.path.join(project_root, "templates")
+        return templates_dir if os.path.isdir(templates_dir) else ""
+
+    def _load_system_prompt_template(self) -> str:
+        """加载系统提示词模板"""
+        templates_dir = self._get_templates_dir()
+        if not templates_dir:
+            # 如果模板目录不存在，返回默认模板（向后兼容）
+            return ""
+
+        template_path = os.path.join(templates_dir, "system_prompt.txt")
+        try:
+            with open(template_path, "r", encoding="utf-8") as f:
+                return f.read()
+        except (OSError, UnicodeDecodeError):
+            return ""
 
     def _format_predefined_agent_section(self, agents: list[dict[str, str]]) -> str:
         """格式化预定义 agent 部分，注入 system_prompt_injection
@@ -481,7 +391,7 @@ class SimpleAgent:
 
         # 检查是否完成
         if self._is_completed(response):
-            summary = self._extract_completion(response)
+            summary = self._extract_return(response)
             return StepResult(outputs=self._add_depth_prefix(outputs), action=Action.COMPLETE, data=summary, pending_commands=pending_commands, command_blocks=command_blocks)
 
         # 检查是否需要等待用户输入
@@ -541,6 +451,10 @@ class SimpleAgent:
 
     def _call_llm(self) -> tuple[str, str]:
         """调用LLM，返回 (content, reasoning)"""
+        # 触发保存快照回调（在发送消息前保存当前状态）
+        if self._before_llm_callback:
+            self._before_llm_callback(self)
+
         messages = [{"role": msg.role, "content": msg.content} for msg in self.history]
 
         # 使用 LLM 客户端
@@ -554,15 +468,15 @@ class SimpleAgent:
 
     def _has_action_tags(self, response: str) -> bool:
         """检查是否有操作标签"""
-        return bool(re.search(r'<(ps_call|create_agent|completion)\b', response, re.IGNORECASE))
+        return bool(re.search(r'<(ps_call|create_agent|return)\b', response, re.IGNORECASE))
 
     def _is_completed(self, response: str) -> bool:
         """检查是否完成"""
-        return bool(re.search(r'<completion\b', response, re.IGNORECASE))
+        return bool(re.search(r'<return\b', response, re.IGNORECASE))
 
-    def _extract_completion(self, response: str) -> str:
-        """提取完成内容"""
-        match = re.search(r'<completion>\s*(.+?)\s*</completion>', response, re.DOTALL)
+    def _extract_return(self, response: str) -> str:
+        """提取返回内容"""
+        match = re.search(r'<return>\s*(.+?)\s*</return>', response, re.DOTALL)
         return match.group(1) if match else "任务完成"
 
     def _parse_tools(self, response: str) -> tuple[list[str], list[str], list[str]]:
@@ -636,12 +550,13 @@ class Executor:
     维护上下文栈，处理Agent切换逻辑
     """
 
-    def __init__(self, config: Optional[Config] = None, max_depth: int = 4):
+    def __init__(self, config: Optional[Config] = None, max_depth: int = 4, session_manager: Optional['SessionManager'] = None):
         """初始化执行器
 
         Args:
             config: 配置对象
             max_depth: 最大深度
+            session_manager: 会话管理器（用于保存快照）
         """
         self.config = config or Config.from_env()
         self.max_depth = max_depth
@@ -659,6 +574,48 @@ class Executor:
         # 自动同意：当前目录安全文件操作自动执行
         self.auto_approve: bool = False
 
+        # 会话管理（用于快照保存）
+        self.session_manager = session_manager
+        self._snapshot_index = 0  # 当前快照索引
+
+    def _create_agent(self, depth: int = 0, global_subagent_count: int = 0, agent_name: Optional[str] = None) -> SimpleAgent:
+        """创建 Agent 并设置回调
+
+        Args:
+            depth: 当前深度
+            global_subagent_count: 全局子Agent计数
+            agent_name: 预定义 agent 名称
+
+        Returns:
+            配置好的 SimpleAgent 实例
+        """
+        agent = SimpleAgent(
+            config=self.config,
+            depth=depth,
+            max_depth=self.max_depth,
+            global_subagent_count=global_subagent_count,
+            agent_name=agent_name
+        )
+        # 设置 LLM 调用前的回调（用于保存快照）
+        if self.session_manager:
+            agent.set_before_llm_callback(self._save_snapshot_callback)
+        return agent
+
+    def _save_snapshot_callback(self, agent: SimpleAgent):
+        """LLM调用前的保存回调
+
+        Args:
+            agent: 即将调用 LLM 的 Agent
+        """
+        if self.session_manager and self.session_manager.current_session_id is not None:
+            session_id = self.session_manager.current_session_id
+            self.session_manager.save_snapshot(
+                executor=self,
+                session_id=session_id,
+                snapshot_index=self._snapshot_index
+            )
+            self._snapshot_index += 1
+
     def run(self, task: str) -> Generator[tuple[list[str], StepResult], None, None]:
         """运行任务
 
@@ -670,10 +627,8 @@ class Executor:
         """
         # 创建顶级Agent（如果不存在）
         if not self.current_agent:
-            self.current_agent = SimpleAgent(
-                config=self.config,
+            self.current_agent = self._create_agent(
                 depth=0,
-                max_depth=self.max_depth,
                 global_subagent_count=self._global_subagent_count
             )
             self.current_agent.start(task)
@@ -726,10 +681,8 @@ class Executor:
                     predefined_content = self.current_agent._load_agent_full_content(request.agent_name)
 
                 # 创建子 agent，传递 agent_name 用于 forbidden_agents 过滤
-                self.current_agent = SimpleAgent(
-                    config=self.config,
+                self.current_agent = self._create_agent(
                     depth=self.current_agent.depth + 1,
-                    max_depth=self.max_depth,
                     global_subagent_count=request.global_count,
                     agent_name=request.agent_name or ""
                 )

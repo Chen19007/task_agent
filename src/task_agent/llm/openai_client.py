@@ -31,12 +31,15 @@ class OpenAIClient(LLMClient):
             "model": self.config.model,
             "messages": messages,
             "stream": False,  # 非流式
-            "max_completion_tokens": max_tokens,
+            "max_tokens": max_tokens,  # 使用 max_tokens 兼容更多 API
         }
 
         try:
             response = requests.post(url, json=payload, headers=headers, timeout=self.config.timeout)
-            response.raise_for_status()
+            if response.status_code != 200:
+                # 打印详细错误信息
+                error_detail = response.text if response.text else str(response.status_code)
+                raise RuntimeError(f"OpenAI API 请求失败: {response.status_code} {response.reason}\n响应内容: {error_detail}")
             data = response.json()
 
             choices = data.get("choices", [])
