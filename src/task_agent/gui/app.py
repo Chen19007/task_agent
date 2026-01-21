@@ -517,6 +517,7 @@ class TaskAgentGUI:
                 self._pending_status = None
             if self.chat_panel:
                 self.chat_panel.update_layout()
+                self.chat_panel.flush_scroll()
 
             # 渲染
             dpg.render_dearpygui_frame()

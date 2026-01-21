@@ -60,6 +60,7 @@ class ChatPanel:
         self.command_mode = False
         self.command_history: list[str] = []
         self._command_history_index = 0
+        self._pending_scroll = False
 
         self._input_handler: Optional[int] = None
         self._input_line_height = 20
@@ -349,8 +350,17 @@ class ChatPanel:
     def _scroll_to_bottom(self):
         """滚动到底部"""
         if self.messages_container:
+            self._pending_scroll = True
             scroll_max = dpg.get_y_scroll_max(self.messages_container)
             dpg.set_y_scroll(self.messages_container, value=scroll_max)
+
+    def flush_scroll(self):
+        """在渲染循环中触发滚动"""
+        if not self._pending_scroll or not self.messages_container:
+            return
+        scroll_max = dpg.get_y_scroll_max(self.messages_container)
+        dpg.set_y_scroll(self.messages_container, value=scroll_max)
+        self._pending_scroll = False
 
     def clear_messages(self):
         """清空消息"""
