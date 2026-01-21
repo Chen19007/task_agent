@@ -178,15 +178,17 @@ class SessionManager:
             executor.context_stack = []
             for agent_data in data.get("context_stack", []):
                 agent = self._deserialize_agent(agent_data, config, executor._global_subagent_count)
-                # 恢复回调
-                agent.set_before_llm_callback(executor._save_snapshot_callback)
+                # 恢复双回调
+                agent.set_before_llm_callback(executor._before_llm_snapshot_callback)
+                agent.set_after_llm_callback(executor._after_llm_snapshot_callback)
                 executor.context_stack.append(agent)
             if data.get("current_agent"):
                 executor.current_agent = self._deserialize_agent(
                     data["current_agent"], config, executor._global_subagent_count
                 )
-                # 恢复回调
-                executor.current_agent.set_before_llm_callback(executor._save_snapshot_callback)
+                # 恢复双回调
+                executor.current_agent.set_before_llm_callback(executor._before_llm_snapshot_callback)
+                executor.current_agent.set_after_llm_callback(executor._after_llm_snapshot_callback)
             self.current_session_id = session_id
             self.current_snapshot_index[session_id] = data.get("snapshot_index", max_index)
             return executor

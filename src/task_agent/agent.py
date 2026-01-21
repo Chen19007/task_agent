@@ -96,8 +96,9 @@ class SimpleAgent:
         # 待执行的子Agent任务请求（step()返回时携带）
         self._pending_child_request: Optional[ChildTaskRequest] = None
 
-        # LLM调用前的回调函数（用于保存快照）
+        # LLM调用前后的回调函数（用于保存快照）
         self._before_llm_callback: Optional[callable] = None
+        self._after_llm_callback: Optional[callable] = None
 
     def set_before_llm_callback(self, callback: callable):
         """设置LLM调用前的回调函数
@@ -106,6 +107,14 @@ class SimpleAgent:
             callback: 回调函数，签名为 callback(agent: SimpleAgent) -> None
         """
         self._before_llm_callback = callback
+
+    def set_after_llm_callback(self, callback: callable):
+        """设置LLM响应后的回调函数
+
+        Args:
+            callback: 回调函数，签名为 callback(agent: SimpleAgent) -> None
+        """
+        self._after_llm_callback = callback
 
     def _init_system_prompt(self):
         """初始化系统提示词"""
@@ -312,8 +321,12 @@ class SimpleAgent:
 
         Returns:
             StepResult: 执行结果
+
+        快照时机：
+        1. _call_llm() 内部：调用前保存前快照（不含 assistant）
+        2. 添加消息后：调用后保存后快照（含 assistant）
         """
-        # 调用LLM
+        # 调用LLM（内部会触发 before_llm_callback 保存前快照）
         content, reasoning = self._call_llm()
 
         # 组合输出：reasoning（如果有） + content
@@ -321,7 +334,12 @@ class SimpleAgent:
         output_for_display = reasoning + content if reasoning else content
         response = content  # 只有 content 参与标签解析
 
+        # 添加 assistant 消息到历史
         self._add_message("assistant", response)
+
+        # LLM 响应后：保存后快照（含完整对话）
+        if self._after_llm_callback:
+            self._after_llm_callback(self)
 
         # 格式化输出
         outputs = []
@@ -596,13 +614,18 @@ class Executor:
             global_subagent_count=global_subagent_count,
             agent_name=agent_name
         )
-        # 设置 LLM 调用前的回调（用于保存快照）
+        # 设置双回调（前快照 + 后快照）
         if self.session_manager:
-            agent.set_before_llm_callback(self._save_snapshot_callback)
+            agent.set_before_llm_callback(self._before_llm_snapshot_callback)
+            agent.set_after_llm_callback(self._after_llm_snapshot_callback)
         return agent
 
-    def _save_snapshot_callback(self, agent: SimpleAgent):
-        """LLM调用前的保存回调
+    def _before_llm_snapshot_callback(self, agent: SimpleAgent):
+        """LLM调用前的保存回调（前快照，用于回滚）
+
+        索引策略：
+        - 使用当前索引 N，保存后不递增
+        - 等待 after_llm_snapshot_callback 递增到 N+2
 
         Args:
             agent: 即将调用 LLM 的 Agent
@@ -614,6 +637,28 @@ class Executor:
                 session_id=session_id,
                 snapshot_index=self._snapshot_index
             )
+            # 注意：不递增索引，留给 after_llm_snapshot_callback
+
+    def _after_llm_snapshot_callback(self, agent: SimpleAgent):
+        """LLM响应后的保存回调（后快照，含完整状态）
+
+        索引策略：
+        - 使用索引 N+1（前快照之后）
+        - 保存后递增到 N+2（为下一轮做准备）
+
+        Args:
+            agent: 已获取 LLM 响应的 Agent
+        """
+        if self.session_manager and self.session_manager.current_session_id is not None:
+            session_id = self.session_manager.current_session_id
+            # 递增索引（为后快照使用）
+            self._snapshot_index += 1
+            self.session_manager.save_snapshot(
+                executor=self,
+                session_id=session_id,
+                snapshot_index=self._snapshot_index
+            )
+            # 再次递增（为下一轮做准备）
             self._snapshot_index += 1
 
     def run(self, task: str) -> Generator[tuple[list[str], StepResult], None, None]:
