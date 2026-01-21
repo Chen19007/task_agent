@@ -138,11 +138,13 @@ class SessionManager:
             print(f"[error]保存快照失败: {e}[/error]")
             return False
 
-    def _deserialize_agent(self, agent_data: dict, config: Config, global_count: int) -> SimpleAgent:
+    def _deserialize_agent(self, agent_data: dict, config: Config, global_count: int,
+                           output_handler: Optional['OutputHandler'] = None) -> SimpleAgent:
         agent = SimpleAgent(
             config=config,
             depth=agent_data["depth"],
-            global_subagent_count=global_count
+            global_subagent_count=global_count,
+            output_handler=output_handler
         )
         agent.agent_id = agent_data["agent_id"]
         for msg_data in agent_data["history"]:
@@ -155,7 +157,8 @@ class SessionManager:
         return agent
 
 
-    def load_session(self, session_id: int, config: Config) -> Optional[Executor]:
+    def load_session(self, session_id: int, config: Config,
+                     output_handler: Optional['OutputHandler'] = None) -> Optional[Executor]:
         try:
             # 查找该会话的最大快照索引
             max_index = self._get_max_snapshot_index(session_id)
@@ -166,20 +169,28 @@ class SessionManager:
             snapshot_path = self.get_snapshot_path(session_id, max_index)
             with open(snapshot_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            executor = Executor(config, session_manager=self)
+            executor = Executor(config, session_manager=self, output_handler=output_handler)
             executor._global_subagent_count = data.get("global_subagent_count", 0)
             executor.auto_approve = data.get("auto_approve", False)
             executor._snapshot_index = data.get("snapshot_index", max_index) + 1  # 下一个快照索引
             executor.context_stack = []
             for agent_data in data.get("context_stack", []):
-                agent = self._deserialize_agent(agent_data, config, executor._global_subagent_count)
+                agent = self._deserialize_agent(
+                    agent_data,
+                    config,
+                    executor._global_subagent_count,
+                    output_handler=output_handler
+                )
                 # 恢复双回调
                 agent.set_before_llm_callback(executor._before_llm_snapshot_callback)
                 agent.set_after_llm_callback(executor._after_llm_snapshot_callback)
                 executor.context_stack.append(agent)
             if data.get("current_agent"):
                 executor.current_agent = self._deserialize_agent(
-                    data["current_agent"], config, executor._global_subagent_count
+                    data["current_agent"],
+                    config,
+                    executor._global_subagent_count,
+                    output_handler=output_handler
                 )
                 # 恢复双回调
                 executor.current_agent.set_before_llm_callback(executor._before_llm_snapshot_callback)
@@ -279,7 +290,7 @@ class SessionManager:
 
         # 创建新 executor（传递 session_manager 以支持快照保存）
         config = executor.config
-        new_executor = Executor(config, session_manager=self)
+        new_executor = Executor(config, session_manager=self, output_handler=executor._output_handler)
 
         if temp:
             # 临时会话：不分配 ID，等用户执行任务后再分配

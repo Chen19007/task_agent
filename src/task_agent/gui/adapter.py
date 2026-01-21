@@ -27,6 +27,7 @@ class ExecutorAdapter:
         """
         self.config = config or Config.from_env()
         self.session_manager = SessionManager()
+        self.output_handler = output_handler
         self.executor = Executor(
             self.config,
             session_manager=self.session_manager,
@@ -67,7 +68,8 @@ class ExecutorAdapter:
         """加载会话"""
         new_executor = self.session_manager.load_session(
             session_id,
-            self.config
+            self.config,
+            output_handler=self.output_handler
         )
         if new_executor:
             self.executor = new_executor

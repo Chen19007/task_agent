@@ -60,11 +60,17 @@ class SessionList:
 
     def _on_select(self, sender, app_data, user_data=None):
         """会话选择回调"""
-        # 处理 app_data 可能是字符串或整数的情况
-        try:
-            index = int(app_data) if isinstance(app_data, str) else app_data
-        except (ValueError, TypeError):
-            return
+        # app_data 通常是选中的显示文本
+        if isinstance(app_data, str):
+            items = dpg.get_item_configuration(self.list_id).get("items", [])
+            if app_data not in items:
+                return
+            index = items.index(app_data)
+        else:
+            try:
+                index = int(app_data)
+            except (ValueError, TypeError):
+                return
 
         if 0 <= index < len(self._sessions):
             session_id = self._sessions[index].get("session_id")

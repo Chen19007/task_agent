@@ -157,6 +157,8 @@ class AsyncExecutor:
                     message = f"用户建议：{user_input}"
                     result_msg = f'<ps_call_result id="rejected">\n{message}\n</ps_call_result>'
 
+                self._emit_command_result(message, action)
+
                 # 发送结果给 Agent
                 if self.adapter.executor.current_agent:
                     self.adapter.executor.current_agent._add_message("user", result_msg)
@@ -324,6 +326,8 @@ class AsyncExecutor:
 
             result_msg = f'<ps_call_result id="executed">\n{message}\n</ps_call_result>'
 
+            self._emit_command_result(message, "executed")
+
             # 发送结果给 Agent
             if self.adapter.executor.current_agent:
                 self.adapter.executor.current_agent._add_message("user", result_msg)
@@ -332,6 +336,12 @@ class AsyncExecutor:
             error_msg = f"命令执行异常：{str(e)}"
             if self.adapter.executor.current_agent:
                 self.adapter.executor.current_agent._add_message("user", f'<ps_call_result id="executed">\n{error_msg}\n</ps_call_result>')
+
+    def _emit_command_result(self, message: str, status: str):
+        """直接向 GUI 输出命令结果"""
+        output_handler = getattr(self.adapter.executor, "_output_handler", None)
+        if output_handler:
+            output_handler.on_ps_call_result(message, status)
 
     def stop(self):
         """停止当前执行"""

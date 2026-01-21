@@ -3,6 +3,7 @@
 显示消息历史和输入框。
 """
 
+import math
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -52,22 +53,79 @@ class ChatPanel:
         self.stop_button: Optional[int] = None
         self.auto_checkbox: Optional[int] = None
 
+        self._input_handler: Optional[int] = None
+        self._input_line_height = 20
+        self._input_min_lines = 3
+        self._input_max_lines = 10
+
         self._create_ui()
+
+    def _estimate_text_height(self, content: str, min_lines: int = 1, max_lines: Optional[int] = None) -> int:
+        """根据行数估算文本高度"""
+        lines = content.count("\n") + 1 if content else 1
+        lines = max(lines, min_lines)
+        if max_lines is not None:
+            lines = min(lines, max_lines)
+        return lines * self._input_line_height + 6
+
+    def _update_input_height(self, content: str):
+        """根据内容更新输入框高度"""
+        if not self.input_field:
+            return
+        lines = None
+        width = None
+        if hasattr(dpg, "get_item_rect_size"):
+            width = dpg.get_item_rect_size(self.input_field)[0]
+        elif hasattr(dpg, "get_item_width"):
+            width = dpg.get_item_width(self.input_field)
+        if width and hasattr(dpg, "get_text_size") and content:
+            wrap_width = max(int(width) - 20, 1)
+            text_height = dpg.get_text_size(content, wrap_width=wrap_width)[1]
+            lines = max(1, int(math.ceil(text_height / self._input_line_height)))
+
+        if lines is None:
+            lines = content.count("\n") + 1 if content else 1
+        lines = max(lines, self._input_min_lines)
+        lines = min(lines, self._input_max_lines)
+        height = lines * self._input_line_height + 6
+        dpg.configure_item(self.input_field, height=height)
+        self.update_layout()
+
+    def _get_item_height(self, item_id: int) -> int:
+        """获取组件高度（若不可用则返回 0）"""
+        if not item_id:
+            return 0
+        if hasattr(dpg, "get_item_rect_size"):
+            return int(dpg.get_item_rect_size(item_id)[1])
+        if hasattr(dpg, "get_item_height"):
+            return int(dpg.get_item_height(item_id))
+        return 0
+
+    def update_layout(self):
+        """根据可用空间调整消息区高度"""
+        if not self.messages_container or not self.input_container:
+            return
+        parent_height = self._get_item_height(self.parent)
+        input_height = self._get_item_height(self.input_container)
+        if not parent_height or not input_height:
+            return
+        target = max(parent_height - input_height - 4, self._input_line_height * 3)
+        dpg.configure_item(self.messages_container, height=target)
 
     def _create_ui(self):
         """创建 UI"""
         # 主布局：垂直分割，消息在上，输入在下
         with dpg.group(parent=self.parent):
-            # 消息显示区域（可滚动，占据剩余空间）
+            # 消息显示区域（可滚动，高度由可用空间计算）
             self.messages_container = dpg.add_child_window(
-                height=-1,  # 占据剩余空间
+                height=200,
                 border=False,
-                no_scrollbar=False  # 允许独立滚动
+                no_scrollbar=False
             )
 
-            # 输入区域（独立，固定高度，使用 group 而非 child_window）
-            with dpg.group():
-                # 限制输入区域总高度
+            # 输入区域（固定在底部）
+            self.input_container = dpg.add_group()
+            with dpg.group(parent=self.input_container):
                 dpg.add_spacer(height=5)
                 dpg.add_separator()
 
@@ -85,16 +143,21 @@ class ChatPanel:
 
                 # 输入框和按钮
                 with dpg.group(horizontal=True):
-                    # 输入框设置为多行，Ctrl+Enter 发送
-                    # 高度计算：每行约20px，设置3行高度 = 60px
+                    # 输入框设置为多行，Ctrl+Enter 发送，随内容自适应高度
                     self.input_field = dpg.add_input_text(
                         hint="输入任务描述... (Ctrl+Enter 发送)",
                         width=-1,
                         multiline=True,
                         on_enter=True,  # 单行回车不发送，需要 Ctrl+Enter
                         callback=self._on_enter,
-                        height=60  # 3行文本的高度 (3 * 20px)
+                        height=self._estimate_text_height("", min_lines=self._input_min_lines)
                     )
+
+                    handler_add = getattr(dpg, "add_item_edited_handler", None) or getattr(dpg, "add_item_edit_handler", None)
+                    if handler_add:
+                        self._input_handler = dpg.add_item_handler_registry()
+                        handler_add(callback=self._on_input_edit, parent=self._input_handler)
+                        dpg.bind_item_handler_registry(self.input_field, self._input_handler)
 
                     self.send_button = dpg.add_button(
                         label="发送",
@@ -109,6 +172,12 @@ class ChatPanel:
                     )
                     # 默认禁用停止按钮
                     dpg.disable_item(self.stop_button)
+        self.update_layout()
+
+    def _on_input_edit(self, sender, app_data, user_data=None):
+        """输入框编辑回调，用于自适应高度"""
+        content = dpg.get_value(self.input_field)
+        self._update_input_height(content)
 
     def _on_enter(self, sender, app_data, user_data=None):
         """回车键回调 - 只在 Ctrl+Enter 时发送"""
@@ -141,6 +210,7 @@ class ChatPanel:
                 self.on_send(message)
             # 清空输入框
             dpg.set_value(self.input_field, "")
+            self._update_input_height("")
 
     def _on_stop(self, sender, app_data, user_data=None):
         """停止按钮回调"""
@@ -186,7 +256,8 @@ class ChatPanel:
                 default_value=content,
                 multiline=True,
                 readonly=True,
-                width=-1
+                width=-1,
+                height=self._estimate_text_height(content)
             )
 
             # 添加间隔
@@ -230,11 +301,6 @@ class ChatPanel:
 
         with dpg.group(parent=self.messages_container):
             with dpg.collapsing_header(label=label, default_open=not collapsed):
-                # 计算内容行数，设置合适的初始高度
-                lines = content.count('\n') + 1
-                # 每行约20像素高，最小3行，最大20行
-                height = min(max(lines * 20, 60), 400)
-
                 # 使用 input_text 实现可选择复制的文本
                 # 设置高度但不使用 multiline 的 autosize（因为不稳定）
                 dpg.add_input_text(
@@ -242,7 +308,7 @@ class ChatPanel:
                     multiline=True,
                     readonly=True,
                     width=-1,
-                    height=height
+                    height=self._estimate_text_height(content, min_lines=3)
                 )
             dpg.add_spacer(height=5)
 
@@ -263,7 +329,8 @@ class ChatPanel:
                 default_value=content,
                 multiline=True,
                 readonly=True,
-                width=-1
+                width=-1,
+                height=self._estimate_text_height(content)
             )
 
         self._scroll_to_bottom()

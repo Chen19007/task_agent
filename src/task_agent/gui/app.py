@@ -58,8 +58,8 @@ class TaskAgentGUI:
         self._create_main_window()
 
         # 现在创建 GUIOutput 和适配器（chat_panel 已创建）
-        gui_output = GUIOutput(self.chat_panel)
-        self.adapter = ExecutorAdapter(self.config, output_handler=gui_output)
+        self.gui_output = GUIOutput(self.chat_panel)
+        self.adapter = ExecutorAdapter(self.config, output_handler=self.gui_output)
         self.async_executor = AsyncExecutor(self.adapter)
 
         # 状态
@@ -70,6 +70,20 @@ class TaskAgentGUI:
 
         # 加载当前会话历史
         self._load_current_session()
+
+    def _render_session_messages(self, messages: list[dict]):
+        """按 GUI 展示格式渲染历史消息"""
+        self.chat_panel.clear_messages()
+        for msg in messages:
+            role = msg.get("role")
+            content = msg.get("content", "")
+            timestamp = msg.get("timestamp", 0.0)
+            if role == "assistant":
+                if content and content.strip():
+                    self.gui_output.render_history_content(content)
+            else:
+                self.chat_panel.add_message(role, content, timestamp)
+        self.gui_output.flush()
 
     def _check_llm_connection(self) -> bool:
         """检查 LLM 服务连接"""
@@ -159,7 +173,7 @@ class TaskAgentGUI:
 
         # 创建主窗口（不设置固定尺寸，让它适应视口）
         with dpg.window(label="Task Agent", tag="main_window",
-                       no_scrollbar=True, no_scroll_with_mouse=True):
+                        no_scrollbar=True, no_scroll_with_mouse=True):
             # 状态栏（使用 input_text 以便复制）
             with dpg.group(horizontal=True):
                 self.status_text = dpg.add_input_text(
@@ -169,30 +183,51 @@ class TaskAgentGUI:
                 )
             dpg.add_separator()
 
+            content_container = dpg.add_child_window(
+                border=False,
+                no_scrollbar=True,
+                no_scroll_with_mouse=True,
+                width=-1,
+                height=-1
+            )
+
             # 主布局：左右分割（独立滚动）
-            with dpg.group(horizontal=True):
+            with dpg.group(parent=content_container, horizontal=True):
                 # 左侧：会话列表 (25%)
-                with dpg.group(width=250):
-                    # 获取 sessions 目录路径
-                    import os
-                    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-                    sessions_dir = os.path.join(project_root, "sessions")
-
-                    self.session_list = SessionList(
-                        parent=dpg.last_container(),
-                        sessions_dir=sessions_dir,
-                        on_session_select=self._on_session_select
-                    )
-                    self.session_list.set_on_new_session(self._on_new_session)
-
+                left_panel = dpg.add_child_window(
+                    border=False,
+                    no_scrollbar=True,
+                    no_scroll_with_mouse=True,
+                    width=250,
+                    height=-1
+                )
                 # 右侧：聊天面板 (75%)
-                with dpg.group():
-                    self.chat_panel = ChatPanel(
-                        parent=dpg.last_container(),
-                        on_send=self._on_send,
-                        on_stop=self._on_stop,
-                        on_auto_toggle=self._on_auto_toggle
-                    )
+                right_panel = dpg.add_child_window(
+                    border=False,
+                    no_scrollbar=True,
+                    no_scroll_with_mouse=True,
+                    width=-1,
+                    height=-1
+                )
+
+                # 获取 sessions 目录路径
+                import os
+                project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+                sessions_dir = os.path.join(project_root, "sessions")
+
+                self.session_list = SessionList(
+                    parent=left_panel,
+                    sessions_dir=sessions_dir,
+                    on_session_select=self._on_session_select
+                )
+                self.session_list.set_on_new_session(self._on_new_session)
+
+                self.chat_panel = ChatPanel(
+                    parent=right_panel,
+                    on_send=self._on_send,
+                    on_stop=self._on_stop,
+                    on_auto_toggle=self._on_auto_toggle
+                )
 
         # 绑定全局字体（在创建窗口之后，setup 之前）
         if hasattr(self, '_font_id') and self._font_id is not None:
@@ -212,7 +247,7 @@ class TaskAgentGUI:
         if session_id:
             messages = self.session_list.load_session_messages(session_id)
             if messages:
-                self.chat_panel.load_messages(messages)
+                self._render_session_messages(messages)
 
             # 恢复 auto 状态
             auto_enabled = self.adapter.executor.auto_approve
@@ -265,11 +300,11 @@ class TaskAgentGUI:
             # 先在聊天区域显示切换提示
             self.chat_panel.add_text(f"\n>>> 已切换到会话 #{session_id} <<<\n")
 
-            self.chat_panel.clear_messages()
             messages = self.session_list.load_session_messages(session_id)
             if messages:
-                self.chat_panel.load_messages(messages)
+                self._render_session_messages(messages)
             else:
+                self.chat_panel.clear_messages()
                 self.chat_panel.add_text("(空会话，无历史消息)\n")
 
             # 恢复 auto 状态
@@ -305,7 +340,8 @@ class TaskAgentGUI:
         注意：GUI 通过 OutputHandler 回调接收结构化输出，
         outputs 列表主要用于 CLI 命令确认流程，GUI 可以忽略大部分内容。
         """
-        # GUI 不需要处理 outputs，因为内容已经通过 on_think/on_content 等回调显示了
+        if self.gui_output:
+            self.gui_output.flush()
 
         # 检查动作
         if result and result.action == Action.COMPLETE:
@@ -444,6 +480,10 @@ class TaskAgentGUI:
         while dpg.is_dearpygui_running():
             # 处理队列
             self._process_queue()
+            if self.gui_output:
+                self.gui_output.flush()
+            if self.chat_panel:
+                self.chat_panel.update_layout()
 
             # 渲染
             dpg.render_dearpygui_frame()
