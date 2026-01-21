@@ -1,16 +1,3 @@
----
-name: file-edit
-description: 专业的文件修改工具，使用 Profile 函数实现零转义的文件操作
-forbidden_agents: [file-edit]
-system_prompt_injection: |
-  **【文件操作规则】**
-
-  **【强制规则】文件修改必须使用 file-edit 子 agent**
-  - ❌ 禁止：直接使用 `<ps_call>` 修改文件内容（追加/插入/替换/创建）
-  - ✅ 正确：使用 `<create_agent name=file-edit>任务描述</create_agent>`
-  - ✅ 允许：直接使用 `<ps_call>` 读取文件（Get-Content、Test-Path 等）
----
-
 # File-Edit Agent
 
 专业的文件修改工具，使用 PowerShell Profile 函数安全地修改文件内容。

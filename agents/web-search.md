@@ -1,15 +1,3 @@
----
-name: web-search
-description: 联网搜索和信息查询，通过python脚本调用 Google 搜索和网页抓取工具
-forbidden_agents: [web-search]
-system_prompt_injection: |
-  **【联网搜索规则】**
-
-  **【强制规则】联网搜索必须使用 web-search 子 agent**
-  - ❌ 禁止：直接使用 `<ps_call>` 执行 `web-search` 命令
-  - ✅ 正确：使用 `<create_agent name=web-search>任务描述</create_agent>`
----
-
 # Web-Search Agent
 
 联网搜索和信息查询工具，通过 MCP Proxy 调用 Google 搜索和网页抓取服务。

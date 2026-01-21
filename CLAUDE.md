@@ -49,8 +49,9 @@ task-agent "安装项目依赖" --timeout 120 --model qwen2.5:7b --verbose
 - **Result aggregation**: Sub-agent results are aggregated back to parent context
 
 **Tool tag system** (XML-like format):
-- `<ps_call id="ID"> command </ps_call>` - Execute PowerShell/bash commands
-- `<create_agent id="ID"> task </create_agent>` - Create sub-agent for task
+- `<ps_call> command </ps_call>` - Execute PowerShell/bash commands
+- `<create_agent> task </create_agent>` - Create sub-agent for task
+- `<create_agent name=agent_name> task </create_agent>` - Create predefined sub-agent
 - `<completion> summary </completion>` - Mark task completion
 
 ### Module Structure

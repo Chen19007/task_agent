@@ -1,5 +1,6 @@
 """极简 Agent 核心模块 - 上下文切换架构"""
 
+import json
 import re
 import sys
 import time
@@ -257,78 +258,36 @@ class SimpleAgent:
         self.history.append(Message(role="system", content=base_system_prompt))
 
     def _load_predefined_agent_metadata(self) -> list[dict[str, str]]:
+        """加载预定义 agent 的元数据（从 .json 文件）"""
         agents_dir = self._get_project_agents_dir()
         if not agents_dir:
             return []
         agents: list[dict[str, str]] = []
+
+        # 遍历 .json 文件
         for filename in sorted(os.listdir(agents_dir)):
-            if not filename.lower().endswith(".md"):
+            if not filename.lower().endswith(".json"):
                 continue
-            path = os.path.join(agents_dir, filename)
+
+            json_path = os.path.join(agents_dir, filename)
             try:
-                with open(path, "r", encoding="utf-8") as handle:
-                    text = handle.read()
-            except (OSError, UnicodeDecodeError):
+                with open(json_path, "r", encoding="utf-8") as f:
+                    metadata = json.load(f)
+                # 确保 name 字段存在（从文件名推断）
+                if "name" not in metadata:
+                    base_name = os.path.splitext(filename)[0]
+                    metadata["name"] = base_name
+                metadata["file"] = filename
+                agents.append(metadata)
+            except (OSError, json.JSONDecodeError, UnicodeDecodeError):
                 continue
-            metadata = self._parse_agent_frontmatter(text)
-            if "name" not in metadata:
-                metadata["name"] = os.path.splitext(filename)[0]
-            metadata["file"] = filename
-            agents.append(metadata)
+
         return agents
 
     def _get_project_agents_dir(self) -> str:
         project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
         agents_dir = os.path.join(project_root, "agents")
         return agents_dir if os.path.isdir(agents_dir) else ""
-
-    def _parse_agent_frontmatter(self, text: str) -> dict[str, str]:
-        """解析 YAML frontmatter，支持多行值（使用 | 语法）"""
-        lines = text.splitlines()
-        if not lines or lines[0].strip() != "---":
-            return {}
-        end_index = None
-        for idx in range(1, len(lines)):
-            if lines[idx].strip() == "---":
-                end_index = idx
-                break
-        if end_index is None:
-            return {}
-        metadata: dict[str, str] = {}
-        i = 1
-        while i < end_index:
-            line = lines[i]
-            # 跳过空行
-            if not line.strip():
-                i += 1
-                continue
-            # 检查是否是键值对
-            if ":" in line:
-                key, value = line.split(":", 1)
-                key = key.strip()
-                value = value.rstrip()
-                # 检查是否是多行值标记
-                if value.strip() == "|":
-                    # 收集后续行作为值（直到下一个键或 ---）
-                    i += 1
-                    multiline_lines = []
-                    while i < end_index:
-                        next_line = lines[i]
-                        # 如果是下一个键（非空行且以非空格开头），停止
-                        if next_line.strip() and not next_line.startswith(" "):
-                            break
-                        # 添加这一行（保留缩进）
-                        multiline_lines.append(next_line)
-                        i += 1
-                    metadata[key] = "\n".join(multiline_lines).strip()
-                    continue
-                else:
-                    # 单行值
-                    value = value.strip().strip('"').strip("'")
-                    if key:
-                        metadata[key] = value
-            i += 1
-        return metadata
 
     def _format_predefined_agent_section(self, agents: list[dict[str, str]]) -> str:
         """格式化预定义 agent 部分，注入 system_prompt_injection
@@ -340,18 +299,22 @@ class SimpleAgent:
         injections = []
         for agent in agents:
             agent_name = agent.get("name", "")
-            # 解析该 agent 的 forbidden_agents
-            forbidden_str = agent.get("forbidden_agents", "")
+            # 获取 forbidden_agents（JSON 中是 list 类型）
+            forbidden = agent.get("forbidden_agents", [])
+
+            # 兼容处理：如果是字符串，解析为列表
             forbidden_list = []
-            if forbidden_str:
+            if isinstance(forbidden, list):
+                forbidden_list = forbidden
+            elif isinstance(forbidden, str):
                 # 解析 YAML 列表格式: [a, b, c]
-                forbidden_str = forbidden_str.strip()
-                if forbidden_str.startswith("[") and forbidden_str.endswith("]"):
-                    items = forbidden_str[1:-1].split(",")
+                forbidden = forbidden.strip()
+                if forbidden.startswith("[") and forbidden.endswith("]"):
+                    items = forbidden[1:-1].split(",")
                     forbidden_list = [item.strip().strip("'").strip('"') for item in items if item.strip()]
                 else:
                     # 单个值
-                    forbidden_list = [forbidden_str.strip().strip("'").strip('"')]
+                    forbidden_list = [forbidden.strip().strip("'").strip('"')]
 
             # 检查当前 agent_name 是否在该 agent 的 forbidden_agents 中
             # 如果不在，注入该 agent 的 system_prompt_injection
@@ -397,10 +360,10 @@ class SimpleAgent:
         return []
 
     def _load_agent_full_content(self, agent_name: str) -> Optional[str]:
-        """加载预定义 agent 的完整 markdown 内容（去除 frontmatter）
+        """加载预定义 agent 的完整 markdown 内容
 
         Args:
-            agent_name: agent 名称（如 'git-commit'）
+            agent_name: agent 名称（如 'file-edit'）
 
         Returns:
             markdown 正文内容，如果文件不存在则返回 None
@@ -409,21 +372,18 @@ class SimpleAgent:
         if not agents_dir:
             return None
 
-        # 查找匹配的文件（支持 git-commit.md 或 git_commit.md）
+        # 查找匹配的 .md 文件（支持 file-edit.md 或 file_edit.md）
         for filename in os.listdir(agents_dir):
+            # 只处理 .md 文件，跳过 .json 文件
+            if not filename.lower().endswith(".md"):
+                continue
+
             base_name = os.path.splitext(filename)[0].replace('_', '-')
             if base_name.lower() == agent_name.lower().replace('_', '-'):
                 path = os.path.join(agents_dir, filename)
                 try:
                     with open(path, "r", encoding="utf-8") as handle:
-                        text = handle.read()
-                    # 去除 YAML frontmatter
-                    lines = text.splitlines()
-                    if lines and lines[0].strip() == "---":
-                        for idx in range(1, len(lines)):
-                            if lines[idx].strip() == "---":
-                                return "\n".join(lines[idx+1:]).strip()
-                    return text.strip()
+                        return handle.read().strip()
                 except (OSError, UnicodeDecodeError):
                     return None
         return None
@@ -541,8 +501,8 @@ class SimpleAgent:
             global_count: 同步全局子Agent计数
         """
         if summary:
-            # 子Agent结果是工具执行的输出，用tool角色
-            self._add_message("tool", summary)
+            # 子Agent结果是工具执行的输出，用user角色（兼容不支持tool角色的API）
+            self._add_message("user", summary)
         # 同步全局计数
         self._global_subagent_count = global_count
 
@@ -636,6 +596,9 @@ class SimpleAgent:
         for match in re.finditer(r'<create_agent(?:\s+name=(\S+?))?\s*>(.+?)</create_agent>', response, re.DOTALL):
             if not self._pending_child_request:  # 只处理第一个
                 agent_name = match.group(1)  # name 属性值（如果有）
+                if agent_name:
+                    # 去除可能存在的引号（单引或双引）
+                    agent_name = agent_name.strip('"').strip("'")
                 task_content = match.group(2).strip()
                 # 创建 ChildTaskRequest 对象
                 # 注意：global_count 和 new_global_count 在 step() 中设置
@@ -692,6 +655,9 @@ class Executor:
 
         # 保存最近的 StepResult，供 cli.py 访问
         self.last_step_result: Optional[StepResult] = None
+
+        # 自动同意：当前目录安全文件操作自动执行
+        self.auto_approve: bool = False
 
     def run(self, task: str) -> Generator[tuple[list[str], StepResult], None, None]:
         """运行任务
