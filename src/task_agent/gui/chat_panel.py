@@ -28,7 +28,8 @@ class ChatPanel:
     """聊天面板组件"""
 
     def __init__(self, parent: int, on_send: Optional[Callable] = None,
-                 on_stop: Optional[Callable] = None, on_auto_toggle: Optional[Callable] = None):
+                 on_stop: Optional[Callable] = None, on_auto_toggle: Optional[Callable] = None,
+                 on_command: Optional[Callable] = None):
         """初始化聊天面板
 
         Args:
@@ -44,6 +45,7 @@ class ChatPanel:
         self.on_send = on_send
         self.on_stop = on_stop
         self.on_auto_toggle = on_auto_toggle
+        self.on_command = on_command
 
         self.messages: list[Message] = []
 
@@ -52,6 +54,12 @@ class ChatPanel:
         self.send_button: Optional[int] = None
         self.stop_button: Optional[int] = None
         self.auto_checkbox: Optional[int] = None
+        self.auto_container: Optional[int] = None
+        self.mode_button: Optional[int] = None
+
+        self.command_mode = False
+        self.command_history: list[str] = []
+        self._command_history_index = 0
 
         self._input_handler: Optional[int] = None
         self._input_line_height = 20
@@ -59,6 +67,7 @@ class ChatPanel:
         self._input_max_lines = 10
 
         self._create_ui()
+        self._register_key_handlers()
 
     def _estimate_text_height(self, content: str, min_lines: int = 1, max_lines: Optional[int] = None) -> int:
         """根据行数估算文本高度"""
@@ -130,7 +139,8 @@ class ChatPanel:
                 dpg.add_separator()
 
                 # auto 模式复选框
-                with dpg.group(horizontal=True):
+                self.auto_container = dpg.add_group()
+                with dpg.group(parent=self.auto_container, horizontal=True):
                     self.auto_checkbox = dpg.add_checkbox(
                         label="自动同意安全命令",
                         default_value=False,
@@ -141,28 +151,34 @@ class ChatPanel:
 
                 dpg.add_spacer(height=5)
 
-                # 输入框和按钮
+                # 输入框
+                self.input_field = dpg.add_input_text(
+                    hint="输入任务描述... (Ctrl+Enter 发送)",
+                    width=-1,
+                    multiline=True,
+                    on_enter=True,  # 单行回车不发送，需要 Ctrl+Enter
+                    callback=self._on_enter,
+                    height=self._estimate_text_height("", min_lines=self._input_min_lines)
+                )
+
+                handler_add = getattr(dpg, "add_item_edited_handler", None) or getattr(dpg, "add_item_edit_handler", None)
+                if handler_add:
+                    self._input_handler = dpg.add_item_handler_registry()
+                    handler_add(callback=self._on_input_edit, parent=self._input_handler)
+                    dpg.bind_item_handler_registry(self.input_field, self._input_handler)
+
+                # 按钮行
                 with dpg.group(horizontal=True):
-                    # 输入框设置为多行，Ctrl+Enter 发送，随内容自适应高度
-                    self.input_field = dpg.add_input_text(
-                        hint="输入任务描述... (Ctrl+Enter 发送)",
-                        width=-1,
-                        multiline=True,
-                        on_enter=True,  # 单行回车不发送，需要 Ctrl+Enter
-                        callback=self._on_enter,
-                        height=self._estimate_text_height("", min_lines=self._input_min_lines)
-                    )
-
-                    handler_add = getattr(dpg, "add_item_edited_handler", None) or getattr(dpg, "add_item_edit_handler", None)
-                    if handler_add:
-                        self._input_handler = dpg.add_item_handler_registry()
-                        handler_add(callback=self._on_input_edit, parent=self._input_handler)
-                        dpg.bind_item_handler_registry(self.input_field, self._input_handler)
-
                     self.send_button = dpg.add_button(
                         label="发送",
                         callback=self._on_send,
                         width=80
+                    )
+
+                    self.mode_button = dpg.add_button(
+                        label="命令模式",
+                        callback=self._on_toggle_mode,
+                        width=90
                     )
 
                     self.stop_button = dpg.add_button(
@@ -179,6 +195,59 @@ class ChatPanel:
         content = dpg.get_value(self.input_field)
         self._update_input_height(content)
 
+    def _on_toggle_mode(self, sender, app_data, user_data=None):
+        """切换聊天/命令模式"""
+        self.command_mode = not self.command_mode
+        if self.command_mode:
+            dpg.configure_item(self.input_field, multiline=False, height=28)
+            dpg.configure_item(self.input_field, hint="输入命令... (Enter 执行)")
+            if self.auto_container:
+                dpg.hide_item(self.auto_container)
+            dpg.configure_item(self.send_button, label="执行")
+            dpg.configure_item(self.mode_button, label="聊天模式")
+            if self.stop_button:
+                dpg.hide_item(self.stop_button)
+        else:
+            dpg.configure_item(self.input_field, multiline=True, height=self._estimate_text_height("", min_lines=self._input_min_lines))
+            dpg.configure_item(self.input_field, hint="输入任务描述... (Ctrl+Enter 发送)")
+            if self.auto_container:
+                dpg.show_item(self.auto_container)
+            dpg.configure_item(self.send_button, label="发送")
+            dpg.configure_item(self.mode_button, label="命令模式")
+            if self.stop_button:
+                dpg.show_item(self.stop_button)
+
+        dpg.set_value(self.input_field, "")
+        self._update_input_height("")
+
+    def _register_key_handlers(self):
+        """注册命令历史上下键"""
+        key_handler = getattr(dpg, "add_key_press_handler", None)
+        if not key_handler:
+            return
+        with dpg.handler_registry():
+            dpg.add_key_press_handler(key=dpg.mvKey_Up, callback=self._on_history_up)
+            dpg.add_key_press_handler(key=dpg.mvKey_Down, callback=self._on_history_down)
+
+    def _on_history_up(self, sender, app_data, user_data=None):
+        if not self.command_mode or not self.input_field or not dpg.is_item_focused(self.input_field):
+            return
+        if not self.command_history:
+            return
+        self._command_history_index = max(self._command_history_index - 1, 0)
+        dpg.set_value(self.input_field, self.command_history[self._command_history_index])
+
+    def _on_history_down(self, sender, app_data, user_data=None):
+        if not self.command_mode or not self.input_field or not dpg.is_item_focused(self.input_field):
+            return
+        if not self.command_history:
+            return
+        self._command_history_index = min(self._command_history_index + 1, len(self.command_history))
+        if self._command_history_index >= len(self.command_history):
+            dpg.set_value(self.input_field, "")
+        else:
+            dpg.set_value(self.input_field, self.command_history[self._command_history_index])
+
     def _on_enter(self, sender, app_data, user_data=None):
         """回车键回调 - 只在 Ctrl+Enter 时发送"""
         # Dear PyGui 多行输入框：on_enter=True 时，普通回车换行，Ctrl+Enter 触发回调
@@ -187,7 +256,10 @@ class ChatPanel:
         if message and message.strip():
             # Ctrl+Enter 时 app_data 是一个特殊值，普通回车是 None
             # Dear PyGui 的多行模式下，on_enter=True 时 Ctrl+Enter 才触发回调
-            self._on_send(sender, app_data, user_data)
+            if self.command_mode:
+                self._on_send(sender, app_data, user_data)
+            else:
+                self._on_send(sender, app_data, user_data)
 
     def _on_send(self, sender, app_data, user_data=None):
         """发送按钮回调"""
@@ -195,6 +267,14 @@ class ChatPanel:
         message = dpg.get_value(self.input_field)
         if message and message.strip():
             message = message.strip()
+
+            if self.command_mode:
+                self.command_history.append(message)
+                self._command_history_index = len(self.command_history)
+                if self.on_command:
+                    self.on_command(message)
+                dpg.set_value(self.input_field, "")
+                return
 
             # 检查是否为 /auto 命令
             if message.lower() == "/auto":

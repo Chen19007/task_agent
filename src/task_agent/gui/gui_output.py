@@ -60,6 +60,10 @@ class GUIOutput(OutputHandler):
         """等待输入"""
         self._queue.put(("wait_input", None))
 
+    def enqueue_plain_text(self, content: str):
+        """直接加入纯文本输出队列"""
+        self._queue.put(("plain_text", content))
+
     def flush(self):
         """在主线程渲染排队的输出"""
         while True:
@@ -136,6 +140,9 @@ class GUIOutput(OutputHandler):
                 self.chat_panel.add_text(text)
             elif event_type == "wait_input":
                 self.chat_panel.add_text("[等待用户输入]")
+            elif event_type == "plain_text":
+                if payload and payload.strip():
+                    self.chat_panel.add_text(payload)
 
     def render_history_content(self, content: str):
         """用于历史消息渲染，展示所有 tool tags"""

@@ -5,6 +5,8 @@
 
 import sys
 import time
+import threading
+from typing import Optional
 
 try:
     import dearpygui.dearpygui as dpg
@@ -47,6 +49,7 @@ class TaskAgentGUI:
         self.session_list: SessionList = None
         self.chat_panel: ChatPanel = None
         self.status_text: int = None
+        self._pending_status: Optional[str] = None
 
         # 初始化 Dear PyGui
         dpg.create_context()
@@ -226,7 +229,8 @@ class TaskAgentGUI:
                     parent=right_panel,
                     on_send=self._on_send,
                     on_stop=self._on_stop,
-                    on_auto_toggle=self._on_auto_toggle
+                    on_auto_toggle=self._on_auto_toggle,
+                    on_command=self._on_command
                 )
 
         # 绑定全局字体（在创建窗口之后，setup 之前）
@@ -274,6 +278,28 @@ class TaskAgentGUI:
         self.async_executor.stop()
         self._update_status("已停止")
         self.chat_panel.set_running(False)
+
+    def _on_command(self, command: str):
+        """命令模式执行"""
+        self._update_status("正在执行命令...")
+
+        def run():
+            try:
+                from ..cli import _execute_command
+                result = _execute_command(command, self.config.timeout)
+                if result.returncode == 0:
+                    output = result.stdout.strip() if result.stdout else "命令执行成功（无输出）"
+                else:
+                    output = result.stderr.strip() if result.stderr else f"命令执行失败（退出码: {result.returncode}）"
+                text = f"$ {command}\n{output}"
+                self.gui_output.enqueue_plain_text(text)
+                self._set_pending_status("命令执行完成")
+            except Exception as exc:
+                self.gui_output.enqueue_plain_text(f"$ {command}\n执行异常：{exc}")
+                self._set_pending_status("命令执行异常")
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
 
     def _on_auto_toggle(self, is_enabled: bool):
         """auto 模式切换回调
@@ -333,6 +359,10 @@ class TaskAgentGUI:
         """更新状态栏"""
         if self.status_text:
             dpg.set_value(self.status_text, f"模型: {self.config.model} | {text}")
+
+    def _set_pending_status(self, text: str):
+        """在线程安全地请求状态更新"""
+        self._pending_status = text
 
     def _process_output(self, outputs, result):
         """处理执行输出
@@ -482,6 +512,9 @@ class TaskAgentGUI:
             self._process_queue()
             if self.gui_output:
                 self.gui_output.flush()
+            if self._pending_status:
+                self._update_status(self._pending_status)
+                self._pending_status = None
             if self.chat_panel:
                 self.chat_panel.update_layout()
 
