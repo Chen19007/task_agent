@@ -138,23 +138,6 @@ class SessionManager:
             print(f"[error]保存快照失败: {e}[/error]")
             return False
 
-    def save_session(self, executor: Executor, session_id: int) -> bool:
-        """保存会话（使用当前 snapshot_index）
-
-        Args:
-            executor: 执行器
-            session_id: 会话ID
-
-        Returns:
-            bool: 是否保存成功
-        """
-        # 使用 executor 的当前 snapshot_index（双快照模式下是下一个可用索引）
-        # 如果需要追加新快照，使用 executor._snapshot_index
-        # 如果需要更新最后一个快照，使用 self.current_snapshot_index.get(session_id, 0)
-        snapshot_index = executor._snapshot_index
-        return self.save_snapshot(executor, session_id, snapshot_index)
-
-
     def _deserialize_agent(self, agent_data: dict, config: Config, global_count: int) -> SimpleAgent:
         agent = SimpleAgent(
             config=config,
@@ -284,16 +267,15 @@ class SessionManager:
 
         Args:
             executor: 当前的执行器
-            save_old: 是否保存旧会话（默认 True）
+            save_old: 是否保存旧会话（默认 True，但双快照机制已保存，此参数保留以兼容接口）
             temp: 是否为临时会话（默认 False，临时会话不分配 ID，直到用户执行任务）
 
         Returns:
             tuple[int, Executor]: (新会话ID, 新的执行器)
                                  临时会话时返回 (0, 新的执行器)
         """
-        # 保存当前会话（使用旧的 session_id）
-        if save_old and self.current_session_id:
-            self.save_session(executor, self.current_session_id)
+        # 双快照机制已自动保存所有状态，无需额外保存
+        # 保留 save_old 参数以兼容接口
 
         # 创建新 executor（传递 session_manager 以支持快照保存）
         config = executor.config

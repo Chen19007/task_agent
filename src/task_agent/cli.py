@@ -492,29 +492,6 @@ def main():
                 console.print(traceback.format_exc())
 
 
-def _save_session_if_needed(session_manager: 'SessionManager', executor: 'Executor'):
-    """保存会话（如果需要）
-
-    Args:
-        session_manager: 会话管理器
-        executor: 执行器
-    """
-    if not session_manager or not executor:
-        return
-
-    # 如果 executor 为空（新会话），不保存（避免创建空会话文件）
-    if not executor.current_agent:
-        return
-
-    # 如果没有会话ID，分配一个
-    if session_manager.current_session_id is None:
-        new_id = session_manager.get_next_session_id()
-        session_manager.current_session_id = new_id
-
-    # 保存会话（保存为快照索引0，兼容旧接口）
-    session_manager.save_session(executor, session_manager.current_session_id)
-
-
 def _run_single_task(config: Config, task: str, executor: 'Executor' = None, session_manager: 'SessionManager' = None):
     """执行单个任务
 
@@ -635,9 +612,7 @@ def _run_single_task(config: Config, task: str, executor: 'Executor' = None, ses
         # 检查是否需要等待用户输入
         if any("[等待用户输入]" in output for output in outputs):
             waiting_for_user_input = True
-
-            # 进入等待状态前保存会话
-            _save_session_if_needed(session_manager, executor)
+            # 双快照机制已保存完整状态，无需额外保存
 
     # 如果等待用户输入，继续循环
     while waiting_for_user_input and executor.current_agent:
@@ -792,16 +767,7 @@ def _run_single_task(config: Config, task: str, executor: 'Executor' = None, ses
             if any("[等待用户输入]" in output for output in outputs):
                 waiting_for_user_input = True
 
-    # 自动保存当前会话
-    # 检查是否有待切换的 executor（如果有，说明在等待输入时执行了 /clear）
-    if session_manager:
-        pending = session_manager.get_pending_executor()
-        if pending:
-            # 使用新的 executor（空的）保存，这样不会覆盖旧会话
-            _save_session_if_needed(session_manager, pending)
-        else:
-            # 使用当前的 executor 保存
-            _save_session_if_needed(session_manager, executor)
+    # 双快照机制已自动保存所有状态，无需额外保存
 
     console.print("-" * 60)
 
