@@ -13,9 +13,11 @@ from rich.text import Text
 from rich.theme import Theme
 
 from .agent import Executor
+from .cli_output import CLIOutput
 from .config import Config
 from .llm import create_client
 from .session import SessionManager
+from .safety import is_safe_command
 
 # 自定义主题
 custom_theme = Theme(
@@ -74,90 +76,6 @@ def _resolve_file_references(text: str) -> tuple[str, list[str]]:
 
     result = re.sub(pattern, replace_match, text)
     return result, errors
-
-
-def _extract_paths_from_command(command: str) -> list[str]:
-    """从命令中提取路径参数
-
-    Args:
-        command: PowerShell 命令
-
-    Returns:
-        提取的路径列表
-    """
-    paths = []
-    # 匹配 -Path 后的参数（带引号和不带引号）
-    paths.extend(re.findall(r'-Path\s+"([^"]+)"', command))
-    paths.extend(re.findall(r'-Path\s+(\S+)', command))
-    # 匹配 -LiteralPath 后的参数
-    paths.extend(re.findall(r'-LiteralPath\s+"([^"]+)"', command))
-    paths.extend(re.findall(r'-LiteralPath\s+(\S+)', command))
-    # 匹配 -Destination 后的参数
-    paths.extend(re.findall(r'-Destination\s+"([^"]+)"', command))
-    paths.extend(re.findall(r'-Destination\s+(\S+)', command))
-    # 匹配直接作为参数的路径（带引号的文件路径）
-    paths.extend(re.findall(r'"([a-zA-Z]:[\\/][^"]+)"', command))
-    paths.extend(re.findall(r'"(\.\.[\\/][^"]+)"', command))
-    paths.extend(re.findall(r'"(\.[\\/][^"]+)"', command))
-    # 匹配 git 命令中的文件参数
-    git_match = re.search(r'git\s+\w+\s+(.+)', command)
-    if git_match:
-        git_args = git_match.group(1).strip()
-        # 简单处理：按空格分割，去除引号
-        for arg in git_args.split():
-            arg = arg.strip('"\'')
-            if arg and not arg.startswith('-'):
-                paths.append(arg)
-    return paths
-
-
-def _is_safe_command(command: str, current_dir: str) -> bool:
-    """检查命令是否为安全的文件操作且在当前目录内
-
-    安全规则：
-    1. 不包含危险命令（删除、移动等）
-    2. 所有路径都在当前目录及其子目录内
-
-    Args:
-        command: PowerShell 命令
-        current_dir: 当前工作目录
-
-    Returns:
-        是否为安全命令
-    """
-    # 危险命令模式（需要确认）
-    dangerous_patterns = [
-        'Remove-Item', 'rm ', 'rmdir ', 'del ',
-        'Move-Item', 'mv ', 'move ',
-        'Rename-Item', 'ren ',
-        'sudo ',  # Linux 提权命令
-        'Remove-Item',
-    ]
-
-    command_lower = command.lower()
-    for pattern in dangerous_patterns:
-        if pattern.lower() in command_lower:
-            return False
-
-    # 提取路径并检查范围
-    paths = _extract_paths_from_command(command)
-    if paths:
-        current_abs = os.path.abspath(current_dir)
-        for path in paths:
-            # 跳过相对路径中的 "." 和 ".." 作为单独参数的情况
-            if path in ['.', '..']:
-                continue
-            # 解析为绝对路径
-            try:
-                abs_path = os.path.abspath(path)
-                # 检查是否在当前目录下
-                if not abs_path.startswith(current_abs):
-                    return False
-            except Exception:
-                # 路径解析失败，保守起见需要确认
-                return False
-
-    return True
 
 
 console = Console(theme=custom_theme)
@@ -508,9 +426,20 @@ def _run_single_task(config: Config, task: str, executor: 'Executor' = None, ses
     if os.environ.get("AGENT_LOG_FILE"):
         log_file = open(os.environ["AGENT_LOG_FILE"], "w", encoding="utf-8")
 
+    # 创建 CLI 输出处理器
+    cli_output = CLIOutput(console)
+
     # 创建或复用执行器
     if executor is None:
-        executor = Executor(config, session_manager=session_manager)
+        executor = Executor(config, session_manager=session_manager, output_handler=cli_output)
+    else:
+        # 更新现有 executor 的 output_handler
+        executor._output_handler = cli_output
+
+    # 设置命令确认回调
+    executor.set_command_confirm_callback(
+        _create_cli_command_confirm_callback(executor, console)
+    )
 
     # 用于命令确认的状态
     command_batch_id = 0  # 当前处理的命令批次ID
@@ -524,12 +453,12 @@ def _run_single_task(config: Config, task: str, executor: 'Executor' = None, ses
 
     # 执行任务
     for outputs, result in executor.run(task):
-        # 先显示非命令框的输出
+        # 显示输出
         for output in outputs:
             console.print(output, end="", soft_wrap=True)
 
-        # 逐个显示命令框并确认
-        if result and result.command_blocks:
+        # 处理命令确认（CLI 自己处理）
+        if result and result.pending_commands:
             # 新的命令批次
             if id(result.command_blocks) != command_batch_id:
                 command_batch_id = id(result.command_blocks)
@@ -544,7 +473,7 @@ def _run_single_task(config: Config, task: str, executor: 'Executor' = None, ses
 
                 # 检查是否自动执行
                 current_dir = os.getcwd()
-                auto_execute = executor.auto_approve and _is_safe_command(command, current_dir)
+                auto_execute = executor.auto_approve and is_safe_command(command, current_dir)
 
                 if auto_execute:
                     # 自动执行安全命令
@@ -688,82 +617,11 @@ def _run_single_task(config: Config, task: str, executor: 'Executor' = None, ses
         # 继续执行
         waiting_for_user_input = False
         for outputs, result in executor.resume(user_input):
-            # 先显示非命令框的输出
+            # 显示输出（命令框已通过回调处理）
             for output in outputs:
                 console.print(output, end="", soft_wrap=True)
 
-            # 逐个显示命令框并确认
-            if result and result.command_blocks:
-                # 新的命令批次
-                if id(result.command_blocks) != command_batch_id:
-                    command_batch_id = id(result.command_blocks)
-                    processed_count = 0
-
-                while processed_count < len(result.command_blocks):
-                    # 显示当前命令框
-                    console.print(result.command_blocks[processed_count], end="")
-
-                    # 获取对应的命令
-                    command = result.pending_commands[processed_count]
-
-                    # 检查是否自动执行
-                    current_dir = os.getcwd()
-                    auto_execute = executor.auto_approve and _is_safe_command(command, current_dir)
-
-                    if auto_execute:
-                        # 自动执行安全命令
-                        console.print("[dim](自动执行)[/dim]\n", end="")
-                        cmd_result = _execute_command(command, executor.config.timeout)
-
-                        # 构建结果消息
-                        if cmd_result.returncode == 0:
-                            if cmd_result.stdout:
-                                result_msg = f"命令执行成功，输出：\n{cmd_result.stdout}"
-                            else:
-                                result_msg = "命令执行成功（无输出）"
-                        else:
-                            result_msg = f"命令执行失败（退出码: {cmd_result.returncode}）：\n{cmd_result.stderr}"
-
-                        console.print(f"[dim]{result_msg}[/dim]\n")
-                        if executor.current_agent:
-                            executor.current_agent._add_message("user", f'<ps_call_result id="executed">\n{result_msg}\n</ps_call_result>')
-                    else:
-                        _clear_input_buffer()
-                        auto_status = " [dim](自动: 启)[/dim]" if executor.auto_approve else ""
-                        confirm = console.input(f"[bold yellow]执行命令[y] / 跳过[n] / 修改建议: [a]自动{auto_status} [/bold yellow]")
-                        confirm_lower = confirm.lower().strip()
-
-                        if confirm_lower == "a":
-                            # 切换自动同意
-                            executor.auto_approve = not executor.auto_approve
-                            new_status = "启用" if executor.auto_approve else "禁用"
-                            console.print(f"[success]自动同意已{new_status}[/success]\n")
-                            continue  # 重新询问
-
-                        if confirm_lower == "y":
-                            cmd_result = _execute_command(command, executor.config.timeout)
-                            if cmd_result.returncode == 0:
-                                if cmd_result.stdout:
-                                    result_msg = f"命令执行成功，输出：\n{cmd_result.stdout}"
-                                else:
-                                    result_msg = "命令执行成功（无输出）"
-                            else:
-                                result_msg = f"命令执行失败（退出码: {cmd_result.returncode}）：\n{cmd_result.stderr}"
-                            console.print(f"\n[info]{result_msg}[/info]\n")
-                            if executor.current_agent:
-                                executor.current_agent._add_message("user", f'<ps_call_result id="executed">\n{result_msg}\n</ps_call_result>')
-
-                        elif confirm_lower == "n":
-                            console.print("[info]命令已跳过[/info]\n")
-                            if executor.current_agent:
-                                executor.current_agent._add_message("user", f'<ps_call_result id="skip">\n命令已跳过\n</ps_call_result>')
-                        else:
-                            console.print("[info]已将您的建议发送给 Agent[/info]\n")
-                            if executor.current_agent:
-                                executor.current_agent._add_message("user", f'<ps_call_result id="rejected">\n用户建议：{confirm}\n</ps_call_result>')
-
-                    processed_count += 1
-
+            # 检查是否需要等待用户输入
             if any("[等待用户输入]" in output for output in outputs):
                 waiting_for_user_input = True
 
@@ -772,8 +630,99 @@ def _run_single_task(config: Config, task: str, executor: 'Executor' = None, ses
     console.print("-" * 60)
 
 
+def _create_cli_command_confirm_callback(executor: 'Executor', console: Console):
+    """创建 CLI 的命令确认回调函数
+
+    Args:
+        executor: Executor 实例
+        console: Rich Console 实例
+
+    Returns:
+        命令确认回调函数
+    """
+
+    def confirm_callback(command: str) -> str:
+        """CLI 的命令确认逻辑（同步）
+
+        Args:
+            command: 待执行的命令
+
+        Returns:
+            命令结果消息，格式: '<ps_call_result id="executed">...</ps_call_result>'
+        """
+        # 检查是否自动执行
+        current_dir = os.getcwd()
+        auto_execute = executor.auto_approve and _is_safe_command(command, current_dir)
+
+        if auto_execute:
+            # 自动执行安全命令
+            console.print("[dim](自动执行)[/dim]\n", end="")
+            cmd_result = _execute_command(command, executor.config.timeout)
+
+            # 构建结果消息
+            if cmd_result.returncode == 0:
+                if cmd_result.stdout:
+                    result_msg = f"命令执行成功，输出：\n{cmd_result.stdout}"
+                else:
+                    result_msg = "命令执行成功（无输出）"
+            else:
+                result_msg = f"命令执行失败（退出码: {cmd_result.returncode}）：\n{cmd_result.stderr}"
+
+            console.print(f"[dim]{result_msg}[/dim]\n")
+            return f'<ps_call_result id="executed">\n{result_msg}\n</ps_call_result>'
+
+        # 等待用户确认
+        _clear_input_buffer()
+        auto_status = " [dim](自动: 启)[/dim]" if executor.auto_approve else ""
+        confirm = console.input(f"[bold yellow]执行命令[y] / 跳过[n] / 修改建议: [a]自动{auto_status} [/bold yellow]")
+        confirm_lower = confirm.lower().strip()
+
+        if confirm_lower == "a":
+            # 切换自动同意
+            executor.auto_approve = not executor.auto_approve
+            new_status = "启用" if executor.auto_approve else "禁用"
+            console.print(f"[success]自动同意已{new_status}[/success]\n")
+            # 递归调用自己
+            return confirm_callback(command)
+
+        if confirm_lower == "y":
+            # 用户确认，执行命令
+            cmd_result = _execute_command(command, executor.config.timeout)
+
+            # 构建明确的结果消息
+            if cmd_result.returncode == 0:
+                if cmd_result.stdout:
+                    result_msg = f"命令执行成功，输出：\n{cmd_result.stdout}"
+                else:
+                    result_msg = "命令执行成功（无输出）"
+            else:
+                result_msg = f"命令执行失败（退出码: {cmd_result.returncode}）：\n{cmd_result.stderr}"
+
+            console.print(f"\n[info]{result_msg}[/info]\n")
+            return f'<ps_call_result id="executed">\n{result_msg}\n</ps_call_result>'
+
+        elif confirm_lower == "n":
+            console.print("[info]命令已跳过[/info]\n")
+            return '<ps_call_result id="skip">\n命令已跳过\n</ps_call_result>'
+
+        else:
+            # 用户输入修改建议
+            console.print("[info]已将您的建议发送给 Agent[/info]\n")
+            return f'<ps_call_result id="rejected">\n用户建议：{confirm}\n</ps_call_result>'
+
+    return confirm_callback
+
+
 def _execute_command(command: str, timeout: int):
-    """执行命令"""
+    """执行命令（CLI 和 GUI 共用）
+
+    Args:
+        command: 待执行的命令
+        timeout: 超时时间（秒）
+
+    Returns:
+        Result 对象，包含 stdout, stderr, returncode
+    """
     import subprocess
     import base64
 

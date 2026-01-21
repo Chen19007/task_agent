@@ -7,11 +7,12 @@ import time
 import uuid
 import os
 from dataclasses import dataclass, field
-from typing import Generator, Optional, Any
+from typing import Generator, Optional, Any, Callable
 from enum import Enum
 
 from .config import Config
 from .llm import create_client
+from .output_handler import OutputHandler, NullOutputHandler
 
 
 class Action(Enum):
@@ -63,7 +64,8 @@ class SimpleAgent:
     def __init__(self, config: Optional[Config] = None,
                  depth: int = 0, max_depth: int = 4,
                  global_subagent_count: int = 0,
-                 agent_name: Optional[str] = None):
+                 agent_name: Optional[str] = None,
+                 output_handler: Optional[OutputHandler] = None):
         """初始化 Agent
 
         Args:
@@ -72,6 +74,7 @@ class SimpleAgent:
             max_depth: 最大允许深度（默认4层）
             global_subagent_count: 全局已使用的子Agent数量（累加计数）
             agent_name: 当前 agent 名称（用于过滤 forbidden_agents）
+            output_handler: 输出处理器（可选）
         """
         self.config = config or Config.from_env()
         self.history: list[Message] = []
@@ -90,6 +93,9 @@ class SimpleAgent:
         # 全局配额（累加计数，而不是递减剩余量）
         self._global_subagent_count = global_subagent_count
 
+        # 输出处理器（使用 NullOutputHandler 避免 None 判断）
+        self._output_handler = output_handler or NullOutputHandler()
+
         # 初始化系统消息
         self._init_system_prompt()
 
@@ -99,6 +105,9 @@ class SimpleAgent:
         # LLM调用前后的回调函数（用于保存快照）
         self._before_llm_callback: Optional[callable] = None
         self._after_llm_callback: Optional[callable] = None
+
+        # Executor 引用（用于访问命令确认回调）
+        self._executor: Optional['Executor'] = None
 
     def set_before_llm_callback(self, callback: callable):
         """设置LLM调用前的回调函数
@@ -329,10 +338,12 @@ class SimpleAgent:
         # 调用LLM（内部会触发 before_llm_callback 保存前快照）
         content, reasoning = self._call_llm()
 
-        # 组合输出：reasoning（如果有） + content
-        # reasoning 不参与标签解析，只做辅助参考
-        output_for_display = reasoning + content if reasoning else content
-        response = content  # 只有 content 参与标签解析
+        # 调用回调：输出思考内容
+        if reasoning and reasoning.strip():
+            self._output_handler.on_think(reasoning)
+
+        # 只有 content 参与标签解析
+        response = content
 
         # 添加 assistant 消息到历史
         self._add_message("assistant", response)
@@ -341,7 +352,11 @@ class SimpleAgent:
         if self._after_llm_callback:
             self._after_llm_callback(self)
 
-        # 格式化输出
+        # 调用回调：输出普通内容
+        if response and response.strip():
+            self._output_handler.on_content(response)
+
+        # 格式化输出（保持向后兼容）
         outputs = []
         if reasoning and reasoning.strip():
             outputs.append(f"\n** 思考过程：\n")
@@ -351,8 +366,8 @@ class SimpleAgent:
         if response and response.strip():
             outputs.append(response)
 
-        # 解析并执行标签，收集输出和命令
-        tool_outputs, pending_commands, command_blocks = self._parse_tools(response)
+        # 解析并执行标签，收集输出和命令（使用带回调的版本）
+        tool_outputs, pending_commands, command_blocks = self._parse_tools_with_callbacks(response)
         outputs.extend(tool_outputs)
 
         # 检查是否需要切换到子Agent
@@ -370,6 +385,7 @@ class SimpleAgent:
             # 检查深度限制
             if self.depth >= self.max_depth:
                 self._add_message("user", f"[深度限制] 请直接执行任务: {task}")
+                self._output_handler.on_depth_limit()
                 outputs.append(f"\n!! [深度限制]\n")
                 outputs.append(f"已达到最大深度 {self.max_depth}，由当前Agent执行\n")
                 outputs.append(f"{'═'*50}\n\n")
@@ -377,6 +393,7 @@ class SimpleAgent:
 
             # 检查本地配额限制
             if self.total_sub_agents_created >= self.max_depth ** 2:
+                self._output_handler.on_quota_limit("local")
                 outputs.append(f"\n!! [本地配额限制]\n")
                 outputs.append(f"当前Agent已用完 {self.max_depth ** 2} 个子Agent配额\n")
                 outputs.append(f"{'═'*50}\n\n")
@@ -386,6 +403,7 @@ class SimpleAgent:
             # 检查全局配额限制（防止层级间循环）- 累加计数
             global_total = self.max_depth ** 2 * 2
             if self._global_subagent_count >= global_total:
+                self._output_handler.on_quota_limit("global")
                 outputs.append(f"\n!! [全局配额限制]\n")
                 outputs.append(f"整个任务已用完所有 {global_total} 个子Agent配额\n")
                 outputs.append(f"{'═'*50}\n\n")
@@ -397,6 +415,20 @@ class SimpleAgent:
             # 获取元数据用于显示
             context_used = self._estimate_context_tokens()
             context_total = self.config.num_ctx
+
+            # 调用回调：输出创建子 agent 信息
+            self._output_handler.on_create_agent(
+                task=task,
+                depth=self.depth + 1,
+                agent_name=agent_name,
+                context_info={
+                    "context_used": context_used,
+                    "context_total": context_total,
+                    "global_count": new_global_count,
+                    "global_total": global_total,
+                    "max_depth": self.max_depth
+                }
+            )
 
             outputs.append(f"\n{'+'*60}\n")
             agent_info = f" [{agent_name}]" if agent_name else ""
@@ -410,11 +442,15 @@ class SimpleAgent:
         # 检查是否完成
         if self._is_completed(response):
             summary = self._extract_return(response)
+            # 调用回调：输出完成信息
+            stats = self.get_summary()
+            self._output_handler.on_agent_complete(summary, stats)
             return StepResult(outputs=self._add_depth_prefix(outputs), action=Action.COMPLETE, data=summary, pending_commands=pending_commands, command_blocks=command_blocks)
 
         # 检查是否需要等待用户输入
         # 只有当没有任何标签时才等待（reasoning 不影响）
         if not self._has_action_tags(response) and not tool_outputs:
+            self._output_handler.on_wait_input()
             outputs.append(f"\n?? 等待用户输入...\n")
             outputs.append("[等待用户输入]\n")  # 保留供 cli.py 检测
             return StepResult(outputs=self._add_depth_prefix(outputs), action=Action.WAIT, pending_commands=pending_commands, command_blocks=command_blocks)
@@ -543,6 +579,54 @@ class SimpleAgent:
 
         return outputs, commands, command_blocks
 
+    def _parse_tools_with_callbacks(self, response: str) -> tuple[list[str], list[str], list[str]]:
+        """解析工具标签并调用回调
+
+        Returns:
+            (outputs, commands, command_blocks): 输出内容列表、待执行命令列表、命令框显示内容
+        """
+        outputs = []
+        commands = []
+        command_blocks = []
+
+        # 执行PowerShell命令
+        for match in re.finditer(r'<ps_call>\s*(.+?)\s*</ps_call>', response, re.DOTALL):
+            command = match.group(1).strip()
+            self.total_commands_executed += 1  # 解析时分配编号
+
+            # 调用回调
+            depth_prefix = "+" * self.depth + " " if self.depth > 0 else ""
+            self._output_handler.on_ps_call(command, self.total_commands_executed, depth_prefix)
+
+            # 命令框单独存储，不放入 outputs（兼容 CLI）
+            block = f"\n>> [待执行命令 #{self.total_commands_executed}]\n命令: {command}\n{'━'*50}\n\n"
+            if depth_prefix:
+                lines = block.split('\n')
+                prefixed_lines = [depth_prefix + line if line.strip() else line for line in lines]
+                block = '\n'.join(prefixed_lines)
+            command_blocks.append(block)
+            commands.append(command)
+
+        # 创建子Agent（解析 name 属性）
+        # 支持格式：<create_agent name=xxx>任务</create_agent> 或 <create_agent>任务</create_agent>
+        for match in re.finditer(r'<create_agent(?:\s+name=(\S+?))?\s*>(.+?)</create_agent>', response, re.DOTALL):
+            if not self._pending_child_request:  # 只处理第一个
+                agent_name = match.group(1)  # name 属性值（如果有）
+                if agent_name:
+                    # 去除可能存在的引号（单引或双引）
+                    agent_name = agent_name.strip('"').strip("'")
+                task_content = match.group(2).strip()
+                # 创建 ChildTaskRequest 对象
+                # 注意：global_count 和 new_global_count 在 step() 中设置
+                self._pending_child_request = ChildTaskRequest(
+                    task=task_content,
+                    global_count=0,  # 会在 step() 中更新
+                    agent_name=agent_name
+                )
+                break
+
+        return outputs, commands, command_blocks
+
     def get_summary(self) -> dict:
         """获取执行摘要"""
         return {
@@ -568,13 +652,18 @@ class Executor:
     维护上下文栈，处理Agent切换逻辑
     """
 
-    def __init__(self, config: Optional[Config] = None, max_depth: int = 4, session_manager: Optional['SessionManager'] = None):
+    def __init__(self, config: Optional[Config] = None, max_depth: int = 4, session_manager: Optional['SessionManager'] = None,
+                 output_handler: Optional[OutputHandler] = None, command_confirm_callback: Optional[Callable[[str], str]] = None):
         """初始化执行器
 
         Args:
             config: 配置对象
             max_depth: 最大深度
             session_manager: 会话管理器（用于保存快照）
+            output_handler: 输出处理器（可选）
+            command_confirm_callback: 命令确认回调函数（可选）
+                输入: command (str)
+                输出: result_message (str) 格式: '<ps_call_result id="executed">...</ps_call_result>'
         """
         self.config = config or Config.from_env()
         self.max_depth = max_depth
@@ -596,6 +685,22 @@ class Executor:
         self.session_manager = session_manager
         self._snapshot_index = 0  # 当前快照索引
 
+        # 输出处理器（使用 NullOutputHandler 避免 None 判断）
+        self._output_handler = output_handler or NullOutputHandler()
+
+        # 命令确认回调（用于 CLI 和 GUI 的不同确认逻辑）
+        self._command_confirm_callback = command_confirm_callback
+
+    def set_command_confirm_callback(self, callback: Callable[[str], str]):
+        """设置命令确认回调
+
+        Args:
+            callback: 命令确认回调函数
+                输入: command (str)
+                输出: result_message (str) 格式: '<ps_call_result id="executed">...</ps_call_result>'
+        """
+        self._command_confirm_callback = callback
+
     def _create_agent(self, depth: int = 0, global_subagent_count: int = 0, agent_name: Optional[str] = None) -> SimpleAgent:
         """创建 Agent 并设置回调
 
@@ -612,7 +717,8 @@ class Executor:
             depth=depth,
             max_depth=self.max_depth,
             global_subagent_count=global_subagent_count,
-            agent_name=agent_name
+            agent_name=agent_name,
+            output_handler=self._output_handler  # 传递 output_handler
         )
         # 设置双回调（前快照 + 后快照）
         if self.session_manager:
@@ -712,7 +818,7 @@ class Executor:
             # 保存 StepResult 供 cli.py 访问
             self.last_step_result = result
 
-            # 一次性返回所有输出和结果，让 cli.py 先显示完输出再处理命令
+            # yield 输出和结果，让 CLI/GUI 先显示输出，然后自己处理命令确认
             yield (result.outputs, result)
 
             if result.action == Action.SWITCH_TO_CHILD:

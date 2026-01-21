@@ -14,11 +14,17 @@ setup(
         "requests>=2.31.0",
         "rich>=13.7.0",
     ],
+    extras_require={
+        "gui": [
+            "dearpygui>=1.10.0",
+        ],
+    },
     packages=find_packages(where="src"),
     package_dir={"": "src"},
     entry_points={
         "console_scripts": [
             "task-agent=task_agent.cli:main",
+            "task-agent-gui=task_agent.gui.app:main",
         ],
     },
     include_package_data=True,
