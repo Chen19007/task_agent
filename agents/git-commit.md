@@ -364,7 +364,6 @@ git diff
 git add <file1> <file2> ...
 ```
 仅暂存“Files to Commit”列表中的文件，禁止 `git add .` 或未筛选暂存
-只暂存过滤后的文件（不排除被排除的文件）
 
 **Step 12: 创建提交**
 ```powershell
