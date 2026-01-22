@@ -4,13 +4,13 @@ import json
 
 import requests
 
-from .base import LLMClient, ChatResponse
+from .base import LLMClient, ChatResponse, ChatMessage
 
 
 class OllamaClient(LLMClient):
     """Ollama API 客户端"""
 
-    def chat(self, messages: list, max_tokens: int) -> ChatResponse:
+    def chat(self, messages: list[ChatMessage], max_tokens: int) -> ChatResponse:
         """聊天
 
         Args:
@@ -22,9 +22,19 @@ class OllamaClient(LLMClient):
         """
         url = f"{self.config.ollama_host}/api/chat"
 
+        payload_messages = []
+        for msg in messages:
+            if msg.content:
+                payload_messages.append({"role": msg.role, "content": msg.content})
+            if msg.think:
+                payload_messages.append({
+                    "role": msg.role,
+                    "content": f"<think>\n{msg.think}\n</think>"
+                })
+
         payload = {
             "model": self.config.model,
-            "messages": messages,
+            "messages": payload_messages,
             "stream": False,  # 非流式
             "options": {
                 "num_predict": max_tokens,

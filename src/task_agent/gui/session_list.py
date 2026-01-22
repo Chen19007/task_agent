@@ -189,7 +189,8 @@ class SessionList:
                 {
                     "role": msg["role"],
                     "content": msg["content"],
-                    "timestamp": msg["timestamp"]
+                    "timestamp": msg["timestamp"],
+                    "think": msg.get("think", "")
                 }
                 for msg in history
                 if msg["role"] != "system"

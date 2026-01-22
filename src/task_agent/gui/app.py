@@ -80,8 +80,11 @@ class TaskAgentGUI:
         for msg in messages:
             role = msg.get("role")
             content = msg.get("content", "")
+            think = msg.get("think", "")
             timestamp = msg.get("timestamp", 0.0)
             if role == "assistant":
+                if think and think.strip():
+                    self.chat_panel.add_collapsible_block("[思考]", think, collapsed=True)
                 if content and content.strip():
                     self.gui_output.render_history_content(content)
             else:

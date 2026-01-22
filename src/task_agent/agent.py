@@ -11,7 +11,7 @@ from typing import Generator, Optional, Any, Callable
 from enum import Enum
 
 from .config import Config
-from .llm import create_client
+from .llm import create_client, ChatMessage
 from .output_handler import OutputHandler, NullOutputHandler
 
 
@@ -48,6 +48,7 @@ class Message:
     role: str  # system, user, assistant
     content: str
     timestamp: float = field(default_factory=time.time)
+    think: str = ""
 
 
 class SimpleAgent:
@@ -101,6 +102,9 @@ class SimpleAgent:
 
         # 待执行的子Agent任务请求（step()返回时携带）
         self._pending_child_request: Optional[ChildTaskRequest] = None
+
+        # 仅保留上一轮思考内容（同时写入 history 便于回放）
+        self.last_think: str = ""
 
         # LLM调用前后的回调函数（用于保存快照）
         self._before_llm_callback: Optional[callable] = None
@@ -337,6 +341,7 @@ class SimpleAgent:
         """
         # 调用LLM（内部会触发 before_llm_callback 保存前快照）
         content, reasoning = self._call_llm()
+        self.last_think = reasoning.strip() if reasoning else ""
 
         # 调用回调：输出思考内容
         if reasoning and reasoning.strip():
@@ -346,7 +351,7 @@ class SimpleAgent:
         response = content
 
         # 添加 assistant 消息到历史
-        self._add_message("assistant", response)
+        self._add_message("assistant", response, think=reasoning)
 
         # LLM 响应后：保存后快照（含完整对话）
         if self._after_llm_callback:
@@ -470,9 +475,10 @@ class SimpleAgent:
         # 同步全局计数
         self._global_subagent_count = global_count
 
-    def _add_message(self, role: str, content: str):
+    def _add_message(self, role: str, content: str, think: str = ""):
         """添加消息到历史记录"""
-        self.history.append(Message(role=role, content=content))
+        normalized_think = think.strip() if think else ""
+        self.history.append(Message(role=role, content=content, think=normalized_think))
 
     def _add_depth_prefix(self, outputs: list[str]) -> list[str]:
         """给所有输出添加深度前缀（+号）
@@ -509,7 +515,9 @@ class SimpleAgent:
         if self._before_llm_callback:
             self._before_llm_callback(self)
 
-        messages = [{"role": msg.role, "content": msg.content} for msg in self.history]
+        messages = [ChatMessage(role=msg.role, content=msg.content) for msg in self.history]
+        if self.last_think:
+            messages.append(ChatMessage(role="assistant", content="", think=self.last_think))
 
         # 使用 LLM 客户端
         client = create_client(self.config)

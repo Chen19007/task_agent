@@ -81,8 +81,14 @@ class SessionManager:
         return {
             "agent_id": agent.agent_id,
             "depth": agent.depth,
+            "last_think": agent.last_think,
             "history": [
-                {"role": msg.role, "content": msg.content, "timestamp": msg.timestamp}
+                {
+                    "role": msg.role,
+                    "content": msg.content,
+                    "timestamp": msg.timestamp,
+                    "think": msg.think,
+                }
                 for msg in agent.history
             ]
         }
@@ -147,11 +153,13 @@ class SessionManager:
             output_handler=output_handler
         )
         agent.agent_id = agent_data["agent_id"]
+        agent.last_think = agent_data.get("last_think", "")
         for msg_data in agent_data["history"]:
             msg = Message(
                 role=msg_data["role"],
                 content=msg_data["content"],
-                timestamp=msg_data.get("timestamp", 0.0)
+                timestamp=msg_data.get("timestamp", 0.0),
+                think=msg_data.get("think", "")
             )
             agent.history.append(msg)
         return agent
