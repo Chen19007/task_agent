@@ -342,12 +342,28 @@ git status
 - 提供修复建议（移动到 .env.example，使用占位符等）
 - 询问用户是继续还是中止
 
+### Phase 4.8: 变更预览（未暂存）
+**Step 10.8: 查看未暂存文件列表（必做）**
+```powershell
+git diff --name-only
+```
+如需确认细节，再查看：
+```powershell
+git diff
+```
+
+**规则：先预览再暂存**
+- 在确认“Files to Commit”列表一致之前，禁止执行 `git add`
+- 如果出现临时文件/无关文件，先调整过滤与排除列表
+- 仅当未暂存列表与预期一致，才进入 Step 11
+
 ### Phase 5: 暂存和提交
 
 **Step 11: 暂存文件**
 ```powershell
 git add <file1> <file2> ...
 ```
+仅暂存“Files to Commit”列表中的文件，禁止 `git add .` 或未筛选暂存
 只暂存过滤后的文件（不排除被排除的文件）
 
 **Step 12: 创建提交**
