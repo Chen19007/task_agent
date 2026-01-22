@@ -61,6 +61,7 @@ class ChatPanel:
         self.command_history: list[str] = []
         self._command_history_index = 0
         self._pending_scroll = False
+        self._pending_scroll_frames = 0
 
         self._input_handler: Optional[int] = None
         self._input_line_height = 20
@@ -220,6 +221,7 @@ class ChatPanel:
 
         dpg.set_value(self.input_field, "")
         self._update_input_height("")
+        self._focus_input()
 
     def _register_key_handlers(self):
         """注册命令历史上下键"""
@@ -275,6 +277,7 @@ class ChatPanel:
                 if self.on_command:
                     self.on_command(message)
                 dpg.set_value(self.input_field, "")
+                self._focus_input()
                 return
 
             # 检查是否为 /auto 命令
@@ -292,6 +295,7 @@ class ChatPanel:
             # 清空输入框
             dpg.set_value(self.input_field, "")
             self._update_input_height("")
+            self._focus_input()
 
     def _on_stop(self, sender, app_data, user_data=None):
         """停止按钮回调"""
@@ -351,6 +355,7 @@ class ChatPanel:
         """滚动到底部"""
         if self.messages_container:
             self._pending_scroll = True
+            self._pending_scroll_frames = 6
             scroll_max = dpg.get_y_scroll_max(self.messages_container)
             dpg.set_y_scroll(self.messages_container, value=scroll_max)
 
@@ -359,8 +364,12 @@ class ChatPanel:
         if not self._pending_scroll or not self.messages_container:
             return
         scroll_max = dpg.get_y_scroll_max(self.messages_container)
+        if scroll_max <= 0:
+            return
         dpg.set_y_scroll(self.messages_container, value=scroll_max)
-        self._pending_scroll = False
+        self._pending_scroll_frames -= 1
+        if self._pending_scroll_frames <= 0:
+            self._pending_scroll = False
 
     def clear_messages(self):
         """清空消息"""
@@ -449,3 +458,12 @@ class ChatPanel:
         if self.auto_checkbox:
             return bool(dpg.get_value(self.auto_checkbox))
         return False
+
+    def focus_input(self):
+        """对外暴露的输入框聚焦方法"""
+        self._focus_input()
+
+    def _focus_input(self):
+        """确保输入框获得焦点"""
+        if self.input_field:
+            dpg.focus_item(self.input_field)

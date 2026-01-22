@@ -228,13 +228,14 @@ class TaskAgentGUI:
                 )
                 self.session_list.set_on_new_session(self._on_new_session)
 
-                self.chat_panel = ChatPanel(
-                    parent=right_panel,
-                    on_send=self._on_send,
-                    on_stop=self._on_stop,
-                    on_auto_toggle=self._on_auto_toggle,
-                    on_command=self._on_command
-                )
+        self.chat_panel = ChatPanel(
+            parent=right_panel,
+            on_send=self._on_send,
+            on_stop=self._on_stop,
+            on_auto_toggle=self._on_auto_toggle,
+            on_command=self._on_command
+        )
+        self.chat_panel.focus_input()
 
         # 绑定全局字体（在创建窗口之后，setup 之前）
         if hasattr(self, '_font_id') and self._font_id is not None:
@@ -312,6 +313,7 @@ class TaskAgentGUI:
         """
         # 更新 executor 状态
         self.adapter.executor.auto_approve = is_enabled
+        self.chat_panel.set_auto_enabled(is_enabled)
 
         # 更新状态栏
         status = "启用" if is_enabled else "禁用"
@@ -443,6 +445,12 @@ class TaskAgentGUI:
             with dpg.group(horizontal=True):
                 dpg.add_button(label="执行", width=100, callback=lambda: self._on_command_confirm_executed(index, command))
                 dpg.add_spacer(width=10)
+                dpg.add_button(
+                    label="执行并开启自动",
+                    width=140,
+                    callback=lambda: self._on_command_confirm_execute_with_auto(index, command)
+                )
+                dpg.add_spacer(width=10)
                 dpg.add_button(label="跳过", width=100, callback=lambda: self._on_command_confirm_skip(index))
                 dpg.add_spacer(width=10)
                 dpg.add_button(label="取消", width=100, callback=lambda: self._on_command_confirm_rejected(index))
@@ -466,6 +474,11 @@ class TaskAgentGUI:
 
         # 更新状态
         self._update_status("正在执行命令...")
+
+    def _on_command_confirm_execute_with_auto(self, index: int, command: str):
+        """用户确认执行命令并开启自动授权"""
+        self._on_auto_toggle(True)
+        self._on_command_confirm_executed(index, command)
 
     def _on_command_confirm_skip(self, index: int):
         """用户跳过命令"""
