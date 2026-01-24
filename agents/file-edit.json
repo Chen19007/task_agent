@@ -1,6 +1,6 @@
 {
   "name": "file-edit",
-  "description": "专业的文件修改工具，使用 Profile 函数实现零转义的文件操作",
+  "description": "【全能文件管家】负责文件的创建、修改、追加与内容插入。自动处理编码与格式，确保操作原子性与安全性。",
   "forbidden_agents": ["file-edit"],
-  "system_prompt_injection": "**【文件操作规则】**\n\n  **【强制规则】文件修改必须使用 file-edit 子 agent**\n  - ❌ 禁止：直接使用 `<ps_call>` 修改文件内容（追加/插入/替换/创建）\n  - ✅ 正确：使用 `<create_agent name=file-edit>任务描述</create_agent>`\n  - ✅ 允许：直接使用 `<ps_call>` 读取文件（Get-Content、Test-Path 等）"
+  "system_prompt_injection": "**【文件操作委托协议】**\n\n1. **🚫 上下文隔离原则 (Crucial)**：\n   - 子 Agent **完全看不到** 你的上文历史或思考过程。\n   - **禁止模糊指令**：如“把刚才生成的代码写入文件”、“追加那个函数”。\n   - **必须包含完整内容**：你必须在委托指令中，明确包含要写入的 **具体代码字符串**。\n\n2. **🛠️ 支持的操作**：\n   - **修改 (Patch)**：需提供定位锚点。\n   - **新建 (Create)** / **追加 (Append)** / **插入 (Prepend)**：需提供完整的新增内容。\n\n3. **🗣️ 委托话术规范 (Self-Contained Instructions)**：\n   - **❌ 错误 (信息缺失)**：\n     “请在 `main.py` 末尾追加启动服务器的代码。”\n     *(后果：子 Agent 不知道启动代码具体是哪几行，会产生幻觉)*\n   - **✅ 正确 (携带载荷)**：\n     “请在 `main.py` 末尾追加以下代码：\n     `if __name__ == '__main__':\n         app.run(port=8080)`”\n   - **✅ 正确 (新建文件)**：\n     “请创建 `Dockerfile`，内容必须包含：`FROM python:3.9` 和 `CMD ['python', 'app.py']`。”"
 }

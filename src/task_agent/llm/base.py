@@ -37,6 +37,11 @@ class LLMClient(ABC):
         """Check whether the service is reachable."""
         raise NotImplementedError
 
+    @abstractmethod
+    def list_models(self) -> list[str]:
+        """List available models."""
+        raise NotImplementedError
+
 
 def create_client(config: Config) -> LLMClient:
     """Create an LLM client based on config."""

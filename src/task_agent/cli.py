@@ -1,4 +1,4 @@
-"""极简命令行接口模块"""
+﻿"""极简命令行接口模块"""
 
 import argparse
 import os
@@ -101,8 +101,8 @@ def parse_args():
 
     parser.add_argument("task", nargs="?", help="要执行的任务描述")
 
-    parser.add_argument("--model", "-m", default="qwen3:4b",
-                        help="模型名称（默认：qwen3:4b）")
+    parser.add_argument("--model", "-m", default="minimax-m2",
+                        help="模型名称（默认：minimax-m2）")
 
     parser.add_argument("--timeout", "-t", type=int, default=300,
                         help="超时时间（秒，默认：300）")
@@ -110,14 +110,14 @@ def parse_args():
     parser.add_argument("--host", "-H", default="http://localhost:11434",
                         help="Ollama地址（默认：http://localhost:11434）")
 
-    parser.add_argument("--api-type", "-a", default="ollama",
+    parser.add_argument("--api-type", "-a", default="openai",
                         choices=["ollama", "openai"],
-                        help="API类型：ollama 或 openai（默认：ollama）")
+                        help="API类型：ollama 或 openai（默认：openai）")
 
-    parser.add_argument("--base-url", "-b", default="https://api.openai.com/v1",
-                        help="OpenAI Base URL（默认：https://api.openai.com/v1）")
+    parser.add_argument("--base-url", "-b", default="http://localhost:3000/v1",
+                        help="OpenAI Base URL（默认：http://localhost:3000/v1）")
 
-    parser.add_argument("--api-key", "-k", default="",
+    parser.add_argument("--api-key", "-k", default="sk-1qTPR2NfODm9Y8YwQTXtGVONXF0g2bxWWreaZaMvPK4ErKOV",
                         help="OpenAI API Key")
 
     parser.add_argument("--max-tokens", "-M", type=int, default=None,
@@ -147,7 +147,7 @@ def print_welcome():
     console.print(
         Panel(
             Text(
-                "极简任务执行 Agent\n\n统一逻辑：创建子Agent → 聚合结果 → 继续/结束\n深度优先执行，自动聚合结果\n最大4层深度（最多16个子Agent）\n输入 q 或 quit 退出",
+                "极简任务执行 Agent\n\n统一逻辑：创建子Agent → 聚合结果 → 继续/结束\n深度优先执行，自动聚合结果\n最大4层深度（最多16个子Agent）\n输入 /exit 退出",
                 justify="center",
                 style="bold cyan",
             ),
@@ -171,20 +171,20 @@ def print_help():
     - /new        - 创建新会话（自动保存当前会话）
     - /list       - 列出所有保存的会话
     - /resume <id>- 恢复指定ID的会话
-    - q, quit     - 退出程序
+    - /exit       - 退出程序
 
   [bold]等待输入模式[/bold] - Agent 询问问题，等待回复
     提示符: [info]>[/info]
     - <内容>      - 输入回复内容（空行结束）
-    - q           - 终止当前任务
+    - /exit       - 终止当前任务
     - /list       - 查看会话列表
 
 [bold yellow]命令行参数：[/bold yellow]
-  -m, --model   - 指定模型名称（默认：qwen3:4b）
+  -m, --model   - 指定模型名称（默认：minimax-m2）
   -t, --timeout - 超时时间秒（默认：300）
-  -a, --api-type- API类型：ollama 或 openai（默认：ollama）
+  -a, --api-type- API类型：ollama 或 openai（默认：openai）
   -H, --host    - Ollama地址（默认：http://localhost:11434）
-  -b, --base-url- OpenAI Base URL（默认：https://api.openai.com/v1）
+  -b, --base-url- OpenAI Base URL（默认：http://localhost:3000/v1）
   -k, --api-key - OpenAI API Key
   -M, --max-tokens- 最大输出token（默认：Ollama=4096, OpenAI=8192，适合大模型）
   --num-ctx        - 上下文窗口大小（Ollama num_ctx，默认 4096）
@@ -193,7 +193,7 @@ def print_help():
 [bold yellow]使用示例：[/bold yellow]
   task-agent "列出当前目录的文件"
   task-agent "安装项目依赖" --timeout 120
-  task-agent --model qwen2.5:7b "帮我重启服务"
+  task-agent --model gpt-4o "帮我重启服务"
 
 [bold yellow]Agent 特性：[/bold yellow]
   - 统一逻辑，无父子区别
@@ -211,7 +211,7 @@ def print_help():
                 style="white",
             ),
             title="Task-Agent Help",
-            subtitle="按 q 退出",
+            subtitle="输入 /exit 退出",
         )
     )
 
@@ -281,9 +281,9 @@ def main():
             # 显示当前会话状态
             auto_status = " | [success]自动同意: 启[/success]" if executor.auto_approve else ""
             if session_manager.current_session_id:
-                console.print(f"[dim]当前会话 #{session_manager.current_session_id} | 输入任务继续，/new 新建，/list 列表，/auto 切换自动同意{auto_status}[/dim]")
+                console.print(f"[dim]当前会话 #{session_manager.current_session_id} | 输入任务继续，/new 新建，/list 列表，/auto 切换自动同意，/exit 退出{auto_status}[/dim]")
             else:
-                console.print(f"[dim]临时会话 | 输入任务创建会话，/list 列表，/auto 切换自动同意{auto_status}[/dim]")
+                console.print(f"[dim]临时会话 | 输入任务创建会话，/list 列表，/auto 切换自动同意，/exit 退出{auto_status}[/dim]")
 
             _clear_input_buffer()
             task = console.input("[user]任务> [/user]")
@@ -291,7 +291,7 @@ def main():
             if not task:
                 continue
 
-            if task.lower() in ["q", "quit", "exit"]:
+            if task.lower() == "/exit":
                 console.print("[info]再见！[/info]")
                 break
 
@@ -301,6 +301,9 @@ def main():
 
             # 处理会话管理命令
             if task.startswith("/"):
+                if task.lower() == "/exit":
+                    console.print("[info]再见！[/info]")
+                    break
                 if task.lower() == "/list":
                     sessions = session_manager.list_sessions()
                     console.print("\n[bold cyan]保存的会话：[/bold cyan]\n")
@@ -379,7 +382,7 @@ def main():
                     console.print(f"\n[success]自动同意已{status}[/success]\n")
                     continue
 
-                console.print("[error]未知命令。可用命令: /list, /new, /clear, /resume <id>, /auto[/error]\n")
+                console.print("[error]未知命令。可用命令: /list, /new, /clear, /resume <id>, /auto, /exit[/error]\n")
                 continue
 
             # 解析 @ 文件引用
@@ -497,7 +500,7 @@ def _run_single_task(config: Config, task: str, executor: 'Executor' = None, ses
                     # 等待用户确认
                     _clear_input_buffer()
                     auto_status = " [dim](自动: 启)[/dim]" if executor.auto_approve else ""
-                    confirm = console.input(f"[bold yellow]执行命令[y] / 跳过[n] / 修改建议: [a]自动{auto_status} [/bold yellow]")
+                    confirm = console.input(f"[bold yellow]执行命令[y] / 取消[c] / 修改建议: [a]自动{auto_status} [/bold yellow]")
                     confirm_lower = confirm.lower().strip()
 
                     if confirm_lower == "a":
@@ -525,11 +528,11 @@ def _run_single_task(config: Config, task: str, executor: 'Executor' = None, ses
                         if executor.current_agent:
                             executor.current_agent._add_message("user", f'<ps_call_result id="executed">\n{result_msg}\n</ps_call_result>')
 
-                    elif confirm_lower == "n":
-                        console.print("[info]命令已跳过[/info]\n")
-                        # 发送跳过消息给当前Agent
+                    elif confirm_lower == "c":
+                        console.print("[info]命令已取消[/info]\n")
+                        # 发送取消消息给当前Agent
                         if executor.current_agent:
-                            executor.current_agent._add_message("user", f'<ps_call_result id="skip">\n命令已跳过\n</ps_call_result>')
+                            executor.current_agent._add_message("user", f'<ps_call_result id="rejected">\n用户取消了命令执行\n</ps_call_result>')
                     else:
                         # 用户输入修改建议
                         console.print("[info]已将您的建议发送给 Agent[/info]\n")
@@ -547,7 +550,7 @@ def _run_single_task(config: Config, task: str, executor: 'Executor' = None, ses
     while waiting_for_user_input and executor.current_agent:
         console.print("\n" + "=" * 60)
         console.print("[bold yellow]Agent 等待您的回复[/bold yellow]")
-        console.print("[dim]输入内容后按空行结束（q 退出，/list 查看会话）[/dim]")
+        console.print("[dim]输入内容后按空行结束（/exit 退出，/list 查看会话）[/dim]")
         console.print("=" * 60 + "\n")
 
         lines = []
@@ -557,7 +560,7 @@ def _run_single_task(config: Config, task: str, executor: 'Executor' = None, ses
                 _clear_input_buffer()
                 line = console.input("[info]> [/info]")
 
-                if line.lower() in ["q", "quit", "exit"]:
+                if line.lower() == "/exit":
                     console.print("[info]任务已终止[/info]")
                     waiting_for_user_input = False
                     break
@@ -600,10 +603,10 @@ def _run_single_task(config: Config, task: str, executor: 'Executor' = None, ses
         user_input = "\n".join(lines)
 
         if not user_input:
-            console.print("[warning]空输入，跳过[/warning]\n")
+            console.print("[warning]空输入，已忽略[/warning]\n")
             continue
 
-        if user_input.lower() in ["q", "quit", "exit"]:
+        if user_input.lower() == "/exit":
             console.print("[info]输入已取消[/info]\n")
             waiting_for_user_input = False
             break
@@ -674,7 +677,7 @@ def _create_cli_command_confirm_callback(executor: 'Executor', console: Console)
         # 等待用户确认
         _clear_input_buffer()
         auto_status = " [dim](自动: 启)[/dim]" if executor.auto_approve else ""
-        confirm = console.input(f"[bold yellow]执行命令[y] / 跳过[n] / 修改建议: [a]自动{auto_status} [/bold yellow]")
+        confirm = console.input(f"[bold yellow]执行命令[y] / 取消[c] / 修改建议: [a]自动{auto_status} [/bold yellow]")
         confirm_lower = confirm.lower().strip()
 
         if confirm_lower == "a":
@@ -701,9 +704,9 @@ def _create_cli_command_confirm_callback(executor: 'Executor', console: Console)
             console.print(f"\n[info]{result_msg}[/info]\n")
             return f'<ps_call_result id="executed">\n{result_msg}\n</ps_call_result>'
 
-        elif confirm_lower == "n":
-            console.print("[info]命令已跳过[/info]\n")
-            return '<ps_call_result id="skip">\n命令已跳过\n</ps_call_result>'
+        elif confirm_lower == "c":
+            console.print("[info]命令已取消[/info]\n")
+            return '<ps_call_result id="rejected">\n用户取消了命令执行\n</ps_call_result>'
 
         else:
             # 用户输入修改建议
@@ -770,3 +773,4 @@ def _execute_command(command: str, timeout: int):
 
 if __name__ == "__main__":
     main()
+

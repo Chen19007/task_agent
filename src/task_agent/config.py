@@ -8,17 +8,17 @@ class Config:
     """Agent 配置类"""
 
     # API 类型
-    api_type: str = "ollama"  # "ollama" | "openai"
+    api_type: str = "openai"  # "ollama" | "openai"
 
     # Ollama 配置
     ollama_host: str = "http://localhost:11434"
 
     # OpenAI 配置
-    openai_api_key: str = ""
-    openai_base_url: str = "https://api.openai.com/v1"
+    openai_api_key: str = "sk-1qTPR2NfODm9Y8YwQTXtGVONXF0g2bxWWreaZaMvPK4ErKOV"
+    openai_base_url: str = "http://localhost:3000/v1"
 
     # 通用配置
-    model: str = "qwen3:4b"
+    model: str = "minimax-m2"
     timeout: int = 300
     max_output_tokens: int = 4096
     num_ctx: int = 4096
@@ -29,11 +29,11 @@ class Config:
         import os
 
         return cls(
-            api_type=os.environ.get("LLM_API_TYPE", "ollama"),
+            api_type=os.environ.get("LLM_API_TYPE", "openai"),
             ollama_host=os.environ.get("OLLAMA_HOST", "http://localhost:11434"),
-            openai_api_key=os.environ.get("OPENAI_API_KEY", ""),
-            openai_base_url=os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
-            model=os.environ.get("OLLAMA_MODEL", "qwen3:4b"),
+            openai_api_key=os.environ.get("OPENAI_API_KEY", "sk-1qTPR2NfODm9Y8YwQTXtGVONXF0g2bxWWreaZaMvPK4ErKOV"),
+            openai_base_url=os.environ.get("OPENAI_BASE_URL", "http://localhost:3000/v1"),
+            model=os.environ.get("OLLAMA_MODEL", "minimax-m2"),
             timeout=int(os.environ.get("OLLAMA_TIMEOUT", "300")),
             max_output_tokens=int(os.environ.get("OLLAMA_MAX_OUTPUT_TOKENS", "4096")),
             num_ctx=int(os.environ.get("OLLAMA_NUM_CTX", "4096")),

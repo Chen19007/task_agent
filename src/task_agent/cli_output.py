@@ -42,10 +42,8 @@ class CLIOutput(OutputHandler):
         """显示命令结果"""
         if status == "executed":
             self.console.print(f"\n[info]{result}[/info]\n")
-        elif status == "skip":
-            self.console.print("[info]命令已跳过[/info]\n")
         else:  # rejected
-            self.console.print("[info]已将您的建议发送给 Agent[/info]\n")
+            self.console.print(f"[info]{result}[/info]\n")
 
     def on_create_agent(self, task: str, depth: int, agent_name: str,
                        context_info: dict) -> None:

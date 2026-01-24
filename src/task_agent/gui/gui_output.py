@@ -109,8 +109,6 @@ class GUIOutput(OutputHandler):
                 result, status = payload
                 if status == "executed":
                     icon = "[OK]"
-                elif status == "skip":
-                    icon = "[SKIP]"
                 else:
                     icon = "[CANCEL]"
                 self.chat_panel.add_collapsible_block(f"{icon} 结果", result, collapsed=True)

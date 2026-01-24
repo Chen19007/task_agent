@@ -74,6 +74,9 @@ class TaskAgentGUI:
         # 加载当前会话历史
         self._load_current_session()
 
+        # 异步刷新模型列表
+        threading.Thread(target=self._refresh_model_list, daemon=True).start()
+
     def _render_session_messages(self, messages: list[dict]):
         """按 GUI 展示格式渲染历史消息"""
         self.chat_panel.clear_messages()
@@ -180,10 +183,18 @@ class TaskAgentGUI:
         # 创建主窗口（不设置固定尺寸，让它适应视口）
         with dpg.window(label="Task Agent", tag="main_window",
                         no_scrollbar=True, no_scroll_with_mouse=True):
-            # 状态栏（使用 input_text 以便复制）
+            # 状态栏（包含模型选择下拉框）
             with dpg.group(horizontal=True):
+                dpg.add_text("模型: ")
+                self.model_combo = dpg.add_combo(
+                    items=[self.config.model],  # 初始只有当前模型
+                    default_value=self.config.model,
+                    callback=self._on_model_change,
+                    width=200
+                )
+                dpg.add_text(" | ")
                 self.status_text = dpg.add_input_text(
-                    default_value=f"模型: {self.config.model} | 就绪",
+                    default_value="就绪",
                     readonly=True,
                     width=-1
                 )
@@ -322,6 +333,36 @@ class TaskAgentGUI:
         # 添加提示消息
         self.chat_panel.add_text(f"[提示] 自动同意已{status}\n")
 
+    def _on_model_change(self, sender, app_data, user_data):
+        """模型切换回调
+        
+        Args:
+            sender: DPG sender
+            app_data: 选中的模型名称
+            user_data: 用户数据
+        """
+        new_model = app_data
+        if new_model and new_model != self.config.model:
+            old_model = self.config.model
+            self.config.model = new_model
+            # 同步更新 adapter 中的 config
+            self.adapter.config.model = new_model
+            self._update_status(f"已切换到 {new_model}")
+            self.chat_panel.add_text(f"[提示] 模型已从 {old_model} 切换到 {new_model}\n")
+
+    def _refresh_model_list(self):
+        """刷新可用模型列表"""
+        try:
+            client = create_client(self.config)
+            models = client.list_models()
+            if models and hasattr(self, 'model_combo'):
+                # 确保当前模型在列表中
+                if self.config.model not in models:
+                    models.insert(0, self.config.model)
+                dpg.configure_item(self.model_combo, items=models)
+        except Exception as e:
+            print(f"刷新模型列表失败: {e}")
+
     def _on_session_select(self, session_id: int):
         """会话选择回调"""
         # 更新当前会话ID
@@ -451,8 +492,6 @@ class TaskAgentGUI:
                     callback=lambda: self._on_command_confirm_execute_with_auto(index, command)
                 )
                 dpg.add_spacer(width=10)
-                dpg.add_button(label="跳过", width=100, callback=lambda: self._on_command_confirm_skip(index))
-                dpg.add_spacer(width=10)
                 dpg.add_button(label="取消", width=100, callback=lambda: self._on_command_confirm_rejected(index))
 
             dpg.add_spacer(height=10)
@@ -480,24 +519,13 @@ class TaskAgentGUI:
         self._on_auto_toggle(True)
         self._on_command_confirm_executed(index, command)
 
-    def _on_command_confirm_skip(self, index: int):
-        """用户跳过命令"""
-        if dpg.does_item_exist("command_confirmation_dialog"):
-            dpg.delete_item("command_confirmation_dialog")
-
-        self.async_executor.confirm_and_execute_command(index, "skip")
-        self.chat_panel.add_text("[跳过] 命令已跳过\n")
-
-        # 更新状态
-        self._update_status("继续执行...")
-
     def _on_command_confirm_rejected(self, index: int):
         """用户取消命令（发送建议）"""
         if dpg.does_item_exist("command_confirmation_dialog"):
             dpg.delete_item("command_confirmation_dialog")
 
         # TODO: 可以添加输入框让用户输入建议
-        self.async_executor.confirm_and_execute_command(index, "rejected", "用户取消了命令执行")
+        self.async_executor.confirm_and_execute_command(index, "rejected", "")
         self.chat_panel.add_text("[取消] 命令已取消\n")
 
         # 更新状态

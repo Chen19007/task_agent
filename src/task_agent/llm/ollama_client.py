@@ -68,3 +68,20 @@ class OllamaClient(LLMClient):
             return response.ok
         except Exception:
             return False
+
+    def list_models(self) -> list[str]:
+        """获取可用的模型列表
+
+        Returns:
+            list[str]: 可用模型名称列表
+        """
+        try:
+            url = f"{self.config.ollama_host}/api/tags"
+            response = requests.get(url, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            models = data.get("models", [])
+            return [m.get("name", "") for m in models if m.get("name")]
+        except Exception as e:
+            print(f"获取模型列表失败: {e}")
+            return []

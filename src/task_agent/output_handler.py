@@ -49,7 +49,7 @@ class OutputHandler(ABC):
 
         Args:
             result: 结果内容
-            status: executed/skip/rejected
+            status: executed/rejected
         """
         pass
 

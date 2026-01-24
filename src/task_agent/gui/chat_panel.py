@@ -1,4 +1,4 @@
-"""聊天面板组件
+﻿"""聊天面板组件
 
 显示消息历史和输入框。
 """
@@ -148,7 +148,6 @@ class ChatPanel:
                         default_value=False,
                         callback=self._on_auto_toggle
                     )
-                    dpg.add_spacer(width=20)
                     dpg.add_text("当前目录安全操作将自动执行", color=ThemeColors.HINT_TEXT)
 
                 dpg.add_spacer(height=5)

@@ -17,6 +17,9 @@ dev = []
 gui = [
     "dearpygui>=1.10.0",
 ]
+gradio = [
+    "gradio>=5.0.0,<6.0.0",
+]
 
 [build-system]
 requires = ["setuptools>=61.0"]
@@ -31,3 +34,4 @@ task_agent = ["py.typed"]
 [project.scripts]
 task-agent = "task_agent.cli:main"
 task-agent-gui = "task_agent.gui.app:main"
+task-agent-gradio = "task_agent.gui.gradio_app:main"

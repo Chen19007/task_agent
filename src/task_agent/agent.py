@@ -3,6 +3,7 @@
 import json
 import re
 import sys
+import threading
 import time
 import uuid
 import os
@@ -320,6 +321,30 @@ class SimpleAgent:
                     return None
         return None
 
+    def _get_agent_flow_name(self, agent_name: str) -> Optional[str]:
+        """获取预定义 agent 的流程名（读取首个非空行）"""
+        agents_dir = self._get_project_agents_dir()
+        if not agents_dir:
+            return None
+
+        for filename in os.listdir(agents_dir):
+            if not filename.lower().endswith(".md"):
+                continue
+
+            base_name = os.path.splitext(filename)[0].replace('_', '-')
+            if base_name.lower() == agent_name.lower().replace('_', '-'):
+                path = os.path.join(agents_dir, filename)
+                try:
+                    with open(path, "r", encoding="utf-8") as handle:
+                        for line in handle:
+                            stripped = line.strip()
+                            if not stripped:
+                                continue
+                            return stripped.lstrip("#").strip()
+                except (OSError, UnicodeDecodeError):
+                    return None
+        return None
+
     def start(self, task: str):
         """开始执行任务（初始化）
 
@@ -516,8 +541,6 @@ class SimpleAgent:
             self._before_llm_callback(self)
 
         messages = [ChatMessage(role=msg.role, content=msg.content) for msg in self.history]
-        if self.last_think:
-            messages.append(ChatMessage(role="assistant", content="", think=self.last_think))
 
         # 使用 LLM 客户端
         client = create_client(self.config)
@@ -686,8 +709,9 @@ class Executor:
         # 保存最近的 StepResult，供 cli.py 访问
         self.last_step_result: Optional[StepResult] = None
 
-        # 自动同意：当前目录安全文件操作自动执行
-        self.auto_approve: bool = False
+        # 自动同意：当前目录安全文件操作自动执行（线程安全）
+        self._auto_approve_lock = threading.Lock()
+        self._auto_approve: bool = False
 
         # 会话管理（用于快照保存）
         self.session_manager = session_manager
@@ -698,6 +722,18 @@ class Executor:
 
         # 命令确认回调（用于 CLI 和 GUI 的不同确认逻辑）
         self._command_confirm_callback = command_confirm_callback
+
+    @property
+    def auto_approve(self) -> bool:
+        """获取 auto_approve 状态（线程安全）"""
+        with self._auto_approve_lock:
+            return self._auto_approve
+
+    @auto_approve.setter
+    def auto_approve(self, value: bool):
+        """设置 auto_approve 状态（线程安全）"""
+        with self._auto_approve_lock:
+            self._auto_approve = value
 
     def set_command_confirm_callback(self, callback: Callable[[str], str]):
         """设置命令确认回调
@@ -847,8 +883,15 @@ class Executor:
                 )
 
                 if predefined_content:
+                    # 将流程名加入用户任务首行，避免任务跑偏
+                    flow_name = None
+                    if request.agent_name:
+                        flow_name = self.current_agent._get_agent_flow_name(request.agent_name)
                     # 将预定义内容和用户任务组合（不包含 agent 名称，避免自调用）
-                    combined_task = f"{predefined_content}\n\n---\n\n用户任务: {request.task}"
+                    if flow_name:
+                        combined_task = f"{predefined_content}\n\n---\n\n用户任务: Use {flow_name}, {request.task}"
+                    else:
+                        combined_task = f"{predefined_content}\n\n---\n\n用户任务: {request.task}"
                     self.current_agent.start(combined_task)
                 else:
                     # 如果没有预定义内容，按普通任务处理

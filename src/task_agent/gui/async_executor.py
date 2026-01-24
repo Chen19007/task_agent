@@ -118,7 +118,7 @@ class AsyncExecutor:
 
         Args:
             command_index: 命令索引（从 1 开始）
-            action: executed/skip/rejected
+            action: executed/rejected
             user_input: 用户输入（当 action=rejected 时）
         """
         if not self._pending_commands:
@@ -150,11 +150,11 @@ class AsyncExecutor:
                     else:
                         message = f"命令执行失败（退出码: {cmd_result.returncode}）：\n{cmd_result.stderr}"
                     result_msg = f'<ps_call_result id="executed">\n{message}\n</ps_call_result>'
-                elif action == "skip":
-                    message = "命令已跳过"
-                    result_msg = f'<ps_call_result id="skip">\n{message}\n</ps_call_result>'
                 else:  # rejected
-                    message = f"用户建议：{user_input}"
+                    if user_input:
+                        message = f"用户建议：{user_input}"
+                    else:
+                        message = "用户取消了命令执行"
                     result_msg = f'<ps_call_result id="rejected">\n{message}\n</ps_call_result>'
 
                 self._emit_command_result(message, action)

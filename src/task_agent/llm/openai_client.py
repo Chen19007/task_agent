@@ -1,4 +1,4 @@
-"""OpenAI API 客户端"""
+﻿"""OpenAI API 客户端"""
 
 import json
 
@@ -80,3 +80,22 @@ class OpenAIClient(LLMClient):
             return response.ok
         except Exception:
             return False
+    def list_models(self) -> list[str]:
+        """获取可用的模型列表
+
+        Returns:
+            list[str]: 可用模型名称列表
+        """
+        try:
+            url = f"{self.config.openai_base_url}/models"
+            headers = {"Authorization": f"Bearer {self.config.openai_api_key}"}
+            response = requests.get(url, headers=headers, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            models = data.get("data", [])
+            # 过滤出支持的模型（可以根据需要调整过滤条件）
+            model_list = [m.get("id", "") for m in models if m.get("id")]
+            return model_list
+        except Exception as e:
+            print(f"获取模型列表失败: {e}")
+            return []

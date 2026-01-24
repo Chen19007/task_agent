@@ -10,6 +10,7 @@ __pycache__/
 
 # Virtual environments (project-specific, installed from requirements.txt)
 .venv/
+.venv311/
 venv/
 env/
 ENV/
