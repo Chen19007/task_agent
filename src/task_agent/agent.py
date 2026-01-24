@@ -815,14 +815,12 @@ class Executor:
         """
         if self.session_manager and self.session_manager.current_session_id is not None:
             session_id = self.session_manager.current_session_id
-            # 递增索引（为后快照使用）
-            self._snapshot_index += 1
-            self.session_manager.save_snapshot(
+            self.session_manager.save_after_snapshot(
                 executor=self,
                 session_id=session_id,
                 snapshot_index=self._snapshot_index
             )
-            # 再次递增（为下一轮做准备）
+            # 下一轮递增一次
             self._snapshot_index += 1
 
     def run(self, task: str) -> Generator[tuple[list[str], StepResult], None, None]:

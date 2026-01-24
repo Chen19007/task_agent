@@ -25,6 +25,10 @@ class SessionManager:
         """获取快照文件路径"""
         return self.session_dir / f"{session_id}.{snapshot_index}.json"
 
+    def get_after_snapshot_path(self, session_id: int, snapshot_index: int) -> Path:
+        """获取调用后快照文件路径（仅用于调试）"""
+        return self.session_dir / f"{session_id}.{snapshot_index}.after.json"
+
     def get_session_path(self, session_id: int) -> Path:
         """获取会话路径（兼容旧接口，返回最新快照）"""
         # 查找该会话的最大 snapshot_index
@@ -155,23 +159,34 @@ class SessionManager:
             print(f"[error]保存快照失败: {e}[/error]")
             return False
 
-    def save_filesystem_snapshot_only(self, session_id: int, snapshot_index: int) -> bool:
-        """仅保存工作目录快照（用于命令执行后的补充快照）"""
-        snapshot_path = self.get_snapshot_path(session_id, snapshot_index)
-        if not snapshot_path.exists():
-            return False
+    def save_after_snapshot(self, executor: Executor, session_id: int, snapshot_index: int) -> bool:
+        """保存调用后快照（仅用于调试，不保存文件快照）"""
         try:
-            with open(snapshot_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            workspace_root = data.get("workspace_root")
-            if workspace_root:
-                self._session_workspace[session_id] = self._normalize_path(workspace_root)
-        except Exception:
-            pass
-        try:
-            return self._save_filesystem_snapshot(session_id, snapshot_index)
+            snapshot_path = self.get_after_snapshot_path(session_id, snapshot_index)
+            stack_data = []
+            for agent in executor.context_stack:
+                stack_data.append(self._serialize_agent(agent))
+            current_data = None
+            if executor.current_agent:
+                current_data = self._serialize_agent(executor.current_agent)
+            data = {
+                "session_id": session_id,
+                "snapshot_index": snapshot_index,
+                "snapshot_type": "after",
+                "created_at": datetime.now().isoformat(),
+                "global_subagent_count": executor._global_subagent_count,
+                "context_stack": stack_data,
+                "current_agent": current_data,
+                "auto_approve": getattr(executor, 'auto_approve', False),
+                "workspace_root": str(self._get_workspace_root(session_id)),
+            }
+            with open(snapshot_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            self.current_session_id = session_id
+            self.current_snapshot_index[session_id] = snapshot_index
+            return True
         except Exception as e:
-            print(f"[warning]保存目录快照失败: {e}[/warning]")
+            print(f"[error]保存调用后快照失败: {e}[/error]")
             return False
 
     def _deserialize_agent(self, agent_data: dict, config: Config, global_count: int,
@@ -322,14 +337,14 @@ class SessionManager:
 
         Args:
             executor: 当前的执行器
-            save_old: 是否保存旧会话（默认 True，但双快照机制已保存，此参数保留以兼容接口）
+            save_old: 是否保存旧会话（默认 True，会话快照已保存，此参数保留以兼容接口）
             temp: 是否为临时会话（默认 False，临时会话不分配 ID，直到用户执行任务）
 
         Returns:
             tuple[int, Executor]: (新会话ID, 新的执行器)
                                  临时会话时返回 (0, 新的执行器)
         """
-        # 双快照机制已自动保存所有状态，无需额外保存
+        # 会话快照已自动保存所有状态，无需额外保存
         # 保留 save_old 参数以兼容接口
 
         # 创建新 executor（传递 session_manager 以支持快照保存）
@@ -437,25 +452,39 @@ class SessionManager:
             self._copy_workspace(baseline_dir, workspace_root)
             for idx in range(0, snapshot_index + 1):
                 self._apply_snapshot_dir(snapshot_dirs[idx], workspace_root)
-            self._purge_session_records(session_id)
+            self._trim_session_records(session_id, snapshot_index)
             return True
         except Exception as e:
             print(f"[error]回滚失败: {e}[/error]")
             return False
 
-    def _purge_session_records(self, session_id: int) -> None:
+    def _trim_session_records(self, session_id: int, snapshot_index: int) -> None:
         for snapshot_file in self.session_dir.glob(f"{session_id}.*.json"):
             try:
-                snapshot_file.unlink()
-            except FileNotFoundError:
+                parts = snapshot_file.stem.split(".")
+                if len(parts) < 2:
+                    continue
+                index = int(parts[1])
+                if index > snapshot_index or (index == snapshot_index and "after" in parts[2:]):
+                    snapshot_file.unlink()
+            except (ValueError, OSError):
                 continue
-            except OSError:
-                pass
+
         fs_root = self._get_session_fs_root(session_id)
+        snapshots_root = self._get_snapshots_root(session_id)
+        if snapshots_root.exists():
+            for path in snapshots_root.glob("snapshot_*"):
+                try:
+                    index = int(path.name.split("_", 1)[1]) - 1
+                except (ValueError, IndexError):
+                    continue
+                if index > snapshot_index:
+                    shutil.rmtree(path, ignore_errors=True)
+
         if fs_root.exists():
-            shutil.rmtree(fs_root, ignore_errors=True)
-        self.current_snapshot_index.pop(session_id, None)
-        self._session_workspace.pop(session_id, None)
+            # 保留 baseline，仅清理超出回滚点的快照目录
+            pass
+        self.current_snapshot_index[session_id] = snapshot_index
 
     def _clear_workspace(self, workspace_root: Path, exclude_roots: list[Path]) -> None:
         for dirpath, dirnames, filenames in os.walk(workspace_root, topdown=False):

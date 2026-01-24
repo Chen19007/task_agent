@@ -431,9 +431,12 @@ def main():
                         confirm_callback=confirm
                     )
                     if ok:
-                        executor = Executor(config, session_manager=session_manager)
-                        session_manager.current_session_id = session_id
-                        console.print("\n[success]回滚完成，已切换到该会话（历史已清空）[/success]\n")
+                        new_executor = session_manager.load_session(session_id, config)
+                        if new_executor:
+                            executor = new_executor
+                            console.print("\n[success]回滚完成，已切换到该会话[/success]\n")
+                        else:
+                            console.print("\n[warning]回滚完成，但会话恢复失败[/warning]\n")
                     else:
                         console.print("\n[warning]回滚已取消或失败[/warning]\n")
                     continue
@@ -528,7 +531,7 @@ def _run_single_task(config: Config, task: str, executor: 'Executor' = None, ses
         # 检查是否需要等待用户输入
         if any("[等待用户输入]" in output for output in outputs):
             waiting_for_user_input = True
-            # 双快照机制已保存完整状态，无需额外保存
+            # 会话快照已保存完整状态，无需额外保存
 
     # 如果等待用户输入，继续循环
     while waiting_for_user_input and executor.current_agent:
@@ -621,7 +624,7 @@ def _run_single_task(config: Config, task: str, executor: 'Executor' = None, ses
             if any("[等待用户输入]" in output for output in outputs):
                 waiting_for_user_input = True
 
-    # 双快照机制已自动保存所有状态，无需额外保存
+    # 会话快照已自动保存所有状态，无需额外保存
 
     console.print("-" * 60)
 
@@ -665,7 +668,6 @@ def _create_cli_command_confirm_callback(executor: 'Executor', console: Console)
                 result_msg = f"命令执行失败（退出码: {cmd_result.returncode}）：\n{cmd_result.stderr}"
 
             console.print(f"[dim]{result_msg}[/dim]\n")
-            _maybe_save_fs_snapshot(executor)
             return f'<ps_call_result id="executed">\n{result_msg}\n</ps_call_result>'
 
         # 等待用户确认
@@ -696,7 +698,6 @@ def _create_cli_command_confirm_callback(executor: 'Executor', console: Console)
                 result_msg = f"命令执行失败（退出码: {cmd_result.returncode}）：\n{cmd_result.stderr}"
 
             console.print(f"\n[info]{result_msg}[/info]\n")
-            _maybe_save_fs_snapshot(executor)
             return f'<ps_call_result id="executed">\n{result_msg}\n</ps_call_result>'
 
         elif confirm_lower == "c":
@@ -751,7 +752,6 @@ def _handle_pending_commands(executor: 'Executor', console: Console, result: 'St
 
             if executor.current_agent:
                 executor.current_agent._add_message("user", f'<ps_call_result id="executed">\n{result_msg}\n</ps_call_result>')
-            _maybe_save_fs_snapshot(executor)
         else:
             # 等待用户确认
             _clear_input_buffer()
@@ -783,7 +783,6 @@ def _handle_pending_commands(executor: 'Executor', console: Console, result: 'St
 
                 if executor.current_agent:
                     executor.current_agent._add_message("user", f'<ps_call_result id="executed">\n{result_msg}\n</ps_call_result>')
-                _maybe_save_fs_snapshot(executor)
 
             elif confirm_lower == "c":
                 console.print("[info]命令已取消[/info]\n")
@@ -799,20 +798,6 @@ def _handle_pending_commands(executor: 'Executor', console: Console, result: 'St
         processed_count += 1
 
     return command_batch_id, processed_count
-
-
-def _maybe_save_fs_snapshot(executor: 'Executor'):
-    """命令执行后补充保存目录快照，确保文件变更可回滚"""
-    session_manager = executor.session_manager
-    if not session_manager or session_manager.current_session_id is None:
-        return
-    latest_index = executor._snapshot_index - 1
-    if latest_index < 0:
-        latest_index = 0
-    session_manager.save_filesystem_snapshot_only(
-        session_manager.current_session_id,
-        latest_index
-    )
 
 
 def _execute_command(command: str, timeout: int):
