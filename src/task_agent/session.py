@@ -101,7 +101,7 @@ class SessionManager:
                 for msg in agent.history
             ]
         }
-    
+
     def save_snapshot(self, executor: Executor, session_id: int, snapshot_index: int) -> bool:
         """保存会话快照
 
@@ -121,20 +121,6 @@ class SessionManager:
             current_data = None
             if executor.current_agent:
                 current_data = self._serialize_agent(executor.current_agent)
-                # 去重系统提示词：只保留最后一条（最新的）
-                if "history" in current_data:
-                    filtered_history = []
-                    last_system_msg = None
-                    for msg in reversed(current_data["history"]):
-                        if msg["role"] == "system" and msg["content"].startswith("你是一个任务执行agent"):
-                            # 只保留最后一条系统提示词
-                            if last_system_msg is None:
-                                last_system_msg = msg
-                            continue
-                        filtered_history.append(msg)
-                    if last_system_msg:
-                        filtered_history.append(last_system_msg)
-                    current_data["history"] = list(reversed(filtered_history))
             data = {
                 "session_id": session_id,
                 "snapshot_index": snapshot_index,
@@ -195,7 +181,8 @@ class SessionManager:
             config=config,
             depth=agent_data["depth"],
             global_subagent_count=global_count,
-            output_handler=output_handler
+            output_handler=output_handler,
+            init_system_prompt=False
         )
         agent.agent_id = agent_data["agent_id"]
         agent.last_think = agent_data.get("last_think", "")

@@ -67,7 +67,8 @@ class SimpleAgent:
                  depth: int = 0, max_depth: int = 4,
                  global_subagent_count: int = 0,
                  agent_name: Optional[str] = None,
-                 output_handler: Optional[OutputHandler] = None):
+                 output_handler: Optional[OutputHandler] = None,
+                 init_system_prompt: bool = True):
         """初始化 Agent
 
         Args:
@@ -77,6 +78,7 @@ class SimpleAgent:
             global_subagent_count: 全局已使用的子Agent数量（累加计数）
             agent_name: 当前 agent 名称（用于过滤 forbidden_agents）
             output_handler: 输出处理器（可选）
+            init_system_prompt: 是否初始化系统提示词（反序列化时应关闭）
         """
         self.config = config or Config.from_env()
         self.history: list[Message] = []
@@ -98,8 +100,9 @@ class SimpleAgent:
         # 输出处理器（使用 NullOutputHandler 避免 None 判断）
         self._output_handler = output_handler or NullOutputHandler()
 
-        # 初始化系统消息
-        self._init_system_prompt()
+        # 初始化系统消息（反序列化时可关闭）
+        if init_system_prompt:
+            self._init_system_prompt()
 
         # 待执行的子Agent任务请求（step()返回时携带）
         self._pending_child_request: Optional[ChildTaskRequest] = None
