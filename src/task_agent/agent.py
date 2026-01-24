@@ -374,6 +374,8 @@ class SimpleAgent:
 
         # 只有 content 参与标签解析
         response = content
+        # 避免同一轮在命令后追加“结果”文本，等待命令回执再输出
+        response = self._strip_trailing_after_ps_call(response)
 
         # 添加 assistant 消息到历史
         self._add_message("assistant", response, think=reasoning)
@@ -657,6 +659,18 @@ class SimpleAgent:
                 break
 
         return outputs, commands, command_blocks
+
+    def _strip_trailing_after_ps_call(self, response: str) -> str:
+        """当包含 ps_call 时，去掉最后一个 ps_call 之后的文本，防止无回执的结果输出"""
+        if not re.search(r'<ps_call\b', response, re.IGNORECASE):
+            return response
+        matches = list(re.finditer(r'</ps_call>', response, re.IGNORECASE))
+        if not matches:
+            return response
+        last_end = matches[-1].end()
+        if response[last_end:].strip():
+            return response[:last_end].rstrip()
+        return response
 
     def get_summary(self) -> dict:
         """获取执行摘要"""

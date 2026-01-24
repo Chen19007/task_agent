@@ -170,7 +170,9 @@ def print_help():
     - <任务描述>   - 执行任务（使用当前会话上下文）
     - /new        - 创建新会话（自动保存当前会话）
     - /list       - 列出所有保存的会话
+    - /list-snapshot <id> - 列出指定会话的快照点
     - /resume <id>- 恢复指定ID的会话
+    - /rollback <id> <snapshot> - 回滚到指定会话快照点
     - /exit       - 退出程序
 
   [bold]等待输入模式[/bold] - Agent 询问问题，等待回复
@@ -317,6 +319,30 @@ def main():
                             console.print(f"  会话 {s['session_id']} | {s['created_at'][:19]} | 消息数: {s['message_count']} | 深度: {s['depth']}")
                     console.print("")
                     continue
+                if task.lower().startswith("/list-snapshot"):
+                    parts = task.split()
+                    if len(parts) != 2:
+                        console.print("\n[error]用法: /list-snapshot <session_id>[/error]\n")
+                        continue
+                    try:
+                        session_id = int(parts[1])
+                    except ValueError:
+                        console.print(f"\n[error]无效的会话ID: {parts[1]}[/error]\n")
+                        continue
+
+                    snapshots = session_manager.list_session_snapshots(session_id)
+                    console.print("\n[bold cyan]会话快照点：[/bold cyan]\n")
+                    if not snapshots:
+                        console.print("[dim]  （暂无快照）[/dim]\n")
+                        continue
+                    for s in snapshots:
+                        preview = s.get("last_message", "")
+                        if preview:
+                            preview = preview.replace("\n", " ").strip()
+                            preview = preview[:50] + ("..." if len(preview) > 50 else "")
+                        console.print(f"  会话 {s['session_id']} | 快照 {s['snapshot_index']} | {s['created_at'][:19]} | [dim]{preview}[/dim]")
+                    console.print("")
+                    continue
 
                 if task.lower() == "/new":
                     new_id, new_executor = session_manager.create_new_session(executor)
@@ -382,7 +408,37 @@ def main():
                     console.print(f"\n[success]自动同意已{status}[/success]\n")
                     continue
 
-                console.print("[error]未知命令。可用命令: /list, /new, /clear, /resume <id>, /auto, /exit[/error]\n")
+                if task.lower().startswith("/rollback"):
+                    parts = task.split()
+                    if len(parts) != 3:
+                        console.print("\n[error]用法: /rollback <session_id> <snapshot_index>[/error]\n")
+                        continue
+                    try:
+                        session_id = int(parts[1])
+                        snapshot_index = int(parts[2])
+                    except ValueError:
+                        console.print("\n[error]参数必须是整数[/error]\n")
+                        continue
+
+                    def confirm(prompt: str) -> bool:
+                        _clear_input_buffer()
+                        answer = console.input(f"[bold yellow]{prompt} [y/N][/bold yellow]")
+                        return answer.strip().lower() == "y"
+
+                    ok = session_manager.rollback_to_snapshot(
+                        session_id,
+                        snapshot_index,
+                        confirm_callback=confirm
+                    )
+                    if ok:
+                        executor = Executor(config, session_manager=session_manager)
+                        session_manager.current_session_id = session_id
+                        console.print("\n[success]回滚完成，已切换到该会话（历史已清空）[/success]\n")
+                    else:
+                        console.print("\n[warning]回滚已取消或失败[/warning]\n")
+                    continue
+
+                console.print("[error]未知命令。可用命令: /list, /list-snapshot <id>, /new, /resume <id>, /rollback <id> <snapshot>, /auto, /exit[/error]\n")
                 continue
 
             # 解析 @ 文件引用
@@ -460,86 +516,14 @@ def _run_single_task(config: Config, task: str, executor: 'Executor' = None, ses
         for output in outputs:
             console.print(output, end="", soft_wrap=True)
 
-        # 处理命令确认（CLI 自己处理）
-        if result and result.pending_commands:
-            # 新的命令批次
-            if id(result.command_blocks) != command_batch_id:
-                command_batch_id = id(result.command_blocks)
-                processed_count = 0
-
-            while processed_count < len(result.command_blocks):
-                # 显示当前命令框
-                console.print(result.command_blocks[processed_count], end="")
-
-                # 获取对应的命令
-                command = result.pending_commands[processed_count]
-
-                # 检查是否自动执行
-                current_dir = os.getcwd()
-                auto_execute = executor.auto_approve and is_safe_command(command, current_dir)
-
-                if auto_execute:
-                    # 自动执行安全命令
-                    console.print("[dim](自动执行)[/dim]\n", end="")
-                    cmd_result = _execute_command(command, executor.config.timeout)
-
-                    # 构建结果消息
-                    if cmd_result.returncode == 0:
-                        if cmd_result.stdout:
-                            result_msg = f"命令执行成功，输出：\n{cmd_result.stdout}"
-                        else:
-                            result_msg = "命令执行成功（无输出）"
-                    else:
-                        result_msg = f"命令执行失败（退出码: {cmd_result.returncode}）：\n{cmd_result.stderr}"
-
-                    console.print(f"[dim]{result_msg}[/dim]\n")
-
-                    if executor.current_agent:
-                        executor.current_agent._add_message("user", f'<ps_call_result id="executed">\n{result_msg}\n</ps_call_result>')
-                else:
-                    # 等待用户确认
-                    _clear_input_buffer()
-                    auto_status = " [dim](自动: 启)[/dim]" if executor.auto_approve else ""
-                    confirm = console.input(f"[bold yellow]执行命令[y] / 取消[c] / 修改建议: [a]自动{auto_status} [/bold yellow]")
-                    confirm_lower = confirm.lower().strip()
-
-                    if confirm_lower == "a":
-                        # 切换自动同意
-                        executor.auto_approve = not executor.auto_approve
-                        new_status = "启用" if executor.auto_approve else "禁用"
-                        console.print(f"[success]自动同意已{new_status}[/success]\n")
-                        continue  # 重新询问
-
-                    if confirm_lower == "y":
-                        # 用户确认，执行命令
-                        cmd_result = _execute_command(command, executor.config.timeout)
-
-                        # 构建明确的结果消息
-                        if cmd_result.returncode == 0:
-                            if cmd_result.stdout:
-                                result_msg = f"命令执行成功，输出：\n{cmd_result.stdout}"
-                            else:
-                                result_msg = "命令执行成功（无输出）"
-                        else:
-                            result_msg = f"命令执行失败（退出码: {cmd_result.returncode}）：\n{cmd_result.stderr}"
-
-                        console.print(f"\n[info]{result_msg}[/info]\n")
-
-                        if executor.current_agent:
-                            executor.current_agent._add_message("user", f'<ps_call_result id="executed">\n{result_msg}\n</ps_call_result>')
-
-                    elif confirm_lower == "c":
-                        console.print("[info]命令已取消[/info]\n")
-                        # 发送取消消息给当前Agent
-                        if executor.current_agent:
-                            executor.current_agent._add_message("user", f'<ps_call_result id="rejected">\n用户取消了命令执行\n</ps_call_result>')
-                    else:
-                        # 用户输入修改建议
-                        console.print("[info]已将您的建议发送给 Agent[/info]\n")
-                        if executor.current_agent:
-                            executor.current_agent._add_message("user", f'<ps_call_result id="rejected">\n用户建议：{confirm}\n</ps_call_result>')
-
-                processed_count += 1
+        if result:
+            command_batch_id, processed_count = _handle_pending_commands(
+                executor,
+                console,
+                result,
+                command_batch_id,
+                processed_count
+            )
 
         # 检查是否需要等待用户输入
         if any("[等待用户输入]" in output for output in outputs):
@@ -624,6 +608,15 @@ def _run_single_task(config: Config, task: str, executor: 'Executor' = None, ses
             for output in outputs:
                 console.print(output, end="", soft_wrap=True)
 
+            if result:
+                command_batch_id, processed_count = _handle_pending_commands(
+                    executor,
+                    console,
+                    result,
+                    command_batch_id,
+                    processed_count
+                )
+
             # 检查是否需要等待用户输入
             if any("[等待用户输入]" in output for output in outputs):
                 waiting_for_user_input = True
@@ -672,6 +665,7 @@ def _create_cli_command_confirm_callback(executor: 'Executor', console: Console)
                 result_msg = f"命令执行失败（退出码: {cmd_result.returncode}）：\n{cmd_result.stderr}"
 
             console.print(f"[dim]{result_msg}[/dim]\n")
+            _maybe_save_fs_snapshot(executor)
             return f'<ps_call_result id="executed">\n{result_msg}\n</ps_call_result>'
 
         # 等待用户确认
@@ -702,6 +696,7 @@ def _create_cli_command_confirm_callback(executor: 'Executor', console: Console)
                 result_msg = f"命令执行失败（退出码: {cmd_result.returncode}）：\n{cmd_result.stderr}"
 
             console.print(f"\n[info]{result_msg}[/info]\n")
+            _maybe_save_fs_snapshot(executor)
             return f'<ps_call_result id="executed">\n{result_msg}\n</ps_call_result>'
 
         elif confirm_lower == "c":
@@ -714,6 +709,110 @@ def _create_cli_command_confirm_callback(executor: 'Executor', console: Console)
             return f'<ps_call_result id="rejected">\n用户建议：{confirm}\n</ps_call_result>'
 
     return confirm_callback
+
+
+def _handle_pending_commands(executor: 'Executor', console: Console, result: 'StepResult',
+                             command_batch_id: int, processed_count: int) -> tuple[int, int]:
+    """处理待确认命令，返回更新后的批次ID和处理计数"""
+    if not result.pending_commands:
+        return command_batch_id, processed_count
+
+    # 新的命令批次
+    if id(result.command_blocks) != command_batch_id:
+        command_batch_id = id(result.command_blocks)
+        processed_count = 0
+
+    while processed_count < len(result.command_blocks):
+        # 显示当前命令框
+        console.print(result.command_blocks[processed_count], end="")
+
+        # 获取对应的命令
+        command = result.pending_commands[processed_count]
+
+        # 检查是否自动执行
+        current_dir = os.getcwd()
+        auto_execute = executor.auto_approve and is_safe_command(command, current_dir)
+
+        if auto_execute:
+            # 自动执行安全命令
+            console.print("[dim](自动执行)[/dim]\n", end="")
+            cmd_result = _execute_command(command, executor.config.timeout)
+
+            # 构建结果消息
+            if cmd_result.returncode == 0:
+                if cmd_result.stdout:
+                    result_msg = f"命令执行成功，输出：\n{cmd_result.stdout}"
+                else:
+                    result_msg = "命令执行成功（无输出）"
+            else:
+                result_msg = f"命令执行失败（退出码: {cmd_result.returncode}）：\n{cmd_result.stderr}"
+
+            console.print(f"[dim]{result_msg}[/dim]\n")
+
+            if executor.current_agent:
+                executor.current_agent._add_message("user", f'<ps_call_result id="executed">\n{result_msg}\n</ps_call_result>')
+            _maybe_save_fs_snapshot(executor)
+        else:
+            # 等待用户确认
+            _clear_input_buffer()
+            auto_status = " [dim](自动: 启)[/dim]" if executor.auto_approve else ""
+            confirm = console.input(f"[bold yellow]执行命令[y] / 取消[c] / 修改建议: [a]自动{auto_status} [/bold yellow]")
+            confirm_lower = confirm.lower().strip()
+
+            if confirm_lower == "a":
+                # 切换自动同意
+                executor.auto_approve = not executor.auto_approve
+                new_status = "启用" if executor.auto_approve else "禁用"
+                console.print(f"[success]自动同意已{new_status}[/success]\n")
+                continue  # 重新询问
+
+            if confirm_lower == "y":
+                # 用户确认，执行命令
+                cmd_result = _execute_command(command, executor.config.timeout)
+
+                # 构建明确的结果消息
+                if cmd_result.returncode == 0:
+                    if cmd_result.stdout:
+                        result_msg = f"命令执行成功，输出：\n{cmd_result.stdout}"
+                    else:
+                        result_msg = "命令执行成功（无输出）"
+                else:
+                    result_msg = f"命令执行失败（退出码: {cmd_result.returncode}）：\n{cmd_result.stderr}"
+
+                console.print(f"\n[info]{result_msg}[/info]\n")
+
+                if executor.current_agent:
+                    executor.current_agent._add_message("user", f'<ps_call_result id="executed">\n{result_msg}\n</ps_call_result>')
+                _maybe_save_fs_snapshot(executor)
+
+            elif confirm_lower == "c":
+                console.print("[info]命令已取消[/info]\n")
+                # 发送取消消息给当前Agent
+                if executor.current_agent:
+                    executor.current_agent._add_message("user", f'<ps_call_result id="rejected">\n用户取消了命令执行\n</ps_call_result>')
+            else:
+                # 用户输入修改建议
+                console.print("[info]已将您的建议发送给 Agent[/info]\n")
+                if executor.current_agent:
+                    executor.current_agent._add_message("user", f'<ps_call_result id="rejected">\n用户建议：{confirm}\n</ps_call_result>')
+
+        processed_count += 1
+
+    return command_batch_id, processed_count
+
+
+def _maybe_save_fs_snapshot(executor: 'Executor'):
+    """命令执行后补充保存目录快照，确保文件变更可回滚"""
+    session_manager = executor.session_manager
+    if not session_manager or session_manager.current_session_id is None:
+        return
+    latest_index = executor._snapshot_index - 1
+    if latest_index < 0:
+        latest_index = 0
+    session_manager.save_filesystem_snapshot_only(
+        session_manager.current_session_id,
+        latest_index
+    )
 
 
 def _execute_command(command: str, timeout: int):
