@@ -82,6 +82,44 @@ def _resolve_file_references(text: str) -> tuple[str, list[str]]:
 
 console = Console(theme=custom_theme)
 
+_RUN_STATS = {
+    "smart_edit_calls": 0,
+    "smart_edit_success": 0,
+    "smart_edit_failure": 0,
+    "smart_edit_rejected": 0,
+}
+
+
+def _update_smart_edit_stats(command: str, status: str, result_msg: str = "") -> None:
+    if not command.strip().lower().startswith("builtin.smart_edit"):
+        return
+    _RUN_STATS["smart_edit_calls"] += 1
+    if status == "rejected":
+        _RUN_STATS["smart_edit_rejected"] += 1
+        return
+    if "成功" in result_msg and "失败" not in result_msg and "错误" not in result_msg:
+        _RUN_STATS["smart_edit_success"] += 1
+    else:
+        _RUN_STATS["smart_edit_failure"] += 1
+
+
+def _print_run_stats(console: Console) -> None:
+    success = _RUN_STATS["smart_edit_success"]
+    failure = _RUN_STATS["smart_edit_failure"]
+    rejected = _RUN_STATS["smart_edit_rejected"]
+    total = success + failure + rejected
+    success_rate = (success / total * 100) if total else 0.0
+    failure_rate = (failure / total * 100) if total else 0.0
+    rejected_rate = (rejected / total * 100) if total else 0.0
+    console.print(
+        "[info]本次运行 smart_edit 统计："
+        f"calls={_RUN_STATS['smart_edit_calls']} "
+        f"success={success}({success_rate:.1f}%) "
+        f"failure={failure}({failure_rate:.1f}%) "
+        f"rejected={rejected}({rejected_rate:.1f}%)"
+        "[/info]\n"
+    )
+
 
 def _extract_direct_ps_call(text: str) -> Optional[str]:
     stripped = text.lstrip()
@@ -100,6 +138,7 @@ def _execute_direct_ps_call(command: str, console: Console, timeout: int) -> Non
             result_msg = "命令执行成功（无输出）"
     else:
         result_msg = f"命令执行失败（退出码: {cmd_result.returncode}）：\n{cmd_result.stderr}"
+    _update_smart_edit_stats(command, "executed", result_msg)
     console.print(f"[info]{result_msg}[/info]\n")
 
 
@@ -354,6 +393,7 @@ def main():
                 continue
 
             if task.lower() == "/exit":
+                _print_run_stats(console)
                 console.print("[info]再见！[/info]")
                 break
 
@@ -364,6 +404,7 @@ def main():
             # 处理会话管理命令
             if task.startswith("/"):
                 if task.lower() == "/exit":
+                    _print_run_stats(console)
                     console.print("[info]再见！[/info]")
                     break
                 if task.lower() == "/list":
@@ -616,6 +657,7 @@ def _run_single_task(config: Config, task: str, executor: 'Executor' = None, ses
                 line = console.input("[info]> [/info]")
 
                 if line.lower() == "/exit":
+                    _print_run_stats(console)
                     console.print("[info]任务已终止[/info]")
                     waiting_for_user_input = False
                     break
@@ -745,6 +787,7 @@ def _create_cli_command_confirm_callback(executor: 'Executor', console: Console)
                 result_msg = f"命令执行失败（退出码: {cmd_result.returncode}）：\n{cmd_result.stderr}"
 
             console.print(f"[dim]{result_msg}[/dim]\n")
+            _update_smart_edit_stats(command, "executed", result_msg)
             return f'<ps_call_result id="executed">\n{result_msg}\n</ps_call_result>'
 
         # 等待用户确认
@@ -773,15 +816,18 @@ def _create_cli_command_confirm_callback(executor: 'Executor', console: Console)
                 result_msg = f"命令执行失败（退出码: {cmd_result.returncode}）：\n{cmd_result.stderr}"
 
             console.print(f"\n[info]{result_msg}[/info]\n")
+            _update_smart_edit_stats(command, "executed", result_msg)
             return f'<ps_call_result id="executed">\n{result_msg}\n</ps_call_result>'
 
         elif confirm_lower == "c":
             console.print("[info]命令已取消[/info]\n")
+            _update_smart_edit_stats(command, "rejected")
             return '<ps_call_result id="rejected">\n用户取消了命令执行\n</ps_call_result>'
 
         else:
             # 用户输入修改建议
             console.print("[info]已将您的建议发送给 Agent[/info]\n")
+            _update_smart_edit_stats(command, "rejected")
             return f'<ps_call_result id="rejected">\n用户建议：{confirm}\n</ps_call_result>'
 
     return confirm_callback
@@ -827,6 +873,7 @@ def _handle_pending_commands(executor: 'Executor', console: Console, result: 'St
 
             if executor.current_agent:
                 executor.current_agent._add_message("user", f'<ps_call_result id="executed">\n{result_msg}\n</ps_call_result>')
+            _update_smart_edit_stats(command, "executed", result_msg)
         else:
             # 等待用户确认
             _clear_input_buffer()
@@ -857,15 +904,18 @@ def _handle_pending_commands(executor: 'Executor', console: Console, result: 'St
 
                 if executor.current_agent:
                     executor.current_agent._add_message("user", f'<ps_call_result id="executed">\n{result_msg}\n</ps_call_result>')
+                _update_smart_edit_stats(command, "executed", result_msg)
 
             elif confirm_lower == "c":
                 console.print("[info]命令已取消[/info]\n")
+                _update_smart_edit_stats(command, "rejected")
                 # 发送取消消息给当前Agent
                 if executor.current_agent:
                     executor.current_agent._add_message("user", f'<ps_call_result id="rejected">\n用户取消了命令执行\n</ps_call_result>')
             else:
                 # 用户输入修改建议
                 console.print("[info]已将您的建议发送给 Agent[/info]\n")
+                _update_smart_edit_stats(command, "rejected")
                 if executor.current_agent:
                     executor.current_agent._add_message("user", f'<ps_call_result id="rejected">\n用户建议：{confirm}\n</ps_call_result>')
 
