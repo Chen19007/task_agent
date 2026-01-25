@@ -559,7 +559,7 @@ class SimpleAgent:
 
     def _filter_action_blocks(self, response: str) -> tuple[str, bool]:
         """Keep only tool tags when present to avoid mixed output."""
-        pattern = r"<ps_call>.*?</ps_call>|<create_agent(?:\s+name=(\S+?))?\s*>.*?</create_agent>"
+        pattern = r"<ps_call>.*?</ps_call>|<builtin>.*?</builtin>|<create_agent(?:\s+name=(\S+?))?\s*>.*?</create_agent>"
         matches = list(re.finditer(pattern, response, re.DOTALL | re.IGNORECASE))
         if not matches:
             return response, False
@@ -568,7 +568,7 @@ class SimpleAgent:
 
     def _has_action_tags(self, response: str) -> bool:
         """检查是否有操作标签"""
-        return bool(re.search(r'<(ps_call|create_agent|return)\b', response, re.IGNORECASE))
+        return bool(re.search(r'<(ps_call|builtin|create_agent|return)\b', response, re.IGNORECASE))
 
     def _is_completed(self, response: str) -> bool:
         """检查是否完成"""
@@ -578,6 +578,22 @@ class SimpleAgent:
         """提取返回内容"""
         match = re.search(r'<return>\s*(.+?)\s*</return>', response, re.DOTALL)
         return match.group(1) if match else "任务完成"
+
+    def _normalize_builtin_command(self, command: str) -> str:
+        """将 <builtin> 标签内容补全为 builtin.* 命令格式。"""
+        lines = command.splitlines()
+        for index, line in enumerate(lines):
+            if not line.strip():
+                continue
+            if line.strip().lower().startswith("builtin."):
+                return command
+            match = re.match(r"(\s*)(read_file|smart_edit)(\b.*)", line, re.IGNORECASE)
+            if match:
+                indent, tool, rest = match.groups()
+                lines[index] = f"{indent}builtin.{tool}{rest}"
+                return "\n".join(lines)
+            return command
+        return command
 
     def _parse_tools(self, response: str) -> tuple[list[str], list[str], list[str]]:
         """解析工具标签
@@ -589,9 +605,12 @@ class SimpleAgent:
         commands = []
         command_blocks = []
 
-        # 执行PowerShell命令
-        for match in re.finditer(r'<ps_call>\s*(.+?)\s*</ps_call>', response, re.DOTALL):
-            command = match.group(1).strip()
+        # 执行PowerShell命令与内置工具
+        for match in re.finditer(r'<(ps_call|builtin)>\s*(.+?)\s*</\1>', response, re.DOTALL | re.IGNORECASE):
+            tag_name = match.group(1).lower()
+            command = match.group(2).strip()
+            if tag_name == "builtin":
+                command = self._normalize_builtin_command(command)
             self.total_commands_executed += 1  # 解析时分配编号
 
             # 命令框单独存储，不放入 outputs
@@ -635,9 +654,12 @@ class SimpleAgent:
         commands = []
         command_blocks = []
 
-        # 执行PowerShell命令
-        for match in re.finditer(r'<ps_call>\s*(.+?)\s*</ps_call>', response, re.DOTALL):
-            command = match.group(1).strip()
+        # 执行PowerShell命令与内置工具
+        for match in re.finditer(r'<(ps_call|builtin)>\s*(.+?)\s*</\1>', response, re.DOTALL | re.IGNORECASE):
+            tag_name = match.group(1).lower()
+            command = match.group(2).strip()
+            if tag_name == "builtin":
+                command = self._normalize_builtin_command(command)
             self.total_commands_executed += 1  # 解析时分配编号
 
             # 调用回调
@@ -674,10 +696,10 @@ class SimpleAgent:
         return outputs, commands, command_blocks
 
     def _strip_trailing_after_ps_call(self, response: str) -> str:
-        """当包含 ps_call 时，去掉最后一个 ps_call 之后的文本，防止无回执的结果输出"""
-        if not re.search(r'<ps_call\b', response, re.IGNORECASE):
+        """当包含 ps_call 或 builtin 时，去掉最后一个工具标签之后的文本，防止无回执的结果输出"""
+        if not re.search(r'<(ps_call|builtin)\b', response, re.IGNORECASE):
             return response
-        matches = list(re.finditer(r'</ps_call>', response, re.IGNORECASE))
+        matches = list(re.finditer(r'</(ps_call|builtin)>', response, re.IGNORECASE))
         if not matches:
             return response
         last_end = matches[-1].end()

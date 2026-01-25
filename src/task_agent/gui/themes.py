@@ -16,6 +16,8 @@ class ThemeColors:
     PS_CALL_TEXT = (255, 200, 100)
     PS_CALL_BG = (80, 40, 40)
 
+    BUILTIN_TEXT = (255, 200, 100)
+
     CREATE_AGENT_TEXT = (150, 255, 150)
     CREATE_AGENT_BG = (40, 80, 40)
 
@@ -42,6 +44,7 @@ class ThemeColors:
         """根据标签类型返回颜色"""
         color_map = {
             "ps_call": cls.PS_CALL_TEXT,
+            "builtin": cls.BUILTIN_TEXT,
             "create_agent": cls.CREATE_AGENT_TEXT,
             "think": cls.THINK_TEXT,
             "ps_call_result": cls.PS_CALL_RESULT_TEXT,

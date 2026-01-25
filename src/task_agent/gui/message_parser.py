@@ -35,6 +35,7 @@ class MessageParser:
     TOOL_TAG_PATTERNS = {
         "return": (r"<return>\s*([\s\S]*?)\s*</return>", True),
         "ps_call": (r"<ps_call>\s*([\s\S]*?)\s*</ps_call>", True),
+        "builtin": (r"<builtin>\s*([\s\S]*?)\s*</builtin>", True),
         "create_agent": (r"<create_agent(?:\s+name=(\S+?))?\s*([\s\S]*?)</create_agent>", True),
         "ps_call_result": (r"<ps_call_result[^>]*>\s*([\s\S]*?)\s*</ps_call_result>", True),
     }
