@@ -377,8 +377,9 @@ class SimpleAgent:
 
         # 只有 content 参与标签解析
         response = content
-        # 避免同一轮在命令后追加“结果”文本，等待命令回执再输出
-        response = self._strip_trailing_after_ps_call(response)
+        filtered_response, has_tool_tags = self._filter_action_blocks(response)
+        if has_tool_tags:
+            response = filtered_response
 
         # 添加 assistant 消息到历史
         self._add_message("assistant", response, think=reasoning)
@@ -419,7 +420,7 @@ class SimpleAgent:
 
             # 检查深度限制
             if self.depth >= self.max_depth:
-                self._add_message("user", f"[深度限制] 请直接执行任务: {task}")
+                self._add_message("system", f"[深度限制] 请直接执行任务: {task}")
                 self._output_handler.on_depth_limit()
                 outputs.append(f"\n!! [深度限制]\n")
                 outputs.append(f"已达到最大深度 {self.max_depth}，由当前Agent执行\n")
@@ -432,7 +433,7 @@ class SimpleAgent:
                 outputs.append(f"\n!! [本地配额限制]\n")
                 outputs.append(f"当前Agent已用完 {self.max_depth ** 2} 个子Agent配额\n")
                 outputs.append(f"{'═'*50}\n\n")
-                self._add_message("user", f"[本地配额限制] 请直接执行任务: {task}")
+                self._add_message("system", f"[本地配额限制] 请直接执行任务: {task}")
                 return StepResult(outputs=self._add_depth_prefix(outputs), action=Action.CONTINUE, pending_commands=pending_commands, command_blocks=command_blocks)
 
             # 检查全局配额限制（防止层级间循环）- 累加计数
@@ -442,7 +443,7 @@ class SimpleAgent:
                 outputs.append(f"\n!! [全局配额限制]\n")
                 outputs.append(f"整个任务已用完所有 {global_total} 个子Agent配额\n")
                 outputs.append(f"{'═'*50}\n\n")
-                self._add_message("user", f"[全局配额限制] 请直接执行任务: {task}")
+                self._add_message("system", f"[全局配额限制] 请直接执行任务: {task}")
                 return StepResult(outputs=self._add_depth_prefix(outputs), action=Action.CONTINUE, pending_commands=pending_commands, command_blocks=command_blocks)
 
             self.total_sub_agents_created += 1
@@ -475,7 +476,7 @@ class SimpleAgent:
             return StepResult(outputs=self._add_depth_prefix(outputs), action=Action.SWITCH_TO_CHILD, data=request, pending_commands=pending_commands, command_blocks=command_blocks)
 
         # 检查是否完成
-        if self._is_completed(response):
+        if not has_tool_tags and self._is_completed(response):
             summary = self._extract_return(response)
             # 调用回调：输出完成信息
             stats = self.get_summary()
@@ -501,7 +502,7 @@ class SimpleAgent:
         """
         if summary:
             # 子Agent结果是工具执行的输出，用user角色（兼容不支持tool角色的API）
-            self._add_message("user", summary)
+            self._add_message("assistant", f"<child_summary>\n{summary}\n</child_summary>")
         # 同步全局计数
         self._global_subagent_count = global_count
 
@@ -555,6 +556,15 @@ class SimpleAgent:
             return response.content, response.reasoning
         except Exception as e:
             raise RuntimeError(f"调用LLM失败: {e}")
+
+    def _filter_action_blocks(self, response: str) -> tuple[str, bool]:
+        """Keep only tool tags when present to avoid mixed output."""
+        pattern = r"<ps_call>.*?</ps_call>|<create_agent(?:\s+name=(\S+?))?\s*>.*?</create_agent>"
+        matches = list(re.finditer(pattern, response, re.DOTALL | re.IGNORECASE))
+        if not matches:
+            return response, False
+        blocks = [match.group(0).strip() for match in matches]
+        return "\n".join(blocks), True
 
     def _has_action_tags(self, response: str) -> bool:
         """检查是否有操作标签"""
