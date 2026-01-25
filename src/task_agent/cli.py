@@ -103,6 +103,34 @@ def _execute_direct_ps_call(command: str, console: Console, timeout: int) -> Non
     console.print(f"[info]{result_msg}[/info]\n")
 
 
+def _handle_compact_command(executor: Executor, console: Console, reason: str = "手动压缩") -> None:
+    if not executor.current_agent:
+        console.print("[warning]暂无可压缩的会话[/warning]\n")
+        return
+
+    result = executor.current_agent.compact_history(reason=reason)
+    if result.get("compacted"):
+        console.print(
+            "[success]已压缩历史上下文："
+            f"{result.get('messages_before')} -> {result.get('messages_after')} | "
+            f"{result.get('context_before')} -> {result.get('context_after')}[/success]\n"
+        )
+        return
+
+    reason_map = {
+        "too_short": "历史过短，无需压缩",
+        "no_target": "没有可压缩的消息",
+        "empty": "无有效内容可压缩",
+        "compacting": "正在压缩中，请稍后再试",
+    }
+    reason_text = result.get("reason", "未知原因")
+    if isinstance(reason_text, str) and reason_text.startswith("error:"):
+        reason_text = f"压缩失败：{reason_text[6:].strip()}"
+    else:
+        reason_text = reason_map.get(reason_text, reason_text)
+    console.print(f"[warning]{reason_text}[/warning]\n")
+
+
 def parse_args():
     """解析命令行参数"""
     parser = argparse.ArgumentParser(
@@ -196,6 +224,8 @@ def print_help():
     - /list-snapshot <id> - 列出指定会话的快照点
     - /resume <id>- 恢复指定ID的会话
     - /rollback <id> <snapshot> - 回滚到指定会话快照点
+    - /compact    - 压缩当前会话上下文
+    - /auto       - 切换自动同意
     - /exit       - 退出程序
 
   [bold]等待输入模式[/bold] - Agent 询问问题，等待回复
@@ -204,6 +234,7 @@ def print_help():
     - : <命令>    - 直接执行命令（不发给模型，不写入历史）
     - /exit       - 终止当前任务
     - /list       - 查看会话列表
+    - /compact    - 压缩当前会话上下文
 
 [bold yellow]命令行参数：[/bold yellow]
   -m, --model   - 指定模型名称（默认：minimax-m2）
@@ -436,6 +467,9 @@ def main():
                     status = "启用" if executor.auto_approve else "禁用"
                     console.print(f"\n[success]自动同意已{status}[/success]\n")
                     continue
+                if task.lower() == "/compact":
+                    _handle_compact_command(executor, console, reason="手动压缩")
+                    continue
 
                 if task.lower().startswith("/rollback"):
                     parts = task.split()
@@ -470,7 +504,7 @@ def main():
                         console.print("\n[warning]回滚已取消或失败[/warning]\n")
                     continue
 
-                console.print("[error]未知命令。可用命令: /list, /list-snapshot <id>, /new, /resume <id>, /rollback <id> <snapshot>, /auto, /exit[/error]\n")
+                console.print("[error]未知命令。可用命令: /list, /list-snapshot <id>, /new, /resume <id>, /rollback <id> <snapshot>, /compact, /auto, /exit[/error]\n")
                 continue
 
             direct_command = _extract_direct_ps_call(task)
@@ -571,7 +605,7 @@ def _run_single_task(config: Config, task: str, executor: 'Executor' = None, ses
     while waiting_for_user_input and executor.current_agent:
         console.print("\n" + "=" * 60)
         console.print("[bold yellow]Agent 等待您的回复[/bold yellow]")
-        console.print("[dim]输入内容后按空行结束（/exit 退出，/list 查看会话）[/dim]")
+        console.print("[dim]输入内容后按空行结束（/exit 退出，/list 查看会话，/compact 压缩上下文）[/dim]")
         console.print("=" * 60 + "\n")
 
         lines = []
@@ -601,8 +635,11 @@ def _run_single_task(config: Config, task: str, executor: 'Executor' = None, ses
                                 console.print(f"  会话 {s['session_id']} | {s['created_at'][:19]} | 消息数: {s['message_count']} | 深度: {s['depth']}")
                         console.print("")
                         continue  # 继续等待输入
+                    if line.lower() == "/compact":
+                        _handle_compact_command(executor, console, reason="手动压缩")
+                        continue  # 继续等待输入
                     else:
-                        console.print("[warning]提示：在等待输入模式下，只支持 /list 命令[/warning]\n")
+                        console.print("[warning]提示：在等待输入模式下，只支持 /list 和 /compact 命令[/warning]\n")
                         continue  # 继续等待输入
 
                 if not line:  # 空行，结束输入

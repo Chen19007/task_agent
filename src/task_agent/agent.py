@@ -117,6 +117,11 @@ class SimpleAgent:
         # Executor 引用（用于访问命令确认回调）
         self._executor: Optional['Executor'] = None
 
+        # 上下文压缩状态
+        self._last_compact_message_count = 0
+        self._last_compact_time = 0.0
+        self._is_compacting = False
+
     def set_before_llm_callback(self, callback: callable):
         """设置LLM调用前的回调函数
 
@@ -540,6 +545,156 @@ class SimpleAgent:
         total_chars = sum(len(msg.content) for msg in self.history)
         return total_chars // 4
 
+    def _format_messages_for_summary(self, messages: list[Message]) -> str:
+        """将消息列表格式化为摘要输入文本。"""
+        role_map = {
+            "system": "系统",
+            "user": "用户",
+            "assistant": "助手",
+            "tool": "工具",
+        }
+        lines = []
+        for msg in messages:
+            content = msg.content.strip()
+            if not content:
+                continue
+            role_label = role_map.get(msg.role, msg.role)
+            lines.append(f"[{role_label}] {content}")
+        return "\n".join(lines)
+
+    def _summarize_text(self, text: str) -> str:
+        """调用 LLM 对文本做一次摘要。"""
+        system_prompt = (
+            "你是会话压缩助手。请用中文将以下对话压缩成可继续执行的工作摘要。\n"
+            "要求：\n"
+            "1) 保留任务目标、关键决策、已完成事项。\n"
+            "2) 保留重要上下文：文件路径、命令、配置、参数、接口、约定。\n"
+            "3) 明确未完成的待办和风险。\n"
+            "4) 不要编造，保持简洁，优先要点列表。\n"
+            "5) 不要输出任何工具标签或 XML 标签。"
+        )
+        messages = [
+            ChatMessage(role="system", content=system_prompt),
+            ChatMessage(role="user", content=text),
+        ]
+        client = create_client(self.config)
+        max_tokens = min(2048, self.config.max_output_tokens)
+        response = client.chat(messages, max_tokens)
+        return response.content.strip()
+
+    def _summarize_long_text(self, text: str) -> str:
+        """分段摘要长文本，避免一次输入过长。"""
+        chunk_chars = max(2000, int(self.config.compact_chunk_chars))
+        if len(text) <= chunk_chars:
+            return self._summarize_text(text)
+
+        lines = text.splitlines()
+        chunks = []
+        current = []
+        current_len = 0
+        for line in lines:
+            line_len = len(line) + 1
+            if current and current_len + line_len > chunk_chars:
+                chunks.append("\n".join(current))
+                current = []
+                current_len = 0
+            current.append(line)
+            current_len += line_len
+        if current:
+            chunks.append("\n".join(current))
+
+        summaries = []
+        for idx, chunk in enumerate(chunks, start=1):
+            chunk_text = f"分段 {idx}/{len(chunks)}:\n{chunk}"
+            summaries.append(self._summarize_text(chunk_text))
+
+        if len(summaries) == 1:
+            return summaries[0]
+
+        combined = "\n\n".join(
+            f"[分段摘要 {idx}]\n{summary}" for idx, summary in enumerate(summaries, start=1)
+        )
+        return self._summarize_text(combined)
+
+    def should_auto_compact(self) -> bool:
+        """判断是否需要自动压缩上下文。"""
+        if not self.config.auto_compact:
+            return False
+        context_used = self._estimate_context_tokens()
+        threshold = int(self.config.num_ctx * self.config.auto_compact_threshold)
+        if context_used < threshold:
+            return False
+        if len(self.history) <= self.config.compact_keep_messages + 2:
+            return False
+        if self._last_compact_message_count == len(self.history):
+            return False
+        return True
+
+    def compact_history(self, reason: str = "手动压缩", keep_last: Optional[int] = None) -> dict:
+        """压缩历史上下文，保留关键摘要和最近消息。"""
+        if self._is_compacting:
+            return {"compacted": False, "reason": "compacting"}
+
+        keep_last = keep_last if keep_last is not None else self.config.compact_keep_messages
+        total_before = len(self.history)
+        if total_before <= keep_last + 2:
+            return {"compacted": False, "reason": "too_short", "messages": total_before}
+
+        keep_indices = set()
+        if self.history and self.history[0].role == "system":
+            keep_indices.add(0)
+        tail_start = max(total_before - keep_last, 0)
+        keep_indices.update(range(tail_start, total_before))
+
+        messages_to_summarize = [
+            msg for idx, msg in enumerate(self.history) if idx not in keep_indices
+        ]
+        if not messages_to_summarize:
+            return {"compacted": False, "reason": "no_target", "messages": total_before}
+
+        summary_input = self._format_messages_for_summary(messages_to_summarize)
+        if not summary_input.strip():
+            return {"compacted": False, "reason": "empty", "messages": total_before}
+
+        context_before = self._estimate_context_tokens()
+        self._is_compacting = True
+        try:
+            summary = self._summarize_long_text(summary_input)
+        except Exception as exc:
+            return {"compacted": False, "reason": f"error: {exc}"}
+        finally:
+            self._is_compacting = False
+
+        summary = summary.strip() or "（空摘要）"
+        summary_message = Message(
+            role="system",
+            content=f"以下是历史摘要（{reason}）：\n{summary}",
+        )
+
+        new_history = []
+        if 0 in keep_indices:
+            new_history.append(self.history[0])
+        new_history.append(summary_message)
+        for idx in range(tail_start, total_before):
+            if idx == 0:
+                continue
+            new_history.append(self.history[idx])
+
+        self.history = new_history
+        self._last_compact_message_count = len(self.history)
+        self._last_compact_time = time.time()
+        context_after = self._estimate_context_tokens()
+
+        return {
+            "compacted": True,
+            "reason": reason,
+            "messages_before": total_before,
+            "messages_after": len(self.history),
+            "context_before": context_before,
+            "context_after": context_after,
+            "summary": summary,
+        }
+
     def _call_llm(self) -> tuple[str, str]:
         """调用LLM，返回 (content, reasoning)"""
         # 触发保存快照回调（在发送消息前保存当前状态）
@@ -794,6 +949,23 @@ class Executor:
         """
         self._command_confirm_callback = callback
 
+    def _maybe_auto_compact(self) -> Optional[str]:
+        """根据阈值自动压缩上下文，返回提示信息。"""
+        if not self.current_agent:
+            return None
+        if not self.current_agent.should_auto_compact():
+            return None
+
+        result = self.current_agent.compact_history(reason="自动压缩")
+        if not result.get("compacted"):
+            return None
+
+        return (
+            f"\n[自动压缩] 已压缩历史上下文："
+            f"{result.get('messages_before')} -> {result.get('messages_after')} | "
+            f"{result.get('context_before')} -> {result.get('context_after')}\n"
+        )
+
     def _create_agent(self, depth: int = 0, global_subagent_count: int = 0, agent_name: Optional[str] = None) -> SimpleAgent:
         """创建 Agent 并设置回调
 
@@ -904,6 +1076,10 @@ class Executor:
             tuple[list[str], StepResult]: (输出片段列表, 执行结果)
         """
         while self.current_agent and self._is_running:
+            auto_notice = self._maybe_auto_compact()
+            if auto_notice:
+                yield ([auto_notice], StepResult(outputs=[auto_notice], action=Action.CONTINUE))
+
             result = self.current_agent.step()
 
             # 保存 StepResult 供 cli.py 访问
