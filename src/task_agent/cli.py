@@ -6,6 +6,8 @@ import re
 import sys
 import time
 
+from typing import Optional
+
 from rich.console import Console
 from rich.markup import escape as rich_escape
 from rich.panel import Panel
@@ -79,6 +81,26 @@ def _resolve_file_references(text: str) -> tuple[str, list[str]]:
 
 
 console = Console(theme=custom_theme)
+
+
+def _extract_direct_ps_call(text: str) -> Optional[str]:
+    stripped = text.lstrip()
+    if not stripped.startswith(":"):
+        return None
+    command = stripped[1:].strip()
+    return command or None
+
+
+def _execute_direct_ps_call(command: str, console: Console, timeout: int) -> None:
+    cmd_result = _execute_command(command, timeout)
+    if cmd_result.returncode == 0:
+        if cmd_result.stdout:
+            result_msg = f"命令执行成功，输出：\n{cmd_result.stdout}"
+        else:
+            result_msg = "命令执行成功（无输出）"
+    else:
+        result_msg = f"命令执行失败（退出码: {cmd_result.returncode}）：\n{cmd_result.stderr}"
+    console.print(f"[info]{result_msg}[/info]\n")
 
 
 def parse_args():
@@ -168,6 +190,7 @@ def print_help():
   [bold]主循环[/bold] - 等待输入新任务
     提示符: [user]任务>[/user]
     - <任务描述>   - 执行任务（使用当前会话上下文）
+    - : <命令>     - 直接执行命令（不发给模型，不写入历史）
     - /new        - 创建新会话（自动保存当前会话）
     - /list       - 列出所有保存的会话
     - /list-snapshot <id> - 列出指定会话的快照点
@@ -178,6 +201,7 @@ def print_help():
   [bold]等待输入模式[/bold] - Agent 询问问题，等待回复
     提示符: [info]>[/info]
     - <内容>      - 输入回复内容（空行结束）
+    - : <命令>    - 直接执行命令（不发给模型，不写入历史）
     - /exit       - 终止当前任务
     - /list       - 查看会话列表
 
@@ -262,6 +286,10 @@ def main():
     console.print(f"[info]模型：{config.model} | 超时：{args.timeout}s[/info]\n")
 
     if args.task:
+        direct_command = _extract_direct_ps_call(args.task)
+        if direct_command:
+            _execute_direct_ps_call(direct_command, console, args.timeout)
+            return
         _run_single_task(config, args.task)
         return
 
@@ -444,6 +472,11 @@ def main():
                 console.print("[error]未知命令。可用命令: /list, /list-snapshot <id>, /new, /resume <id>, /rollback <id> <snapshot>, /auto, /exit[/error]\n")
                 continue
 
+            direct_command = _extract_direct_ps_call(task)
+            if direct_command:
+                _execute_direct_ps_call(direct_command, console, args.timeout)
+                continue
+
             # 解析 @ 文件引用
             task, errors = _resolve_file_references(task)
             if errors:
@@ -604,6 +637,12 @@ def _run_single_task(config: Config, task: str, executor: 'Executor' = None, ses
             for error in errors:
                 console.print(error)
 
+        direct_command = _extract_direct_ps_call(user_input)
+        if direct_command:
+            _execute_direct_ps_call(direct_command, console, args.timeout)
+            waiting_for_user_input = False
+            continue
+
         # 继续执行
         waiting_for_user_input = False
         for outputs, result in executor.resume(user_input):
@@ -673,16 +712,14 @@ def _create_cli_command_confirm_callback(executor: 'Executor', console: Console)
         # 等待用户确认
         _clear_input_buffer()
         auto_status = " [dim](自动: 启)[/dim]" if executor.auto_approve else ""
-        confirm = console.input(f"[bold yellow]执行命令[y] / 取消[c] / 修改建议: [a]自动{auto_status} [/bold yellow]")
+        confirm = console.input(f"[bold yellow]执行命令[y] / 取消[c] / 执行并开启自动[a]{auto_status} [/bold yellow]")
         confirm_lower = confirm.lower().strip()
 
         if confirm_lower == "a":
-            # 切换自动同意
-            executor.auto_approve = not executor.auto_approve
-            new_status = "启用" if executor.auto_approve else "禁用"
-            console.print(f"[success]自动同意已{new_status}[/success]\n")
-            # 递归调用自己
-            return confirm_callback(command)
+            # 启用自动同意并执行当前命令
+            executor.auto_approve = True
+            console.print("[success]自动同意已启用[/success]\n")
+            confirm_lower = "y"
 
         if confirm_lower == "y":
             # 用户确认，执行命令
@@ -756,15 +793,14 @@ def _handle_pending_commands(executor: 'Executor', console: Console, result: 'St
             # 等待用户确认
             _clear_input_buffer()
             auto_status = " [dim](自动: 启)[/dim]" if executor.auto_approve else ""
-            confirm = console.input(f"[bold yellow]执行命令[y] / 取消[c] / 修改建议: [a]自动{auto_status} [/bold yellow]")
+            confirm = console.input(f"[bold yellow]执行命令[y] / 取消[c] / 执行并开启自动[a]{auto_status} [/bold yellow]")
             confirm_lower = confirm.lower().strip()
 
             if confirm_lower == "a":
-                # 切换自动同意
-                executor.auto_approve = not executor.auto_approve
-                new_status = "启用" if executor.auto_approve else "禁用"
-                console.print(f"[success]自动同意已{new_status}[/success]\n")
-                continue  # 重新询问
+                # 启用自动同意并执行当前命令
+                executor.auto_approve = True
+                console.print("[success]自动同意已启用[/success]\n")
+                confirm_lower = "y"
 
             if confirm_lower == "y":
                 # 用户确认，执行命令
@@ -800,6 +836,298 @@ def _handle_pending_commands(executor: 'Executor', console: Console, result: 'St
     return command_batch_id, processed_count
 
 
+class _ExecResult:
+    def __init__(self, stdout: str, stderr: str, returncode: int):
+        self.stdout = stdout
+        self.stderr = stderr
+        self.returncode = returncode
+
+
+_BUILTIN_TOOL_PATTERN = re.compile(r"^\s*builtin\.(\w+)\s*(\{[\s\S]*\})?\s*$")
+
+
+def _execute_builtin_tool(command: str) -> Optional[_ExecResult]:
+    stripped = command.strip()
+    if stripped.lower().startswith("builtin.smart_edit"):
+        parsed_args, error = _parse_smart_edit_command(stripped)
+        if error:
+            return _ExecResult("", error, 1)
+        return _execute_builtin_smart_edit(parsed_args)
+    if stripped.lower().startswith("builtin.read_file"):
+        parsed_args, error = _parse_read_file_command(stripped)
+        if error:
+            return _ExecResult("", error, 1)
+        return _execute_builtin_read_file(parsed_args)
+
+    match = _BUILTIN_TOOL_PATTERN.match(command)
+    if not match:
+        return None
+
+    tool_name = match.group(1).lower()
+    return _ExecResult("", f"未知内置工具: {tool_name}", 1)
+
+
+def _execute_builtin_read_file(args: dict) -> _ExecResult:
+    path = args.get("path") or args.get("file") or args.get("filepath")
+    if not path:
+        return _ExecResult("", "read_file 需要参数: path", 1)
+
+    if not os.path.exists(path):
+        return _ExecResult("", f"文件不存在: {path}", 1)
+
+    if os.path.isdir(path):
+        return _ExecResult("", f"路径是目录而非文件: {path}", 1)
+
+    try:
+        start_line = int(args.get("start_line", 1))
+        max_lines = int(args.get("max_lines", 200))
+    except (TypeError, ValueError):
+        return _ExecResult("", "start_line 和 max_lines 必须是整数", 1)
+
+    if start_line < 1 or max_lines < 1:
+        return _ExecResult("", "start_line 和 max_lines 必须大于等于 1", 1)
+
+    max_lines_cap = 2000
+    capped = False
+    if max_lines > max_lines_cap:
+        max_lines = max_lines_cap
+        capped = True
+
+    encoding = args.get("encoding") or "utf-8-sig"
+    lines = []
+    has_more = False
+
+    try:
+        with open(path, "r", encoding=encoding, errors="replace") as handle:
+            for index, line in enumerate(handle, start=1):
+                if index < start_line:
+                    continue
+                if len(lines) >= max_lines:
+                    has_more = True
+                    break
+                lines.append(line)
+    except Exception as exc:
+        return _ExecResult("", f"读取文件失败: {exc}", 1)
+
+    returned = len(lines)
+    if returned:
+        end_line = start_line + returned - 1
+    else:
+        end_line = start_line - 1
+
+    header_lines = [
+        "内置工具 builtin.read_file 执行成功。",
+        f"路径: {path}",
+        f"返回行范围: {start_line}-{end_line}",
+        f"返回行数: {returned}",
+    ]
+
+    if capped:
+        header_lines.append(f"提示: max_lines 超过上限，已截断为 {max_lines_cap} 行。")
+
+    if has_more:
+        next_start = start_line + returned
+        header_lines.append(f"还有更多内容。如需继续读取，请使用 start_line={next_start}，max_lines={max_lines}。")
+    else:
+        header_lines.append("已到文件末尾。")
+
+    content = "".join(lines)
+    if not content:
+        content = "(空内容)"
+
+    result_text = "\n".join(header_lines) + "\n---\n" + content
+    return _ExecResult(result_text, "", 0)
+
+
+def _parse_smart_edit_command(command: str) -> tuple[dict, Optional[str]]:
+    lines = command.splitlines()
+    if not lines:
+        return {}, "smart_edit 命令为空"
+
+    if not lines[0].strip().lower().startswith("builtin.smart_edit"):
+        return {}, "smart_edit 命令格式错误"
+
+    args: dict[str, str] = {}
+    index = 1
+    while index < len(lines):
+        line = lines[index]
+        if not line.strip():
+            index += 1
+            continue
+
+        lower = line.lower()
+        if lower.startswith("path:"):
+            value = line.split(":", 1)[1].strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+                value = value[1:-1]
+            if not value:
+                return {}, "path 不能为空"
+            args["path"] = value
+            index += 1
+            continue
+        if lower.startswith("mode:"):
+            value = line.split(":", 1)[1].strip()
+            if value:
+                args["mode"] = value
+            index += 1
+            continue
+        if lower.startswith("old_text:") or lower.startswith("new_text:"):
+            key = "old_text" if lower.startswith("old_text:") else "new_text"
+            index += 1
+            if index >= len(lines) or lines[index].strip() != "<<<":
+                return {}, f"{key} 必须使用 <<< 开始块"
+            index += 1
+            block_lines = []
+            while index < len(lines) and lines[index].strip() != ">>>":
+                block_lines.append(lines[index])
+                index += 1
+            if index >= len(lines):
+                return {}, f"{key} 缺少 >>> 结束标记"
+            args[key] = "\n".join(block_lines)
+            index += 1
+            continue
+
+        return {}, f"无法解析 smart_edit 行: {line}"
+
+    return args, None
+
+
+def _parse_read_file_command(command: str) -> tuple[dict, Optional[str]]:
+    lines = command.splitlines()
+    if not lines:
+        return {}, "read_file 命令为空"
+
+    if not lines[0].strip().lower().startswith("builtin.read_file"):
+        return {}, "read_file 命令格式错误"
+
+    args: dict[str, str] = {}
+    index = 1
+    while index < len(lines):
+        line = lines[index]
+        if not line.strip():
+            index += 1
+            continue
+
+        lower = line.lower()
+        if lower.startswith("path:"):
+            value = line.split(":", 1)[1].strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+                value = value[1:-1]
+            if not value:
+                return {}, "path 不能为空"
+            args["path"] = value
+            index += 1
+            continue
+        if lower.startswith("start_line:"):
+            value = line.split(":", 1)[1].strip()
+            if value:
+                args["start_line"] = value
+            index += 1
+            continue
+        if lower.startswith("max_lines:"):
+            value = line.split(":", 1)[1].strip()
+            if value:
+                args["max_lines"] = value
+            index += 1
+            continue
+
+        return {}, f"无法解析 read_file 行: {line}"
+
+    return args, None
+
+
+def _execute_builtin_smart_edit(args: dict) -> _ExecResult:
+    path = args.get("path") or args.get("file") or args.get("filepath")
+    if not path:
+        return _ExecResult("", "smart_edit 需要参数: path", 1)
+
+    mode = (args.get("mode") or "Patch").strip().lower()
+    mode_map = {
+        "patch": "Patch",
+        "create": "Create",
+        "append": "Append",
+        "prepend": "Prepend",
+    }
+    if mode not in mode_map:
+        return _ExecResult("", "mode 必须是 Patch/Create/Append/Prepend 之一", 1)
+    mode = mode_map[mode]
+
+    old_text = args.get("old_text") or ""
+    new_text = args.get("new_text")
+    if new_text is None:
+        return _ExecResult("", "smart_edit 需要参数: new_text", 1)
+
+    abs_path = path
+    if os.path.exists(path):
+        abs_path = os.path.abspath(path)
+
+    if mode == "Create":
+        if os.path.exists(abs_path):
+            return _ExecResult("", f"文件已存在: {path}", 1)
+        try:
+            with open(abs_path, "w", encoding="utf-8", newline="") as handle:
+                handle.write(new_text)
+            return _ExecResult("文件创建成功。", "", 0)
+        except Exception as exc:
+            return _ExecResult("", f"创建失败: {exc}", 1)
+
+    if not os.path.exists(abs_path):
+        return _ExecResult("", "文件不存在", 1)
+
+    has_bom = False
+    try:
+        with open(abs_path, "rb") as handle:
+            head = handle.read(3)
+        if head == b"\xef\xbb\xbf":
+            has_bom = True
+    except Exception:
+        pass
+
+    try:
+        with open(abs_path, "r", encoding="utf-8-sig", errors="replace") as handle:
+            content = handle.read()
+    except Exception as exc:
+        return _ExecResult("", f"读取失败: {exc}", 1)
+
+    target_line_ending = "\r\n" if "\r\n" in content else "\n"
+    norm_content = content.replace("\r\n", "\n")
+    norm_new = new_text.replace("\r\n", "\n")
+    final_norm_content = norm_content
+
+    if mode == "Append":
+        if final_norm_content and not final_norm_content.endswith("\n"):
+            final_norm_content = final_norm_content + "\n" + norm_new
+        else:
+            final_norm_content = final_norm_content + norm_new
+    elif mode == "Prepend":
+        final_norm_content = norm_new + "\n" + norm_content
+    elif mode == "Patch":
+        if not old_text.strip():
+            return _ExecResult("", "Patch 模式需要 old_text。", 1)
+        norm_old = old_text.replace("\r\n", "\n")
+        match_count = len(re.findall(re.escape(norm_old), norm_content))
+        if match_count == 0:
+            return _ExecResult("", "匹配失败：未找到 old_text。", 1)
+        if match_count > 1:
+            return _ExecResult("", f"安全错误：匹配到 {match_count} 处。", 1)
+        final_norm_content = norm_content.replace(norm_old, norm_new)
+        if final_norm_content == norm_content:
+            return _ExecResult("", "严重错误：替换未生效。", 1)
+
+    output_content = final_norm_content
+    if target_line_ending == "\r\n":
+        output_content = final_norm_content.replace("\r\n", "\n").replace("\n", "\r\n")
+
+    try:
+        encoding = "utf-8-sig" if has_bom else "utf-8"
+        with open(abs_path, "w", encoding=encoding, newline="") as handle:
+            handle.write(output_content)
+    except Exception as exc:
+        return _ExecResult("", f"写入失败: {exc}", 1)
+
+    return _ExecResult(f"成功 ({mode})", "", 0)
+
+
 def _execute_command(command: str, timeout: int):
     """执行命令（CLI 和 GUI 共用）
 
@@ -812,6 +1140,10 @@ def _execute_command(command: str, timeout: int):
     """
     import subprocess
     import base64
+
+    builtin_result = _execute_builtin_tool(command)
+    if builtin_result is not None:
+        return builtin_result
 
     # 设置 PowerShell 输出编码为 UTF-8，避免中文乱码
     # Windows 中文系统默认输出是 GBK (CP936)，需要显式设置
@@ -829,13 +1161,7 @@ def _execute_command(command: str, timeout: int):
     except (subprocess.SubprocessError, OSError, FileNotFoundError) as e:
         # 捕获命令执行异常（如命令行太长、文件未找到等）
         # 创建一个错误结果对象
-        class Result:
-            def __init__(self, stdout, stderr, returncode):
-                self.stdout = stdout
-                self.stderr = stderr
-                self.returncode = returncode
-
-        return Result(
+        return _ExecResult(
             stdout="",
             stderr=str(e),
             returncode=1
@@ -846,13 +1172,7 @@ def _execute_command(command: str, timeout: int):
     stderr = process.stderr.decode('utf-8', errors='replace')
 
     # 创建一个类似 CompletedProcess 的对象
-    class Result:
-        def __init__(self, stdout, stderr, returncode):
-            self.stdout = stdout
-            self.stderr = stderr
-            self.returncode = returncode
-
-    return Result(stdout, stderr, process.returncode)
+    return _ExecResult(stdout, stderr, process.returncode)
 
 
 if __name__ == "__main__":
