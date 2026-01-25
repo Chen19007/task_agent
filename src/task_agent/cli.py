@@ -1,6 +1,7 @@
 ﻿"""极简命令行接口模块"""
 
 import argparse
+import json
 import os
 import re
 import sys
@@ -15,9 +16,9 @@ from rich.text import Text
 from rich.theme import Theme
 
 from .agent import Executor
-from .cli_output import CLIOutput
 from .config import Config
-from .llm import create_client
+from .llm import create_client, ChatMessage
+from .output_handler import NullOutputHandler
 from .session import SessionManager
 from .safety import is_safe_command
 
@@ -88,6 +89,15 @@ _RUN_STATS = {
     "smart_edit_failure": 0,
     "smart_edit_rejected": 0,
 }
+
+def _load_template_text(filename: str) -> str:
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    template_path = os.path.join(project_root, "templates", filename)
+    try:
+        with open(template_path, "r", encoding="utf-8") as handle:
+            return handle.read()
+    except OSError:
+        return ""
 
 
 def _update_smart_edit_stats(command: str, status: str, result_msg: str = "") -> None:
@@ -597,8 +607,8 @@ def _run_single_task(config: Config, task: str, executor: 'Executor' = None, ses
     if os.environ.get("AGENT_LOG_FILE"):
         log_file = open(os.environ["AGENT_LOG_FILE"], "w", encoding="utf-8")
 
-    # 创建 CLI 输出处理器
-    cli_output = CLIOutput(console)
+    # CLI 输出由本地打印控制，避免重复展示
+    cli_output = NullOutputHandler()
 
     # 创建或复用执行器
     if executor is None:
@@ -775,7 +785,12 @@ def _create_cli_command_confirm_callback(executor: 'Executor', console: Console)
         if auto_execute:
             # 自动执行安全命令
             console.print("[dim](自动执行)[/dim]\n", end="")
-            cmd_result = _execute_command(command, executor.config.timeout)
+            cmd_result = _execute_command(
+                command,
+                executor.config.timeout,
+                config=executor.config,
+                context_messages=(executor.current_agent.history if executor.current_agent else None),
+            )
 
             # 构建结果消息
             if cmd_result.returncode == 0:
@@ -804,7 +819,12 @@ def _create_cli_command_confirm_callback(executor: 'Executor', console: Console)
 
         if confirm_lower == "y":
             # 用户确认，执行命令
-            cmd_result = _execute_command(command, executor.config.timeout)
+            cmd_result = _execute_command(
+                command,
+                executor.config.timeout,
+                config=executor.config,
+                context_messages=(executor.current_agent.history if executor.current_agent else None),
+            )
 
             # 构建明确的结果消息
             if cmd_result.returncode == 0:
@@ -858,7 +878,12 @@ def _handle_pending_commands(executor: 'Executor', console: Console, result: 'St
         if auto_execute:
             # 自动执行安全命令
             console.print("[dim](自动执行)[/dim]\n", end="")
-            cmd_result = _execute_command(command, executor.config.timeout)
+            cmd_result = _execute_command(
+                command,
+                executor.config.timeout,
+                config=executor.config,
+                context_messages=(executor.current_agent.history if executor.current_agent else None),
+            )
 
             # 构建结果消息
             if cmd_result.returncode == 0:
@@ -889,7 +914,12 @@ def _handle_pending_commands(executor: 'Executor', console: Console, result: 'St
 
             if confirm_lower == "y":
                 # 用户确认，执行命令
-                cmd_result = _execute_command(command, executor.config.timeout)
+                cmd_result = _execute_command(
+                    command,
+                    executor.config.timeout,
+                    config=executor.config,
+                    context_messages=(executor.current_agent.history if executor.current_agent else None),
+                )
 
                 # 构建明确的结果消息
                 if cmd_result.returncode == 0:
@@ -952,7 +982,8 @@ def _prefix_builtin_result(tool_name: str, result: _ExecResult) -> _ExecResult:
     return result
 
 
-def _execute_builtin_tool(command: str) -> Optional[_ExecResult]:
+def _execute_builtin_tool(command: str, config: Optional[Config] = None,
+                          context_messages: Optional[list] = None) -> Optional[_ExecResult]:
     stripped = command.strip()
     if stripped.lower().startswith("builtin.smart_edit"):
         parsed_args, error = _parse_smart_edit_command(stripped)
@@ -964,6 +995,16 @@ def _execute_builtin_tool(command: str) -> Optional[_ExecResult]:
         if error:
             return _prefix_builtin_result("read_file", _ExecResult("", error, 1))
         return _prefix_builtin_result("read_file", _execute_builtin_read_file(parsed_args))
+    if stripped.lower().startswith("builtin.memory_query"):
+        parsed_args, error = _parse_memory_query_command(stripped)
+        if error:
+            return _prefix_builtin_result("memory_query", _ExecResult("", error, 1))
+        if not config:
+            return _prefix_builtin_result("memory_query", _ExecResult("", "memory_query 缺少配置", 1))
+        return _prefix_builtin_result(
+            "memory_query",
+            _execute_builtin_memory_query(parsed_args, config, context_messages or []),
+        )
 
     match = _BUILTIN_TOOL_PATTERN.match(command)
     if not match:
@@ -1142,6 +1183,336 @@ def _parse_read_file_command(command: str) -> tuple[dict, Optional[str]]:
     return args, None
 
 
+def _parse_memory_query_command(command: str) -> tuple[dict, Optional[str]]:
+    lines = command.splitlines()
+    if not lines:
+        return {}, "memory_query 命令为空"
+
+    if not lines[0].strip().lower().startswith("builtin.memory_query"):
+        return {}, "memory_query 命令格式错误"
+
+    args: dict[str, str] = {}
+    index = 1
+    while index < len(lines):
+        line = lines[index]
+        if not line.strip():
+            index += 1
+            continue
+
+        if ":" not in line:
+            return {}, f"无法解析 memory_query 行: {line}"
+
+        key, value = line.split(":", 1)
+        key = key.strip().lower()
+        value = value.strip()
+        if not value:
+            return {}, f"{key} 不能为空"
+        args[key] = value
+        index += 1
+
+    if "query" not in args:
+        return {}, "memory_query 需要参数: query"
+
+    return args, None
+
+
+def _load_snapshot_json(path: str) -> Optional[dict]:
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            return json.load(handle)
+    except Exception:
+        return None
+
+
+def _iter_snapshot_sequences(snapshot_data: dict) -> list[list[dict]]:
+    sequences: list[list[dict]] = []
+
+    def extract_messages(agent_data: dict) -> list[dict]:
+        history = agent_data.get("history", []) or []
+        messages: list[dict] = []
+        for msg in history:
+            role = msg.get("role", "")
+            if role not in ("user", "assistant"):
+                continue
+            content = (msg.get("content") or "").strip()
+            if not content:
+                continue
+            if "<ps_call_result" in content:
+                continue
+            messages.append({"role": role, "content": content})
+        return messages
+
+    current = snapshot_data.get("current_agent") or {}
+    current_messages = extract_messages(current)
+    if current_messages:
+        sequences.append(current_messages)
+
+    for agent in snapshot_data.get("context_stack", []) or []:
+        agent_messages = extract_messages(agent or {})
+        if agent_messages:
+            sequences.append(agent_messages)
+
+    return sequences
+
+
+def _score_content(content: str, terms: list[str]) -> int:
+    text = content.lower()
+    score = 0
+    for term in terms:
+        score += text.count(term)
+    return score
+
+
+def _build_window_text(seq: list[dict], start: int, end: int, max_chars: int) -> str:
+    lines = []
+    total = 0
+    for msg in seq[start:end]:
+        role = msg.get("role", "")
+        role_label = "用户" if role == "user" else "助手"
+        line = f"{role_label}: {msg.get('content', '')}"
+        if total + len(line) > max_chars:
+            remaining = max_chars - total
+            if remaining > 0:
+                lines.append(line[:remaining] + "...")
+            break
+        lines.append(line)
+        total += len(line)
+    return "\n".join(lines)
+
+
+def _extract_context_tail(context_messages: list, count: int) -> str:
+    kept = []
+    for msg in reversed(context_messages or []):
+        role = getattr(msg, "role", "")
+        if role not in ("user", "assistant"):
+            continue
+        content = (getattr(msg, "content", "") or "").strip()
+        if not content or "<ps_call_result" in content:
+            continue
+        role_label = "用户" if role == "user" else "助手"
+        kept.append(f"{role_label}: {content}")
+        if len(kept) >= count:
+            break
+    kept.reverse()
+    return "\n".join(kept)
+
+
+def _parse_json_array(text: str) -> Optional[list]:
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        match = re.search(r"\[[\s\S]*\]", text)
+        if match:
+            try:
+                return json.loads(match.group(0))
+            except json.JSONDecodeError:
+                return None
+    return None
+
+
+def _llm_expand_query_terms(client, query: str) -> list[str]:
+    template = _load_template_text("memory_terms_prompt.txt")
+    if not template:
+        template = "请将用户问题拆分成关键词数组（JSON）。\n用户问题：{query}"
+    prompt = template.format(query=query)
+    response = client.chat([ChatMessage(role="user", content=prompt)], 1024)
+    parsed = _parse_json_array(response.content or "")
+    if not isinstance(parsed, list):
+        return []
+    terms = []
+    for item in parsed:
+        if isinstance(item, str):
+            cleaned = item.strip()
+            if cleaned:
+                terms.append(cleaned)
+    return terms
+
+
+def _llm_filter_windows(client, query: str, windows: list[dict], batch_size: int) -> dict[int, dict]:
+    results: dict[int, dict] = {}
+    template = _load_template_text("memory_filter_prompt.txt")
+    if not template:
+        template = "用户问题：{query}\n\n候选片段：\n{items}"
+    for start in range(0, len(windows), batch_size):
+        batch = windows[start:start + batch_size]
+        items = []
+        for item in batch:
+            items.append(f"[{item['index']}]\n{item['text']}")
+        prompt = template.format(
+            query=query,
+            items="\n\n".join(items),
+        )
+        response = client.chat([ChatMessage(role="user", content=prompt)], 2048)
+        parsed = _parse_json_array(response.content or "")
+        if not parsed:
+            for item in batch:
+                results[item["index"]] = {"relevant": True, "score": 50, "reason": "fallback"}
+            continue
+        for item in parsed:
+            try:
+                index = int(item.get("index"))
+            except Exception:
+                continue
+            relevant = bool(item.get("relevant"))
+            try:
+                score = int(item.get("score", 0))
+            except Exception:
+                score = 0
+            results[index] = {"relevant": relevant, "score": score, "reason": item.get("reason", "")}
+    return results
+
+
+def _llm_summarize_windows(client, query: str, context_text: str, windows: list[dict]) -> str:
+    items = []
+    for item in windows:
+        items.append(f"[{item['index']}]\n{item['text']}")
+    template = _load_template_text("memory_summary_prompt.txt")
+    if not template:
+        template = "用户问题：{query}\n\n当前上下文：\n{context}\n\n相关片段：\n{items}"
+    prompt = template.format(
+        query=query,
+        context=context_text,
+        items="\n\n".join(items),
+    )
+    response = client.chat([ChatMessage(role="user", content=prompt)], 2048)
+    return (response.content or "").strip()
+
+
+def _execute_builtin_memory_query(args: dict, config: Config, context_messages: list) -> _ExecResult:
+    query = args.get("query", "").strip()
+    if not query:
+        return _ExecResult("", "memory_query 需要参数: query", 1)
+
+    def to_int(value: str, default: int, min_value: int, max_value: int) -> int:
+        try:
+            number = int(value)
+        except Exception:
+            return default
+        return max(min_value, min(max_value, number))
+
+    limit = to_int(args.get("limit", "5"), 5, 1, 20)
+    window = to_int(args.get("window", "10"), 10, 2, 30)
+    candidate = to_int(args.get("candidate", "50"), 50, 5, 200)
+    batch = to_int(args.get("batch", "6"), 6, 2, 10)
+    topn = to_int(args.get("topn", "8"), 8, 1, 20)
+    context_tail = to_int(args.get("context_tail", "8"), 8, 1, 20)
+
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    sessions_dir = os.path.join(project_root, "sessions")
+    if not os.path.isdir(sessions_dir):
+        return _ExecResult("", "sessions 目录不存在", 1)
+
+    try:
+        client = create_client(config)
+    except Exception as exc:
+        return _ExecResult("", f"memory_query 失败: {exc}", 1)
+
+    base_terms = [t.lower() for t in re.split(r"\s+", query) if t.strip()]
+    llm_terms = []
+    try:
+        llm_terms = _llm_expand_query_terms(client, query)
+    except Exception:
+        llm_terms = []
+    terms = []
+    for term in base_terms + [t.lower() for t in llm_terms]:
+        if term and term not in terms:
+            terms.append(term)
+    if not terms:
+        return _ExecResult("", "query 不能为空", 1)
+
+    candidates = {}
+    max_chars_per_window = 1500
+    files = sorted(
+        f for f in os.listdir(sessions_dir)
+        if f.endswith(".json") and os.path.isfile(os.path.join(sessions_dir, f))
+    )
+
+    source_index = 0
+    for filename in files:
+        snapshot = _load_snapshot_json(os.path.join(sessions_dir, filename))
+        if not snapshot:
+            continue
+        sequences = _iter_snapshot_sequences(snapshot)
+        for seq in sequences:
+            seq_len = len(seq)
+            if seq_len == 0:
+                continue
+            for i, msg in enumerate(seq):
+                score = _score_content(msg.get("content", ""), terms)
+                if score <= 0:
+                    continue
+                half = window // 2
+                start = max(i - half, 0)
+                end = min(i + half + 1, seq_len)
+                key = (source_index, start, end)
+                if key in candidates:
+                    candidates[key] = max(candidates[key], score)
+                else:
+                    candidates[key] = score
+            source_index += 1
+
+    if not candidates:
+        return _ExecResult("memory_query: 未命中", "", 0)
+
+    candidate_items = []
+    for (source_id, start, end), score in candidates.items():
+        seq = None
+        # source_id tracks incremental sequences in traversal order
+        # we only need to rebuild the window text by re-reading snapshots
+        candidate_items.append((source_id, start, end, score))
+
+    candidate_items.sort(key=lambda x: x[3], reverse=True)
+    candidate_items = candidate_items[:candidate]
+
+    windows = []
+    seq_lookup: list[list[dict]] = []
+    source_index = 0
+    for filename in files:
+        snapshot = _load_snapshot_json(os.path.join(sessions_dir, filename))
+        if not snapshot:
+            continue
+        sequences = _iter_snapshot_sequences(snapshot)
+        for seq in sequences:
+            seq_lookup.append(seq)
+            source_index += 1
+
+    for idx, (source_id, start, end, score) in enumerate(candidate_items, start=1):
+        if source_id >= len(seq_lookup):
+            continue
+        seq = seq_lookup[source_id]
+        text = _build_window_text(seq, start, end, max_chars_per_window)
+        windows.append({"index": idx, "text": text, "score": score})
+
+    try:
+        filtered = _llm_filter_windows(client, query, windows, batch)
+    except Exception as exc:
+        return _ExecResult("", f"memory_query 失败: {exc}", 1)
+    relevant = []
+    for item in windows:
+        meta = filtered.get(item["index"])
+        if not meta:
+            continue
+        if not meta.get("relevant"):
+            continue
+        relevant.append({"index": item["index"], "text": item["text"], "score": meta.get("score", 0)})
+
+    if not relevant:
+        return _ExecResult("memory_query: 未命中", "", 0)
+
+    relevant.sort(key=lambda x: x["score"], reverse=True)
+    relevant = relevant[:topn]
+
+    context_text = _extract_context_tail(context_messages, context_tail)
+    try:
+        summary = _llm_summarize_windows(client, query, context_text, relevant)
+    except Exception as exc:
+        return _ExecResult("", f"memory_query 失败: {exc}", 1)
+    summary = summary or "（无摘要）"
+
+    result_text = f"memory_query: 成功\n命中: {len(relevant)}\n---\n{summary}"
+    return _ExecResult(result_text, "", 0)
+
+
 def _execute_builtin_smart_edit(args: dict) -> _ExecResult:
     path = args.get("path") or args.get("file") or args.get("filepath")
     if not path:
@@ -1234,7 +1605,8 @@ def _execute_builtin_smart_edit(args: dict) -> _ExecResult:
     return _ExecResult(f"成功 ({mode})", "", 0)
 
 
-def _execute_command(command: str, timeout: int):
+def _execute_command(command: str, timeout: int, config: Optional[Config] = None,
+                     context_messages: Optional[list] = None):
     """执行命令（CLI 和 GUI 共用）
 
     Args:
@@ -1247,7 +1619,7 @@ def _execute_command(command: str, timeout: int):
     import subprocess
     import base64
 
-    builtin_result = _execute_builtin_tool(command)
+    builtin_result = _execute_builtin_tool(command, config, context_messages)
     if builtin_result is not None:
         return builtin_result
 

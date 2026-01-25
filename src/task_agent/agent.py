@@ -742,10 +742,12 @@ class SimpleAgent:
                 continue
             if line.strip().lower().startswith("builtin."):
                 return command
-            match = re.match(r"(\s*)(read_file|smart_edit)(\b.*)", line, re.IGNORECASE)
+            match = re.match(r"(\s*)([a-zA-Z_\.]+)(\b.*)", line, re.IGNORECASE)
             if match:
                 indent, tool, rest = match.groups()
-                lines[index] = f"{indent}builtin.{tool}{rest}"
+                if not tool.lower().startswith("builtin."):
+                    tool = f"builtin.{tool}"
+                lines[index] = f"{indent}{tool}{rest}"
                 return "\n".join(lines)
             return command
         return command

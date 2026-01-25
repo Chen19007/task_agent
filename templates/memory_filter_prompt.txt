@@ -1,0 +1,8 @@
+你是记忆检索过滤器。请判断候选片段是否与问题相关。
+输出 JSON 数组，每项包含：index, relevant(true/false), score(0-100), reason(一句话)。
+不要输出多余文字。
+
+用户问题：{query}
+
+候选片段：
+{items}
