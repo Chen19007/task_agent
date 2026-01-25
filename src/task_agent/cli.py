@@ -226,6 +226,7 @@ def print_help():
   - 深度优先执行，自动聚合结果
   - 最大支持4层深度（最多16个子Agent）
   - 使用 <ps_call> 执行命令
+  - 使用 <builtin> 调用内置工具（read_file/smart_edit）
   - 使用 <create_agent> 创建子Agent
   - 使用 <return> 标记任务完成
 
