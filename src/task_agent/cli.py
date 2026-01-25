@@ -846,25 +846,43 @@ class _ExecResult:
 _BUILTIN_TOOL_PATTERN = re.compile(r"^\s*builtin\.(\w+)\s*(\{[\s\S]*\})?\s*$")
 
 
+def _prefix_builtin_result(tool_name: str, result: _ExecResult) -> _ExecResult:
+    """为内置工具输出添加统一前缀，方便识别来源。"""
+    prefix = f"{tool_name}: "
+
+    def add_prefix(text: str) -> str:
+        if not text:
+            return text
+        if text.startswith(prefix):
+            return text
+        first_line, *rest = text.splitlines()
+        first_line = prefix + first_line
+        return "\n".join([first_line] + rest)
+
+    result.stdout = add_prefix(result.stdout)
+    result.stderr = add_prefix(result.stderr)
+    return result
+
+
 def _execute_builtin_tool(command: str) -> Optional[_ExecResult]:
     stripped = command.strip()
     if stripped.lower().startswith("builtin.smart_edit"):
         parsed_args, error = _parse_smart_edit_command(stripped)
         if error:
-            return _ExecResult("", error, 1)
-        return _execute_builtin_smart_edit(parsed_args)
+            return _prefix_builtin_result("smart_edit", _ExecResult("", error, 1))
+        return _prefix_builtin_result("smart_edit", _execute_builtin_smart_edit(parsed_args))
     if stripped.lower().startswith("builtin.read_file"):
         parsed_args, error = _parse_read_file_command(stripped)
         if error:
-            return _ExecResult("", error, 1)
-        return _execute_builtin_read_file(parsed_args)
+            return _prefix_builtin_result("read_file", _ExecResult("", error, 1))
+        return _prefix_builtin_result("read_file", _execute_builtin_read_file(parsed_args))
 
     match = _BUILTIN_TOOL_PATTERN.match(command)
     if not match:
         return None
 
     tool_name = match.group(1).lower()
-    return _ExecResult("", f"未知内置工具: {tool_name}", 1)
+    return _prefix_builtin_result(tool_name, _ExecResult("", f"未知内置工具: {tool_name}", 1))
 
 
 def _execute_builtin_read_file(args: dict) -> _ExecResult:

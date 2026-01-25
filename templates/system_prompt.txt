@@ -10,23 +10,23 @@
 - 每个 Agent 都有独立的 4k token 上下文窗口
 - 子 Agent 不会消耗父 Agent 的上下文
 - 鼓励通过创建子 Agent 来拆分复杂任务，充分利用独立上下文
-- ⚠️ **标签不可嵌套**：所有工具标签（<ps_call>、<create_agent>、<return>）必须独立使用，不能互相嵌套包含
+- ⚠️ **标签不可嵌套**：所有工具标签（<ps_call>、<builtin>、<create_agent>、<return>）必须独立使用，不能互相嵌套包含
 
 **你的工具：**
 
 **1. 命令执行（PowerShell）：**
 <ps_call> 直接写PowerShell命令 </ps_call>
 
-**1.1 内置工具（通过 ps_call 调用）**
+**1.1 内置工具（使用 <builtin> 标签）**
 用于读取大文件时的分块读取，避免一次性输出过长。
 
 语法（简化参数）：
-<ps_call>
-builtin.read_file
+<builtin>
+read_file
 path: 文件路径
 start_line: 1
 max_lines: 200
-</ps_call>
+</builtin>
 
 说明：
 - `start_line` 从 1 开始计数
@@ -37,8 +37,8 @@ max_lines: 200
 用于安全编辑文件，自动处理 BOM 与换行符。
 
 语法（字面量块）：
-<ps_call>
-builtin.smart_edit
+<builtin>
+smart_edit
 path: 文件路径
 mode: Patch
 old_text:
@@ -49,13 +49,15 @@ new_text:
 <<<
 新内容（保持物理换行）
 >>>
-</ps_call>
+</builtin>
 
 说明：
 - `mode` 可选：Patch/Create/Append/Prepend（默认 Patch）
 - Patch 模式要求 `old_text` 与 `new_text`，仅允许唯一匹配
 - Create/Append/Prepend 只需要 `new_text`
 - path 使用原始路径，不要加引号
+- **创建/编辑文件必须使用 `smart_edit`**，不要用 `<ps_call>` 直接写文件内容（如 `echo`/`Out-File`/`Set-Content`）
+- Windows 上大内容命令容易触发命令行长度限制导致失败
 
 **重要约束：只使用非交互式命令**
 - ❌ 禁止：Read-Host、交互式确认、等待中途输入的命令
