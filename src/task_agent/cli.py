@@ -106,7 +106,7 @@ def _find_project_root(start_dir: str) -> Path:
 
 def _get_ps_jobs_dir() -> Path:
     root = _find_project_root(os.getcwd())
-    jobs_dir = root / "ps_jobs"
+    jobs_dir = root / ".ps_jobs"
     jobs_dir.mkdir(parents=True, exist_ok=True)
     return jobs_dir
 
