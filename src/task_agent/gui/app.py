@@ -455,7 +455,8 @@ class TaskAgentGUI:
 
         # 显示第一个命令的确认对话框
         for index, command in commands:
-            self._show_command_confirmation_dialog(index, command)
+            display_command = command.display() if hasattr(command, "display") else command
+            self._show_command_confirmation_dialog(index, display_command)
             break  # 只显示第一个
 
     def _show_command_confirmation_dialog(self, index: int, command: str):

@@ -374,6 +374,8 @@ class GradioApp:
                         commands = update["commands"]
                         if commands:
                             current_cmd = commands[0] if isinstance(commands[0], str) else commands[0][1]
+                            if hasattr(current_cmd, "display"):
+                                current_cmd = current_cmd.display()
                             # 清空输入框，显示确认对话框
                             yield history, "", commands, gr.update(visible=True), current_cmd, gr.update(visible=False)
                         else:
@@ -436,6 +438,8 @@ class GradioApp:
                         next_cmds = update["commands"]
                         if next_cmds:
                             next_cmd = next_cmds[0] if isinstance(next_cmds[0], str) else next_cmds[0][1]
+                            if hasattr(next_cmd, "display"):
+                                next_cmd = next_cmd.display()
                             return history, msg, next_cmds, gr.update(visible=True), next_cmd, gr.update(visible=False)
                         else:
                             return history, msg, [], gr.update(visible=False), "", gr.update(visible=False)

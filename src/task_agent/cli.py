@@ -6,6 +6,9 @@ import os
 import re
 import sys
 import time
+import atexit
+import uuid
+from pathlib import Path
 
 from typing import Optional
 
@@ -15,7 +18,7 @@ from rich.panel import Panel
 from rich.text import Text
 from rich.theme import Theme
 
-from .agent import Executor
+from .agent import Executor, CommandSpec
 from .config import Config
 from .llm import create_client, ChatMessage
 from .output_handler import NullOutputHandler
@@ -89,6 +92,54 @@ _RUN_STATS = {
     "smart_edit_failure": 0,
     "smart_edit_rejected": 0,
 }
+
+_BACKGROUND_JOBS: dict[str, dict] = {}
+
+
+def _find_project_root(start_dir: str) -> Path:
+    current = Path(start_dir).resolve()
+    for candidate in [current] + list(current.parents):
+        if (candidate / "pyproject.toml").exists():
+            return candidate
+    return current
+
+
+def _get_ps_jobs_dir() -> Path:
+    root = _find_project_root(os.getcwd())
+    jobs_dir = root / "ps_jobs"
+    jobs_dir.mkdir(parents=True, exist_ok=True)
+    return jobs_dir
+
+
+def _register_background_job(job_id: str, process, log_path: Path) -> None:
+    _BACKGROUND_JOBS[job_id] = {
+        "process": process,
+        "log_path": log_path,
+    }
+
+
+def _cleanup_background_jobs() -> None:
+    for job_id, info in list(_BACKGROUND_JOBS.items()):
+        process = info.get("process")
+        log_path = info.get("log_path")
+        try:
+            if process and process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=2)
+                except Exception:
+                    process.kill()
+        except Exception:
+            pass
+        try:
+            if log_path and log_path.exists():
+                log_path.unlink()
+        except Exception:
+            pass
+        _BACKGROUND_JOBS.pop(job_id, None)
+
+
+atexit.register(_cleanup_background_jobs)
 
 def _load_template_text(filename: str) -> str:
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -404,6 +455,7 @@ def main():
 
             if task.lower() == "/exit":
                 _print_run_stats(console)
+                _cleanup_background_jobs()
                 console.print("[info]再见！[/info]")
                 break
 
@@ -415,6 +467,7 @@ def main():
             if task.startswith("/"):
                 if task.lower() == "/exit":
                     _print_run_stats(console)
+                    _cleanup_background_jobs()
                     console.print("[info]再见！[/info]")
                     break
                 if task.lower() == "/list":
@@ -869,7 +922,11 @@ def _handle_pending_commands(executor: 'Executor', console: Console, result: 'St
         console.print(result.command_blocks[processed_count], end="")
 
         # 获取对应的命令
-        command = result.pending_commands[processed_count]
+        command_spec = result.pending_commands[processed_count]
+        if not isinstance(command_spec, CommandSpec):
+            command_spec = CommandSpec(command=str(command_spec))
+        command = command_spec.command
+        command_timeout = command_spec.timeout if command_spec.timeout is not None else executor.config.timeout
 
         # 检查是否自动执行
         current_dir = os.getcwd()
@@ -880,9 +937,10 @@ def _handle_pending_commands(executor: 'Executor', console: Console, result: 'St
             console.print("[dim](自动执行)[/dim]\n", end="")
             cmd_result = _execute_command(
                 command,
-                executor.config.timeout,
+                command_timeout,
                 config=executor.config,
                 context_messages=(executor.current_agent.history if executor.current_agent else None),
+                background=command_spec.background,
             )
 
             # 构建结果消息
@@ -916,9 +974,10 @@ def _handle_pending_commands(executor: 'Executor', console: Console, result: 'St
                 # 用户确认，执行命令
                 cmd_result = _execute_command(
                     command,
-                    executor.config.timeout,
+                    command_timeout,
                     config=executor.config,
                     context_messages=(executor.current_agent.history if executor.current_agent else None),
+                    background=command_spec.background,
                 )
 
                 # 构建明确的结果消息
@@ -995,6 +1054,11 @@ def _execute_builtin_tool(command: str, config: Optional[Config] = None,
         if error:
             return _prefix_builtin_result("read_file", _ExecResult("", error, 1))
         return _prefix_builtin_result("read_file", _execute_builtin_read_file(parsed_args))
+    if stripped.lower().startswith("builtin.get_job_log"):
+        parsed_args, error = _parse_job_log_command(stripped)
+        if error:
+            return _prefix_builtin_result("get_job_log", _ExecResult("", error, 1))
+        return _prefix_builtin_result("get_job_log", _execute_builtin_job_log(parsed_args))
     if stripped.lower().startswith("builtin.memory_query"):
         parsed_args, error = _parse_memory_query_command(stripped)
         if error:
@@ -1014,25 +1078,15 @@ def _execute_builtin_tool(command: str, config: Optional[Config] = None,
     return _prefix_builtin_result(tool_name, _ExecResult("", f"未知内置工具: {tool_name}", 1))
 
 
-def _execute_builtin_read_file(args: dict) -> _ExecResult:
-    path = args.get("path") or args.get("file") or args.get("filepath")
-    if not path:
-        return _ExecResult("", "read_file 需要参数: path", 1)
-
+def _read_text_file(path: str, start_line: int, max_lines: int, encoding: str):
     if not os.path.exists(path):
-        return _ExecResult("", f"文件不存在: {path}", 1)
+        return None, None, None, None, None, f"文件不存在: {path}"
 
     if os.path.isdir(path):
-        return _ExecResult("", f"路径是目录而非文件: {path}", 1)
-
-    try:
-        start_line = int(args.get("start_line", 1))
-        max_lines = int(args.get("max_lines", 200))
-    except (TypeError, ValueError):
-        return _ExecResult("", "start_line 和 max_lines 必须是整数", 1)
+        return None, None, None, None, None, f"路径是目录而非文件: {path}"
 
     if start_line < 1 or max_lines < 1:
-        return _ExecResult("", "start_line 和 max_lines 必须大于等于 1", 1)
+        return None, None, None, None, None, "start_line 和 max_lines 必须大于等于 1"
 
     max_lines_cap = 2000
     capped = False
@@ -1040,10 +1094,8 @@ def _execute_builtin_read_file(args: dict) -> _ExecResult:
         max_lines = max_lines_cap
         capped = True
 
-    encoding = args.get("encoding") or "utf-8-sig"
     lines = []
     has_more = False
-
     try:
         with open(path, "r", encoding=encoding, errors="replace") as handle:
             for index, line in enumerate(handle, start=1):
@@ -1054,14 +1106,35 @@ def _execute_builtin_read_file(args: dict) -> _ExecResult:
                     break
                 lines.append(line)
     except Exception as exc:
-        return _ExecResult("", f"读取文件失败: {exc}", 1)
+        return None, None, None, None, None, f"读取文件失败: {exc}"
 
     returned = len(lines)
     if returned:
         end_line = start_line + returned - 1
     else:
         end_line = start_line - 1
+    return lines, has_more, capped, end_line, max_lines, None
 
+
+def _execute_builtin_read_file(args: dict) -> _ExecResult:
+    path = args.get("path") or args.get("file") or args.get("filepath")
+    if not path:
+        return _ExecResult("", "read_file 需要参数: path", 1)
+
+    try:
+        start_line = int(args.get("start_line", 1))
+        max_lines = int(args.get("max_lines", 200))
+    except (TypeError, ValueError):
+        return _ExecResult("", "start_line 和 max_lines 必须是整数", 1)
+
+    encoding = args.get("encoding") or "utf-8-sig"
+    lines, has_more, capped, end_line, max_lines, error = _read_text_file(
+        path, start_line, max_lines, encoding
+    )
+    if error:
+        return _ExecResult("", error, 1)
+
+    returned = len(lines)
     header_lines = [
         "内置工具 builtin.read_file 执行成功。",
         f"路径: {path}",
@@ -1070,7 +1143,52 @@ def _execute_builtin_read_file(args: dict) -> _ExecResult:
     ]
 
     if capped:
-        header_lines.append(f"提示: max_lines 超过上限，已截断为 {max_lines_cap} 行。")
+        header_lines.append(f"提示: max_lines 超过上限，已截断为 2000 行。")
+
+    if has_more:
+        next_start = start_line + returned
+        header_lines.append(f"还有更多内容。如需继续读取，请使用 start_line={next_start}，max_lines={max_lines}。")
+    else:
+        header_lines.append("已到文件末尾。")
+
+    content = "".join(lines)
+    if not content:
+        content = "(空内容)"
+
+    result_text = "\n".join(header_lines) + "\n---\n" + content
+    return _ExecResult(result_text, "", 0)
+
+
+def _execute_builtin_job_log(args: dict) -> _ExecResult:
+    job_id = args.get("job_id")
+    if not job_id:
+        return _ExecResult("", "get_job_log 需要参数: job_id", 1)
+
+    try:
+        start_line = int(args.get("start_line", 1))
+        max_lines = int(args.get("max_lines", 200))
+    except (TypeError, ValueError):
+        return _ExecResult("", "start_line 和 max_lines 必须是整数", 1)
+
+    log_path = _get_ps_jobs_dir() / f"job_{job_id}.log"
+    encoding = args.get("encoding") or "utf-8-sig"
+    lines, has_more, capped, end_line, max_lines, error = _read_text_file(
+        str(log_path), start_line, max_lines, encoding
+    )
+    if error:
+        return _ExecResult("", error, 1)
+
+    returned = len(lines)
+    header_lines = [
+        "内置工具 builtin.get_job_log 执行成功。",
+        f"job_id: {job_id}",
+        f"日志路径: {log_path}",
+        f"返回行范围: {start_line}-{end_line}",
+        f"返回行数: {returned}",
+    ]
+
+    if capped:
+        header_lines.append(f"提示: max_lines 超过上限，已截断为 2000 行。")
 
     if has_more:
         next_start = start_line + returned
@@ -1179,6 +1297,53 @@ def _parse_read_file_command(command: str) -> tuple[dict, Optional[str]]:
             continue
 
         return {}, f"无法解析 read_file 行: {line}"
+
+    return args, None
+
+
+def _parse_job_log_command(command: str) -> tuple[dict, Optional[str]]:
+    lines = command.splitlines()
+    if not lines:
+        return {}, "get_job_log 命令为空"
+
+    if not lines[0].strip().lower().startswith("builtin.get_job_log"):
+        return {}, "get_job_log 命令格式错误"
+
+    args: dict[str, str] = {}
+    index = 1
+    while index < len(lines):
+        line = lines[index]
+        if not line.strip():
+            index += 1
+            continue
+
+        lower = line.lower()
+        if lower.startswith("job_id:") or lower.startswith("id:"):
+            value = line.split(":", 1)[1].strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+                value = value[1:-1]
+            if not value:
+                return {}, "job_id 不能为空"
+            args["job_id"] = value
+            index += 1
+            continue
+        if lower.startswith("start_line:"):
+            value = line.split(":", 1)[1].strip()
+            if value:
+                args["start_line"] = value
+            index += 1
+            continue
+        if lower.startswith("max_lines:"):
+            value = line.split(":", 1)[1].strip()
+            if value:
+                args["max_lines"] = value
+            index += 1
+            continue
+
+        return {}, f"无法解析 get_job_log 行: {line}"
+
+    if "job_id" not in args:
+        return {}, "get_job_log 需要参数: job_id"
 
     return args, None
 
@@ -1606,12 +1771,13 @@ def _execute_builtin_smart_edit(args: dict) -> _ExecResult:
 
 
 def _execute_command(command: str, timeout: int, config: Optional[Config] = None,
-                     context_messages: Optional[list] = None):
+                     context_messages: Optional[list] = None, background: bool = False):
     """执行命令（CLI 和 GUI 共用）
 
     Args:
         command: 待执行的命令
         timeout: 超时时间（秒）
+        background: 是否后台执行
 
     Returns:
         Result 对象，包含 stdout, stderr, returncode
@@ -1625,13 +1791,48 @@ def _execute_command(command: str, timeout: int, config: Optional[Config] = None
 
     # 设置 PowerShell 输出编码为 UTF-8，避免中文乱码
     # Windows 中文系统默认输出是 GBK (CP936)，需要显式设置
-    prefixed_command = f'[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; $PSDefaultParameterValues["Out-File:Encoding"] = "utf8"; {command}'
+    if background:
+        prefixed_command = (
+            '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; '
+            '$PSDefaultParameterValues["Out-File:Encoding"] = "utf8"; '
+            '$ProgressPreference = "SilentlyContinue"; '
+            '$InformationPreference = "SilentlyContinue"; '
+            '$VerbosePreference = "SilentlyContinue"; '
+            '$WarningPreference = "SilentlyContinue"; '
+            f'{command}'
+        )
+    else:
+        prefixed_command = (
+            '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; '
+            '$PSDefaultParameterValues["Out-File:Encoding"] = "utf8"; '
+            f'{command}'
+        )
 
     # 使用 UTF-16 LE 编码并 Base64 编码命令，避免引号转义问题
     encoded_command = base64.b64encode(prefixed_command.encode('utf-16-le')).decode('ascii')
     full_cmd = f'powershell -EncodedCommand {encoded_command}'
 
     try:
+        if background:
+            job_id = uuid.uuid4().hex[:8]
+            jobs_dir = _get_ps_jobs_dir()
+            log_path = jobs_dir / f"job_{job_id}.log"
+            log_handle = open(log_path, "ab")
+            process = subprocess.Popen(
+                full_cmd, shell=True,
+                stdout=log_handle,
+                stderr=log_handle
+            )
+            log_handle.close()
+            _register_background_job(job_id, process, log_path)
+            rel_log = None
+            try:
+                rel_log = log_path.relative_to(_find_project_root(os.getcwd()))
+            except ValueError:
+                rel_log = log_path
+            result_msg = f"后台执行已启动\njob_id: {job_id}\nlog_path: {rel_log}"
+            return _ExecResult(stdout=result_msg, stderr="", returncode=0)
+
         process = subprocess.run(
             full_cmd, shell=True, capture_output=True,
             timeout=timeout

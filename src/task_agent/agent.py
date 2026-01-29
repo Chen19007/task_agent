@@ -31,8 +31,21 @@ class StepResult:
     outputs: list[str]  # 输出内容列表（不含命令框）
     action: Action  # 下一步动作
     data: Any = None  # 携带数据（切换时的任务/摘要）
-    pending_commands: list[str] = field(default_factory=list)  # 待确认的命令列表
+    pending_commands: list["CommandSpec"] = field(default_factory=list)  # 待确认的命令列表
     command_blocks: list[str] = field(default_factory=list)  # 命令框显示内容（逐个显示）
+@dataclass
+class CommandSpec:
+    """命令规格，携带上下文信息。"""
+    command: str
+    tool: str = "ps_call"
+    background: bool = False
+    timeout: Optional[int] = None
+
+    def display(self) -> str:
+        """命令显示文本"""
+        if self.tool == "ps_call" and self.background:
+            return f"{self.command} (后台)"
+        return self.command
 
 
 @dataclass
@@ -714,7 +727,7 @@ class SimpleAgent:
 
     def _filter_action_blocks(self, response: str) -> tuple[str, bool]:
         """Keep only tool tags when present to avoid mixed output."""
-        pattern = r"<ps_call>.*?</ps_call>|<builtin>.*?</builtin>|<create_agent(?:\s+name=(\S+?))?\s*>.*?</create_agent>"
+        pattern = r"<ps_call\b[^>]*>.*?</ps_call>|<builtin\b[^>]*>.*?</builtin>|<create_agent(?:\s+name=(\S+?))?\s*>.*?</create_agent>"
         matches = list(re.finditer(pattern, response, re.DOTALL | re.IGNORECASE))
         if not matches:
             return response, False
@@ -752,7 +765,35 @@ class SimpleAgent:
             return command
         return command
 
-    def _parse_tools(self, response: str) -> tuple[list[str], list[str], list[str]]:
+    def _parse_tag_attributes(self, raw_attrs: str) -> dict[str, str]:
+        """解析 tool tag 属性"""
+        attrs: dict[str, str] = {}
+        if not raw_attrs:
+            return attrs
+        for match in re.finditer(r"(\w+)\s*=\s*(\".*?\"|'.*?'|[^\s>]+)", raw_attrs):
+            key = match.group(1).lower()
+            value = match.group(2).strip()
+            if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+                value = value[1:-1]
+            attrs[key] = value
+        return attrs
+
+    def _parse_bool_attr(self, value: Optional[str]) -> bool:
+        """解析布尔属性"""
+        if value is None:
+            return False
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+    def _parse_int_attr(self, value: Optional[str]) -> Optional[int]:
+        """解析整数属性"""
+        if value is None:
+            return None
+        try:
+            return int(value.strip())
+        except ValueError:
+            return None
+
+    def _parse_tools(self, response: str) -> tuple[list[str], list["CommandSpec"], list[str]]:
         """解析工具标签
 
         Returns:
@@ -763,15 +804,23 @@ class SimpleAgent:
         command_blocks = []
 
         # 执行PowerShell命令与内置工具
-        for match in re.finditer(r'<(ps_call|builtin)>\s*(.+?)\s*</\1>', response, re.DOTALL | re.IGNORECASE):
+        for match in re.finditer(r'<(ps_call|builtin)([^>]*)>\s*(.+?)\s*</\1>', response, re.DOTALL | re.IGNORECASE):
             tag_name = match.group(1).lower()
-            command = match.group(2).strip()
+            raw_attrs = match.group(2)
+            command = match.group(3).strip()
+            attrs = self._parse_tag_attributes(raw_attrs)
+            background = self._parse_bool_attr(attrs.get("background")) if tag_name == "ps_call" else False
+            timeout = self._parse_int_attr(attrs.get("timeout")) if tag_name == "ps_call" else None
+            if tag_name == "ps_call" and timeout is None:
+                timeout = 10
             if tag_name == "builtin":
                 command = self._normalize_builtin_command(command)
+            command_spec = CommandSpec(command=command, tool=tag_name, background=background, timeout=timeout)
+            display_command = command_spec.display()
             self.total_commands_executed += 1  # 解析时分配编号
 
             # 命令框单独存储，不放入 outputs
-            block = f"\n>> [待执行命令 #{self.total_commands_executed}]\n命令: {command}\n{'━'*50}\n\n"
+            block = f"\n>> [待执行命令 #{self.total_commands_executed}]\n命令: {display_command}\n{'━'*50}\n\n"
             # 添加深度前缀到命令框
             prefix = "+" * self.depth + " " if self.depth > 0 else ""
             if prefix:
@@ -779,7 +828,7 @@ class SimpleAgent:
                 prefixed_lines = [prefix + line if line.strip() else line for line in lines]
                 block = '\n'.join(prefixed_lines)
             command_blocks.append(block)
-            commands.append(command)
+            commands.append(command_spec)
 
         # 创建子Agent（解析 name 属性）
         # 支持格式：<create_agent name=xxx>任务</create_agent> 或 <create_agent>任务</create_agent>
@@ -801,7 +850,7 @@ class SimpleAgent:
 
         return outputs, commands, command_blocks
 
-    def _parse_tools_with_callbacks(self, response: str) -> tuple[list[str], list[str], list[str]]:
+    def _parse_tools_with_callbacks(self, response: str) -> tuple[list[str], list["CommandSpec"], list[str]]:
         """解析工具标签并调用回调
 
         Returns:
@@ -812,25 +861,33 @@ class SimpleAgent:
         command_blocks = []
 
         # 执行PowerShell命令与内置工具
-        for match in re.finditer(r'<(ps_call|builtin)>\s*(.+?)\s*</\1>', response, re.DOTALL | re.IGNORECASE):
+        for match in re.finditer(r'<(ps_call|builtin)([^>]*)>\s*(.+?)\s*</\1>', response, re.DOTALL | re.IGNORECASE):
             tag_name = match.group(1).lower()
-            command = match.group(2).strip()
+            raw_attrs = match.group(2)
+            command = match.group(3).strip()
+            attrs = self._parse_tag_attributes(raw_attrs)
+            background = self._parse_bool_attr(attrs.get("background")) if tag_name == "ps_call" else False
+            timeout = self._parse_int_attr(attrs.get("timeout")) if tag_name == "ps_call" else None
+            if tag_name == "ps_call" and timeout is None:
+                timeout = 10
             if tag_name == "builtin":
                 command = self._normalize_builtin_command(command)
+            command_spec = CommandSpec(command=command, tool=tag_name, background=background, timeout=timeout)
+            display_command = command_spec.display()
             self.total_commands_executed += 1  # 解析时分配编号
 
             # 调用回调
             depth_prefix = "+" * self.depth + " " if self.depth > 0 else ""
-            self._output_handler.on_ps_call(command, self.total_commands_executed, depth_prefix)
+            self._output_handler.on_ps_call(display_command, self.total_commands_executed, depth_prefix)
 
             # 命令框单独存储，不放入 outputs（兼容 CLI）
-            block = f"\n>> [待执行命令 #{self.total_commands_executed}]\n命令: {command}\n{'━'*50}\n\n"
+            block = f"\n>> [待执行命令 #{self.total_commands_executed}]\n命令: {display_command}\n{'━'*50}\n\n"
             if depth_prefix:
                 lines = block.split('\n')
                 prefixed_lines = [depth_prefix + line if line.strip() else line for line in lines]
                 block = '\n'.join(prefixed_lines)
             command_blocks.append(block)
-            commands.append(command)
+            commands.append(command_spec)
 
         # 创建子Agent（解析 name 属性）
         # 支持格式：<create_agent name=xxx>任务</create_agent> 或 <create_agent>任务</create_agent>

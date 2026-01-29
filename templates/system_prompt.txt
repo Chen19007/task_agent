@@ -16,6 +16,13 @@
 
 **1. 命令执行（PowerShell）：**
 <ps_call> 直接写PowerShell命令 </ps_call>
+支持可选属性：
+- background=true 后台运行（不阻塞）
+- timeout=秒 设定超时（默认 10 秒）
+示例：
+<ps_call timeout=30> Start-Sleep -Seconds 20 </ps_call>
+<ps_call background=true> Start-Sleep -Seconds 60 </ps_call>
+
 
 **1.1 内置工具（使用 <builtin> 标签）**
 用于读取大文件时的分块读取，避免一次性输出过长。
@@ -32,6 +39,15 @@ max_lines: 200
 - `start_line` 从 1 开始计数
 - `max_lines` 默认 200，过大时会自动截断
 - 返回结果会提示是否还有剩余内容，以及下一次读取的起始行号
+
+**1.2 后台任务日志（builtin.get_job_log）：**
+语法：
+<builtin>
+get_job_log
+job_id: <id>
+start_line: 1
+max_lines: 200
+</builtin>
 
 **1.3 记忆查询（builtin.memory_query）**
 用于从 sessions 快照中检索记忆，并生成与当前上下文相关的摘要。

@@ -555,6 +555,16 @@ class SessionManager:
                 return True
         return False
 
+    def _is_reserved_device_name(self, name: str) -> bool:
+        reserved = {
+            "con", "prn", "aux", "nul",
+            "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9",
+            "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+        }
+        normalized = name.rstrip(" .")
+        base = normalized.split(".")[0] if normalized else ""
+        return base.lower() in reserved
+
     def _iter_files(self, root: Path, exclude_roots: Optional[list[Path]] = None) -> list[tuple[Path, Path]]:
         exclude_roots = exclude_roots or []
         results: list[tuple[Path, Path]] = []
@@ -572,6 +582,8 @@ class SessionManager:
             dirnames[:] = filtered
 
             for filename in filenames:
+                if self._is_reserved_device_name(filename):
+                    continue
                 abs_path = current_dir / filename
                 rel_path = abs_path.relative_to(root)
                 results.append((abs_path, rel_path))
@@ -596,6 +608,8 @@ class SessionManager:
             dest_dir.mkdir(parents=True, exist_ok=True)
 
             for filename in filenames:
+                if self._is_reserved_device_name(filename):
+                    continue
                 src_file = current_dir / filename
                 dest_file = dest_dir / filename
                 dest_file.parent.mkdir(parents=True, exist_ok=True)

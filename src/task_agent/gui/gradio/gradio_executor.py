@@ -8,6 +8,7 @@ import threading
 import time
 from typing import Optional, List, Tuple, Generator
 from task_agent.gui.adapter import ExecutorAdapter
+from task_agent.agent import CommandSpec
 from task_agent.output_handler import OutputHandler
 
 
@@ -30,8 +31,13 @@ class GradioExecutor:
         self._stop_event = threading.Event()
         self._is_running = False
         self._generator = None
-        self._pending_commands: List[Tuple[int, str]] = []
+        self._pending_commands: List[Tuple[int, CommandSpec]] = []
         self._waiting_for_confirmation = False
+
+    def _normalize_command_spec(self, command: object) -> CommandSpec:
+        if isinstance(command, CommandSpec):
+            return command
+        return CommandSpec(command=str(command))
 
     def execute_task(self, task: str, auto_approve: bool):
         """开始执行任务
@@ -65,15 +71,16 @@ class GradioExecutor:
                         if self.adapter.executor.auto_approve:
                             # 自动执行所有安全命令
                             for idx, command in enumerate(result.pending_commands, 1):
+                                command_spec = self._normalize_command_spec(command)
                                 # 检查命令是否安全
                                 from task_agent.safety import is_safe_command
                                 import os
                                 current_dir = os.getcwd()
-                                if is_safe_command(command, current_dir):
-                                    self._execute_command_sync(command, "executed")
+                                if is_safe_command(command_spec.command, current_dir):
+                                    self._execute_command_sync(command_spec, "executed")
                                 else:
                                     # 不安全的命令需要用户确认
-                                    self._pending_commands = list(enumerate(result.pending_commands, 1))
+                                    self._pending_commands = list(enumerate([self._normalize_command_spec(cmd) for cmd in result.pending_commands], 1))
                                     self._waiting_for_confirmation = True
                                     self._state_queue.put(("pending_commands", self._pending_commands))
                                     break
@@ -82,7 +89,7 @@ class GradioExecutor:
                                 continue
                         else:
                             # 需要用户确认，显示确认对话框
-                            self._pending_commands = list(enumerate(result.pending_commands, 1))
+                            self._pending_commands = list(enumerate([self._normalize_command_spec(cmd) for cmd in result.pending_commands], 1))
                             self._waiting_for_confirmation = True
                             self._state_queue.put(("pending_commands", self._pending_commands))
                             break
@@ -100,72 +107,77 @@ class GradioExecutor:
 
         threading.Thread(target=_run, daemon=True).start()
 
-    def _execute_command_sync(self, command: str, action: str):
-        """同步执行命令（用于自动同意模式）
-
-        Args:
-            command: 要执行的命令
-            action: 动作类型 (executed/rejected)
-        """
+    def _execute_command_sync(self, command_spec: CommandSpec, action: str):
+        """\u540c\u6b65\u6267\u884c\u547d\u4ee4\uff08\u7528\u4e8e\u81ea\u52a8\u540c\u610f\u6a21\u5f0f\uff09"""
         try:
             from task_agent.cli import _execute_command
 
-            cmd_result = _execute_command(command, self.adapter.executor.config.timeout)
+            command_timeout = command_spec.timeout if command_spec.timeout is not None else self.adapter.executor.config.timeout
+            cmd_result = _execute_command(
+                command_spec.command,
+                command_timeout,
+                background=command_spec.background,
+            )
 
             if action == "executed":
                 if cmd_result.returncode == 0:
-                    message = f"命令执行成功，输出：\n{cmd_result.stdout}" if cmd_result.stdout else "命令执行成功（无输出）"
+                    if cmd_result.stdout:
+                        message = "\u547d\u4ee4\u6267\u884c\u6210\u529f\uff0c\u8f93\u51fa\uff1a\n" + cmd_result.stdout
+                    else:
+                        message = "\u547d\u4ee4\u6267\u884c\u6210\u529f\uff08\u65e0\u8f93\u51fa\uff09"
                 else:
-                    message = f"命令执行失败（退出码: {cmd_result.returncode}）：\n{cmd_result.stderr}"
+                    message = f"\u547d\u4ee4\u6267\u884c\u5931\u8d25\uff08\u9000\u51fa\u7801: {cmd_result.returncode}\uff09\uff1a\n{cmd_result.stderr}"
                 result_msg = f'<ps_call_result id="executed">\n{message}\n</ps_call_result>'
             else:  # rejected
-                message = "用户取消了命令执行"
+                message = "\u7528\u6237\u53d6\u6d88\u4e86\u547d\u4ee4\u6267\u884c"
                 result_msg = f'<ps_call_result id="rejected">\n{message}\n</ps_call_result>'
 
             if self.adapter.executor.current_agent:
                 self.adapter.executor.current_agent._add_message("user", result_msg)
         except Exception as e:
-            error_msg = f"命令执行异常：{str(e)}"
+            error_msg = f"\u547d\u4ee4\u6267\u884c\u5f02\u5e38\uff1a{e}"
             if self.adapter.executor.current_agent:
                 self.adapter.executor.current_agent._add_message("user", f'<ps_call_result id="executed">\n{error_msg}\n</ps_call_result>')
 
     def confirm_command(self, command_index: int, action: str, user_input: str = ""):
-        """确认并执行命令
-
-        Args:
-            command_index: 命令索引
-            action: 动作类型 (executed/rejected)
-            user_input: 用户输入（当 action=rejected 时）
-        """
+        """\u786e\u8ba4\u5e76\u6267\u884c\u547d\u4ee4"""
         if not self._pending_commands:
             return
 
-        command = None
+        command_spec = None
         for idx, cmd in self._pending_commands:
             if idx == command_index:
-                command = cmd
+                command_spec = cmd
                 break
 
-        if not command:
+        if not command_spec:
             return
 
         def execute():
             try:
                 from task_agent.cli import _execute_command
 
-                cmd_result = _execute_command(command, self.adapter.executor.config.timeout)
+                command_timeout = command_spec.timeout if command_spec.timeout is not None else self.adapter.executor.config.timeout
+                cmd_result = _execute_command(
+                    command_spec.command,
+                    command_timeout,
+                    background=command_spec.background,
+                )
 
                 if action == "executed":
                     if cmd_result.returncode == 0:
-                        message = f"命令执行成功，输出：\n{cmd_result.stdout}" if cmd_result.stdout else "命令执行成功（无输出）"
+                        if cmd_result.stdout:
+                            message = "\u547d\u4ee4\u6267\u884c\u6210\u529f\uff0c\u8f93\u51fa\uff1a\n" + cmd_result.stdout
+                        else:
+                            message = "\u547d\u4ee4\u6267\u884c\u6210\u529f\uff08\u65e0\u8f93\u51fa\uff09"
                     else:
-                        message = f"命令执行失败（退出码: {cmd_result.returncode}）：\n{cmd_result.stderr}"
+                        message = f"\u547d\u4ee4\u6267\u884c\u5931\u8d25\uff08\u9000\u51fa\u7801: {cmd_result.returncode}\uff09\uff1a\n{cmd_result.stderr}"
                     result_msg = f'<ps_call_result id="executed">\n{message}\n</ps_call_result>'
                 else:  # rejected
                     if user_input:
-                        message = f"用户建议：{user_input}"
+                        message = f"\u7528\u6237\u5efa\u8bae\uff1a{user_input}"
                     else:
-                        message = "用户取消了命令执行"
+                        message = "\u7528\u6237\u53d6\u6d88\u4e86\u547d\u4ee4\u6267\u884c"
                     result_msg = f'<ps_call_result id="rejected">\n{message}\n</ps_call_result>'
 
                 if self.adapter.executor.current_agent:
@@ -173,7 +185,7 @@ class GradioExecutor:
 
                 self._continue_execution()
             except Exception as e:
-                error_msg = f"命令执行异常：{str(e)}"
+                error_msg = f"\u547d\u4ee4\u6267\u884c\u5f02\u5e38\uff1a{e}"
                 if self.adapter.executor.current_agent:
                     self.adapter.executor.current_agent._add_message("user", f'<ps_call_result id="executed">\n{error_msg}\n</ps_call_result>')
                 self._continue_execution()
@@ -195,7 +207,7 @@ class GradioExecutor:
                     self._state_queue.put(("output", (outputs, result)))
 
                     if result and result.pending_commands:
-                        self._pending_commands = list(enumerate(result.pending_commands, 1))
+                        self._pending_commands = list(enumerate([self._normalize_command_spec(cmd) for cmd in result.pending_commands], 1))
                         self._waiting_for_confirmation = True
                         self._state_queue.put(("pending_commands", self._pending_commands))
                         break

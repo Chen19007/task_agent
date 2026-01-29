@@ -8,7 +8,7 @@ import queue
 import threading
 from typing import Callable, Optional
 
-from ..agent import StepResult
+from ..agent import StepResult, CommandSpec
 from ..safety import is_safe_command
 from .adapter import ExecutorAdapter
 
@@ -32,8 +32,14 @@ class AsyncExecutor:
         self._thread: Optional[threading.Thread] = None
         self._is_running = False
         self._generator = None  # 保存当前的生成器
-        self._pending_commands: list[tuple[int, str]] = []  # (index, command)
+        self._pending_commands: list[tuple[int, CommandSpec]] = []  # (index, command)
         self._waiting_for_confirmation = False
+
+    def _normalize_command_spec(self, command: object) -> CommandSpec:
+        if isinstance(command, CommandSpec):
+            return command
+        return CommandSpec(command=str(command))
+
 
     def execute_task_async(self, task: str):
         """异步执行任务
@@ -72,14 +78,15 @@ class AsyncExecutor:
                             safe_commands = []
                             unsafe_commands = []
                             for cmd in result.pending_commands:
-                                if is_safe_command(cmd, current_dir):
-                                    safe_commands.append(cmd)
+                                cmd_spec = self._normalize_command_spec(cmd)
+                                if is_safe_command(cmd_spec.command, current_dir):
+                                    safe_commands.append(cmd_spec)
                                 else:
-                                    unsafe_commands.append(cmd)
+                                    unsafe_commands.append(cmd_spec)
 
                             # 自动执行安全命令
-                            for cmd in safe_commands:
-                                self._auto_execute_command(cmd)
+                            for cmd_spec in safe_commands:
+                                self._auto_execute_command(cmd_spec)
 
                             # 如果没有不安全的命令，继续执行
                             if not unsafe_commands:
@@ -91,7 +98,7 @@ class AsyncExecutor:
                             break
                         else:
                             # 非 auto 模式，正常流程
-                            self._pending_commands = list(enumerate(result.pending_commands, 1))
+                            self._pending_commands = list(enumerate([self._normalize_command_spec(cmd) for cmd in result.pending_commands], 1))
                             self._waiting_for_confirmation = True
                             self.output_queue.put(("pending_commands", self._pending_commands))
                             break  # 等待 GUI 确认
@@ -125,20 +132,25 @@ class AsyncExecutor:
             return
 
         # 找到对应的命令
-        command = None
+        command_spec = None
         for idx, cmd in self._pending_commands:
             if idx == command_index:
-                command = cmd
+                command_spec = cmd
                 break
 
-        if not command:
+        if not command_spec:
             return
 
         # 在新线程中执行命令
         def execute():
             try:
                 from ..cli import _execute_command
-                cmd_result = _execute_command(command, self.adapter.executor.config.timeout)
+                command_timeout = command_spec.timeout if command_spec.timeout is not None else self.adapter.executor.config.timeout
+                cmd_result = _execute_command(
+                    command_spec.command,
+                    command_timeout,
+                    background=command_spec.background,
+                )
 
                 # 构建结果消息
                 if action == "executed":
@@ -199,14 +211,15 @@ class AsyncExecutor:
                             safe_commands = []
                             unsafe_commands = []
                             for cmd in result.pending_commands:
-                                if is_safe_command(cmd, current_dir):
-                                    safe_commands.append(cmd)
+                                cmd_spec = self._normalize_command_spec(cmd)
+                                if is_safe_command(cmd_spec.command, current_dir):
+                                    safe_commands.append(cmd_spec)
                                 else:
-                                    unsafe_commands.append(cmd)
+                                    unsafe_commands.append(cmd_spec)
 
                             # 自动执行安全命令
-                            for cmd in safe_commands:
-                                self._auto_execute_command(cmd)
+                            for cmd_spec in safe_commands:
+                                self._auto_execute_command(cmd_spec)
 
                             # 如果没有不安全的命令，继续执行
                             if not unsafe_commands:
@@ -217,7 +230,7 @@ class AsyncExecutor:
                             self.output_queue.put(("pending_commands", self._pending_commands))
                             break
                         else:
-                            self._pending_commands = list(enumerate(result.pending_commands, 1))
+                            self._pending_commands = list(enumerate([self._normalize_command_spec(cmd) for cmd in result.pending_commands], 1))
                             self._waiting_for_confirmation = True
                             self.output_queue.put(("pending_commands", self._pending_commands))
                             break
@@ -267,14 +280,15 @@ class AsyncExecutor:
                             safe_commands = []
                             unsafe_commands = []
                             for cmd in result.pending_commands:
-                                if is_safe_command(cmd, current_dir):
-                                    safe_commands.append(cmd)
+                                cmd_spec = self._normalize_command_spec(cmd)
+                                if is_safe_command(cmd_spec.command, current_dir):
+                                    safe_commands.append(cmd_spec)
                                 else:
-                                    unsafe_commands.append(cmd)
+                                    unsafe_commands.append(cmd_spec)
 
                             # 自动执行安全命令
-                            for cmd in safe_commands:
-                                self._auto_execute_command(cmd)
+                            for cmd_spec in safe_commands:
+                                self._auto_execute_command(cmd_spec)
 
                             # 如果没有不安全的命令，继续执行
                             if not unsafe_commands:
@@ -285,7 +299,7 @@ class AsyncExecutor:
                             self.output_queue.put(("pending_commands", self._pending_commands))
                             break
                         else:
-                            self._pending_commands = list(enumerate(result.pending_commands, 1))
+                            self._pending_commands = list(enumerate([self._normalize_command_spec(cmd) for cmd in result.pending_commands], 1))
                             self._waiting_for_confirmation = True
                             self.output_queue.put(("pending_commands", self._pending_commands))
                             break
@@ -305,35 +319,34 @@ class AsyncExecutor:
         self._thread = threading.Thread(target=_run, daemon=True)
         self._thread.start()
 
-    def _auto_execute_command(self, command: str):
-        """自动执行安全命令
-
-        Args:
-            command: 待执行的命令
-        """
+    def _auto_execute_command(self, command_spec: CommandSpec):
+        """\u81ea\u52a8\u6267\u884c\u5b89\u5168\u547d\u4ee4"""
         try:
             from ..cli import _execute_command
-            cmd_result = _execute_command(command, self.adapter.executor.config.timeout)
+            command_timeout = command_spec.timeout if command_spec.timeout is not None else self.adapter.executor.config.timeout
+            cmd_result = _execute_command(
+                command_spec.command,
+                command_timeout,
+                background=command_spec.background,
+            )
 
-            # 构建结果消息
             if cmd_result.returncode == 0:
                 if cmd_result.stdout:
-                    message = f"命令执行成功（自动执行），输出：\n{cmd_result.stdout}"
+                    message = "\u547d\u4ee4\u6267\u884c\u6210\u529f\uff08\u81ea\u52a8\u6267\u884c\uff09\uff0c\u8f93\u51fa\uff1a\n" + cmd_result.stdout
                 else:
-                    message = "命令执行成功（自动执行，无输出）"
+                    message = "\u547d\u4ee4\u6267\u884c\u6210\u529f\uff08\u81ea\u52a8\u6267\u884c\uff0c\u65e0\u8f93\u51fa\uff09"
             else:
-                message = f"命令执行失败（退出码: {cmd_result.returncode}）：\n{cmd_result.stderr}"
+                message = f"\u547d\u4ee4\u6267\u884c\u5931\u8d25\uff08\u9000\u51fa\u7801: {cmd_result.returncode}\uff09\uff1a\n{cmd_result.stderr}"
 
             result_msg = f'<ps_call_result id="executed">\n{message}\n</ps_call_result>'
 
             self._emit_command_result(message, "executed")
 
-            # 发送结果给 Agent
             if self.adapter.executor.current_agent:
                 self.adapter.executor.current_agent._add_message("user", result_msg)
 
         except Exception as e:
-            error_msg = f"命令执行异常：{str(e)}"
+            error_msg = f"\u547d\u4ee4\u6267\u884c\u5f02\u5e38\uff1a{e}"
             if self.adapter.executor.current_agent:
                 self.adapter.executor.current_agent._add_message("user", f'<ps_call_result id="executed">\n{error_msg}\n</ps_call_result>')
 
