@@ -94,6 +94,8 @@ _RUN_STATS = {
 }
 
 _BACKGROUND_JOBS: dict[str, dict] = {}
+_ACTIVE_HINT: Optional[str] = None
+_ACTIVE_HINT_MODULES: list[Path] = []
 
 
 def _find_project_root(start_dir: str) -> Path:
@@ -442,10 +444,11 @@ def main():
 
             # 显示当前会话状态
             auto_status = " | [success]自动同意: 启[/success]" if executor.auto_approve else ""
+            hint_status = f" | 当前 hint: {_ACTIVE_HINT}" if _ACTIVE_HINT else ""
             if session_manager.current_session_id:
-                console.print(f"[dim]当前会话 #{session_manager.current_session_id} | 输入任务继续，/new 新建，/list 列表，/auto 切换自动同意，/exit 退出{auto_status}[/dim]")
+                console.print(f"[dim]当前会话 #{session_manager.current_session_id} | 输入任务继续，/new 新建，/list 列表，/auto 切换自动同意，/exit 退出{auto_status}{hint_status}[/dim]")
             else:
-                console.print(f"[dim]临时会话 | 输入任务创建会话，/list 列表，/auto 切换自动同意，/exit 退出{auto_status}[/dim]")
+                console.print(f"[dim]临时会话 | 输入任务创建会话，/list 列表，/auto 切换自动同意，/exit 退出{auto_status}{hint_status}[/dim]")
 
             _clear_input_buffer()
             task = console.input("[user]任务> [/user]")
@@ -710,6 +713,8 @@ def _run_single_task(config: Config, task: str, executor: 'Executor' = None, ses
         console.print("\n" + "=" * 60)
         console.print("[bold yellow]Agent 等待您的回复[/bold yellow]")
         console.print("[dim]输入内容后按空行结束（/exit 退出，/list 查看会话，/compact 压缩上下文）[/dim]")
+        if _ACTIVE_HINT:
+            console.print(f"[dim]当前 hint: {_ACTIVE_HINT}[/dim]")
         console.print("=" * 60 + "\n")
 
         lines = []
@@ -1059,6 +1064,11 @@ def _execute_builtin_tool(command: str, config: Optional[Config] = None,
         if error:
             return _prefix_builtin_result("get_job_log", _ExecResult("", error, 1))
         return _prefix_builtin_result("get_job_log", _execute_builtin_job_log(parsed_args))
+    if stripped.lower().startswith("builtin.get_resource"):
+        parsed_args, error = _parse_get_resource_command(stripped)
+        if error:
+            return _prefix_builtin_result("get_resource", _ExecResult("", error, 1))
+        return _prefix_builtin_result("get_resource", _execute_builtin_get_resource(parsed_args))
     if stripped.lower().startswith("builtin.memory_query"):
         parsed_args, error = _parse_memory_query_command(stripped)
         if error:
@@ -1069,6 +1079,11 @@ def _execute_builtin_tool(command: str, config: Optional[Config] = None,
             "memory_query",
             _execute_builtin_memory_query(parsed_args, config, context_messages or []),
         )
+    if stripped.lower().startswith("builtin.hint"):
+        parsed_args, error = _parse_hint_command(stripped)
+        if error:
+            return _ExecResult("", error, 1)
+        return _execute_builtin_hint(parsed_args)
 
     match = _BUILTIN_TOOL_PATTERN.match(command)
     if not match:
@@ -1204,6 +1219,100 @@ def _execute_builtin_job_log(args: dict) -> _ExecResult:
     return _ExecResult(result_text, "", 0)
 
 
+def _parse_hint_command(command: str) -> tuple[dict, Optional[str]]:
+    if not command.strip():
+        return {}, "hint 命令为空"
+
+    match = _BUILTIN_TOOL_PATTERN.match(command)
+    if match:
+        tool = match.group(1).lower()
+        if tool != "hint":
+            return {}, "hint 命令格式错误"
+        raw = match.group(2)
+        if raw:
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError:
+                return {}, "hint 参数 JSON 解析失败"
+            if not isinstance(payload, dict):
+                return {}, "hint 参数必须是 JSON 对象"
+            return payload, None
+
+    lines = command.splitlines()
+    if not lines:
+        return {}, "hint 命令为空"
+    if not lines[0].strip().lower().startswith("builtin.hint"):
+        return {}, "hint 命令格式错误"
+
+    args: dict[str, str] = {}
+    index = 1
+    while index < len(lines):
+        line = lines[index]
+        if not line.strip():
+            index += 1
+            continue
+        if ":" not in line:
+            return {}, f"无法解析 hint 行: {line}"
+        key, value = line.split(":", 1)
+        key = key.strip().lower()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+            value = value[1:-1]
+        if not value:
+            return {}, f"{key} 不能为空"
+        args[key] = value
+        index += 1
+
+    if "action" not in args:
+        return {}, "hint 需要参数: action"
+
+    return args, None
+
+
+def _get_hints_root() -> Path:
+    root = _find_project_root(os.getcwd())
+    return root / "hints"
+
+
+def _collect_hint_modules(name: str) -> list[Path]:
+    hints_root = _get_hints_root()
+    modules_dir = hints_root / name / "modules"
+    if not modules_dir.exists() or not modules_dir.is_dir():
+        return []
+    return sorted(modules_dir.glob("*.psm1"))
+
+
+def _execute_builtin_hint(args: dict) -> _ExecResult:
+    global _ACTIVE_HINT
+    global _ACTIVE_HINT_MODULES
+    action = args.get("action")
+    if not action:
+        return _ExecResult("", "hint 需要参数: action", 1)
+    action = str(action).lower()
+    if action == "load":
+        name = args.get("name")
+        if not name:
+            return _ExecResult("", "hint load 需要参数: name", 1)
+        hints_root = _get_hints_root()
+        prompt_path = hints_root / str(name) / "hint.md"
+        if not prompt_path.exists():
+            return _ExecResult("", f"hint 提示词不存在: {prompt_path}", 1)
+        try:
+            content = prompt_path.read_text(encoding="utf-8").strip()
+        except Exception as exc:
+            return _ExecResult("", f"读取 hint 提示词失败: {exc}", 1)
+        if not content:
+            return _ExecResult("", "hint 提示词为空", 1)
+        _ACTIVE_HINT = str(name)
+        _ACTIVE_HINT_MODULES = _collect_hint_modules(str(name))
+        return _ExecResult(content, "", 0)
+    if action == "unload":
+        _ACTIVE_HINT = None
+        _ACTIVE_HINT_MODULES = []
+        return _ExecResult("hint 已卸载", "", 0)
+    return _ExecResult("", f"未知 hint action: {action}", 1)
+
+
 def _parse_smart_edit_command(command: str) -> tuple[dict, Optional[str]]:
     lines = command.splitlines()
     if not lines:
@@ -1300,6 +1409,108 @@ def _parse_read_file_command(command: str) -> tuple[dict, Optional[str]]:
 
     return args, None
 
+
+def _parse_get_resource_command(command: str) -> tuple[dict, Optional[str]]:
+    lines = command.splitlines()
+    if not lines:
+        return {}, "get_resource 命令为空"
+
+    if not lines[0].strip().lower().startswith("builtin.get_resource"):
+        return {}, "get_resource 命令格式错误"
+
+    args: dict[str, str] = {}
+    index = 1
+    while index < len(lines):
+        line = lines[index]
+        if not line.strip():
+            index += 1
+            continue
+
+        lower = line.lower()
+        if lower.startswith("path:"):
+            value = line.split(":", 1)[1].strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+                value = value[1:-1]
+            if not value:
+                return {}, "path 不能为空"
+            args["path"] = value
+            index += 1
+            continue
+        if lower.startswith("encoding:"):
+            value = line.split(":", 1)[1].strip()
+            if value:
+                args["encoding"] = value
+            index += 1
+            continue
+
+        return {}, f"无法解析 get_resource 行: {line}"
+
+    if "path" not in args:
+        return {}, "get_resource 需要参数: path"
+
+    return args, None
+
+
+def _is_safe_relative_path(path: str) -> bool:
+    if not path:
+        return False
+    if os.path.isabs(path):
+        return False
+    if re.match(r"^[a-zA-Z]:", path):
+        return False
+    parts = Path(path).parts
+    return ".." not in parts
+
+
+def _resolve_resource_path(rel_path: str, roots: list[Path]) -> tuple[Optional[Path], Optional[str]]:
+    if not _is_safe_relative_path(rel_path):
+        return None, "路径不合法，仅允许相对路径且禁止 .."
+
+    for root in roots:
+        try:
+            root_resolved = root.resolve()
+            candidate = (root / rel_path).resolve()
+        except Exception:
+            continue
+        if not str(candidate).startswith(str(root_resolved)):
+            continue
+        if candidate.exists() and candidate.is_file():
+            return candidate, None
+    return None, "资源不存在"
+
+
+def _get_active_resource_path() -> Optional[Path]:
+    if not _ACTIVE_HINT:
+        return None
+    hint_root = _get_hints_root() / _ACTIVE_HINT / "resources"
+    if hint_root.exists() and hint_root.is_dir():
+        return hint_root
+    return None
+
+
+def _execute_builtin_get_resource(args: dict) -> _ExecResult:
+    rel_path = args.get("path")
+    if not rel_path:
+        return _ExecResult("", "get_resource 需要参数: path", 1)
+
+    active_root = _get_active_resource_path()
+    if not active_root:
+        return _ExecResult("", "未激活 hint 或资源目录不存在", 1)
+
+    resolved, error = _resolve_resource_path(str(rel_path), [active_root])
+    if error:
+        return _ExecResult("", error, 1)
+    if not resolved:
+        return _ExecResult("", "资源不存在", 1)
+
+    encoding = args.get("encoding") or "utf-8-sig"
+    try:
+        content = resolved.read_text(encoding=encoding)
+    except Exception as exc:
+        return _ExecResult("", f"读取资源失败: {exc}", 1)
+    if content == "":
+        content = "(空内容)"
+    return _ExecResult(content, "", 0)
 
 def _parse_job_log_command(command: str) -> tuple[dict, Optional[str]]:
     lines = command.splitlines()
@@ -1789,6 +2000,20 @@ def _execute_command(command: str, timeout: int, config: Optional[Config] = None
     if builtin_result is not None:
         return builtin_result
 
+    def build_import_prefix() -> str:
+        if not _ACTIVE_HINT_MODULES:
+            return ""
+        parts = []
+        for module_path in _ACTIVE_HINT_MODULES:
+            path_text = str(module_path.resolve())
+            path_text = path_text.replace("'", "''")
+            parts.append(f"Import-Module '{path_text}'")
+        if not parts:
+            return ""
+        return "; ".join(parts) + "; "
+
+    import_prefix = build_import_prefix()
+
     # 设置 PowerShell 输出编码为 UTF-8，避免中文乱码
     # Windows 中文系统默认输出是 GBK (CP936)，需要显式设置
     if background:
@@ -1799,13 +2024,13 @@ def _execute_command(command: str, timeout: int, config: Optional[Config] = None
             '$InformationPreference = "SilentlyContinue"; '
             '$VerbosePreference = "SilentlyContinue"; '
             '$WarningPreference = "SilentlyContinue"; '
-            f'{command}'
+            f'{import_prefix}{command}'
         )
     else:
         prefixed_command = (
             '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; '
             '$PSDefaultParameterValues["Out-File:Encoding"] = "utf8"; '
-            f'{command}'
+            f'{import_prefix}{command}'
         )
 
     # 使用 UTF-16 LE 编码并 Base64 编码命令，避免引号转义问题
@@ -1856,4 +2081,3 @@ def _execute_command(command: str, timeout: int, config: Optional[Config] = None
 
 if __name__ == "__main__":
     main()
-

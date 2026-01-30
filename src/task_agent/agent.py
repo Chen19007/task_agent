@@ -184,12 +184,60 @@ class SimpleAgent:
 
         # 加载模板并渲染
         template = self._load_system_prompt_template()
+        hint_metadata = self._load_hint_metadata()
+        if hint_metadata:
+            hint_metadata = f"\n{hint_metadata}"
+
         base_system_prompt = template.format(
             tree_info=tree_info,
-            predefined_section=predefined_section
+            predefined_section=predefined_section,
+            hint_metadata=hint_metadata
         )
 
         self.history.append(Message(role="system", content=base_system_prompt))
+
+    def _load_hint_metadata(self) -> str:
+        """加载所有 hint 的元数据（来自 hints/<name>/hint.txt）"""
+        hints_dir = self._get_hints_dir()
+        if not hints_dir:
+            return ""
+
+        metadata_list = []
+        for name in sorted(os.listdir(hints_dir)):
+            hint_dir = os.path.join(hints_dir, name)
+            if not os.path.isdir(hint_dir):
+                continue
+            if name.startswith("."):
+                continue
+
+            meta_path = os.path.join(hint_dir, "hint.txt")
+            try:
+                with open(meta_path, "r", encoding="utf-8") as handle:
+                    description = handle.read().strip()
+            except (OSError, UnicodeDecodeError):
+                continue
+
+            if not description:
+                continue
+
+            metadata_list.append({
+                "name": name,
+                "description": description,
+            })
+
+        if not metadata_list:
+            return ""
+
+        try:
+            return json.dumps(metadata_list, ensure_ascii=False, indent=2)
+        except Exception:
+            return ""
+
+    def _get_hints_dir(self) -> str:
+        """获取 hints 根目录路径"""
+        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        hints_dir = os.path.join(project_root, "hints")
+        return hints_dir if os.path.isdir(hints_dir) else ""
 
     def _load_predefined_agent_metadata(self) -> list[dict[str, str]]:
         """加载预定义 agent 的元数据（从 .json 文件）"""
