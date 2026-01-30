@@ -1,0 +1,4 @@
+name: "hello"
+description: "返回当前 Windows 用户名的 hello 消息。"
+system_prompt_injection: |
+  这个 hint 用于验证 hint 加载与 ps_call 流程。

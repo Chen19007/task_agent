@@ -23,7 +23,7 @@
 
 将以下约定写入 `src/task_agent/hint_registry.py` 文件头注释，作为实现依据：
 - 每个 hint 在独立目录：`hints/<name>/`
-- 目录内包含：`hint.md`（提示词）、`hint.txt`（元数据描述）、`resources/`（资源文件）、`modules/`（PowerShell 模块）
+- 目录内包含：`hint.md`（提示词）、`hint.yaml`（元数据描述，含 `name`/`description`/`system_prompt_injection`）、`resources/`（资源文件）、`modules/`（PowerShell 模块）
 - 激活 hint 时只刷新可用模块路径列表（不在此处执行 Import/Remove）
 - 资源仅允许：当前 hint 的 `resources/`
 
@@ -60,7 +60,7 @@
 
 **Step 3: hint 元数据与提示词消息**
 
-- 元数据来源：`hints/<name>/hint.txt`
+- 元数据来源：`hints/<name>/hint.yaml`
 - 汇总为 JSON 列表后注入到 `templates/system_prompt.txt` 的 `{hint_metadata}` 占位符
 - 提示词来源：`hints/<name>/hint.md`，由 `builtin.hint` 返回给调用方，作为普通消息使用（不注入系统提示词）
 

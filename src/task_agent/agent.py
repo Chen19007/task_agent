@@ -7,6 +7,7 @@ import threading
 import time
 import uuid
 import os
+import yaml
 from dataclasses import dataclass, field
 from typing import Generator, Optional, Any, Callable
 from enum import Enum
@@ -197,7 +198,7 @@ class SimpleAgent:
         self.history.append(Message(role="system", content=base_system_prompt))
 
     def _load_hint_metadata(self) -> str:
-        """加载所有 hint 的元数据（来自 hints/<name>/hint.txt）"""
+        """加载所有 hint 的元数据（来自 hints/<name>/hint.yaml）"""
         hints_dir = self._get_hints_dir()
         if not hints_dir:
             return ""
@@ -210,26 +211,31 @@ class SimpleAgent:
             if name.startswith("."):
                 continue
 
-            meta_path = os.path.join(hint_dir, "hint.txt")
+            meta_path = os.path.join(hint_dir, "hint.yaml")
             try:
-                with open(meta_path, "r", encoding="utf-8") as handle:
-                    description = handle.read().strip()
-            except (OSError, UnicodeDecodeError):
+                with open(meta_path, "r", encoding="utf-8-sig") as handle:
+                    metadata = yaml.safe_load(handle)
+            except (OSError, UnicodeDecodeError, yaml.YAMLError):
                 continue
 
-            if not description:
+            if not isinstance(metadata, dict):
                 continue
+
+            hint_name = metadata.get("name") or name
+            description = str(metadata.get("description", "")).strip()
+            injection = str(metadata.get("system_prompt_injection", "")).strip()
 
             metadata_list.append({
-                "name": name,
+                "name": hint_name,
                 "description": description,
+                "system_prompt_injection": injection,
             })
 
         if not metadata_list:
             return ""
 
         try:
-            return json.dumps(metadata_list, ensure_ascii=False, indent=2)
+            return yaml.safe_dump(metadata_list, allow_unicode=True, sort_keys=False).strip()
         except Exception:
             return ""
 
@@ -240,28 +246,30 @@ class SimpleAgent:
         return hints_dir if os.path.isdir(hints_dir) else ""
 
     def _load_predefined_agent_metadata(self) -> list[dict[str, str]]:
-        """加载预定义 agent 的元数据（从 .json 文件）"""
+        """加载预定义 agent 的元数据（从 .yaml 文件）"""
         agents_dir = self._get_project_agents_dir()
         if not agents_dir:
             return []
         agents: list[dict[str, str]] = []
 
-        # 遍历 .json 文件
+        # 遍历 .yaml 文件
         for filename in sorted(os.listdir(agents_dir)):
-            if not filename.lower().endswith(".json"):
+            if not filename.lower().endswith((".yaml", ".yml")):
                 continue
 
-            json_path = os.path.join(agents_dir, filename)
+            yaml_path = os.path.join(agents_dir, filename)
             try:
-                with open(json_path, "r", encoding="utf-8") as f:
-                    metadata = json.load(f)
+                with open(yaml_path, "r", encoding="utf-8-sig") as f:
+                    metadata = yaml.safe_load(f)
+                if not isinstance(metadata, dict):
+                    continue
                 # 确保 name 字段存在（从文件名推断）
                 if "name" not in metadata:
                     base_name = os.path.splitext(filename)[0]
                     metadata["name"] = base_name
                 metadata["file"] = filename
                 agents.append(metadata)
-            except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            except (OSError, UnicodeDecodeError, yaml.YAMLError):
                 continue
 
         return agents
@@ -301,21 +309,19 @@ class SimpleAgent:
         injections = []
         for agent in agents:
             agent_name = agent.get("name", "")
-            # 获取 forbidden_agents（JSON 中是 list 类型）
-            forbidden = agent.get("forbidden_agents", [])
+            # forbidden_agents from YAML metadata
+            forbidden = agent.get("forbidden_agents", "")
 
-            # 兼容处理：如果是字符串，解析为列表
+            # normalize to list
             forbidden_list = []
             if isinstance(forbidden, list):
                 forbidden_list = forbidden
             elif isinstance(forbidden, str):
-                # 解析 YAML 列表格式: [a, b, c]
                 forbidden = forbidden.strip()
                 if forbidden.startswith("[") and forbidden.endswith("]"):
                     items = forbidden[1:-1].split(",")
                     forbidden_list = [item.strip().strip("'").strip('"') for item in items if item.strip()]
                 else:
-                    # 单个值
                     forbidden_list = [forbidden.strip().strip("'").strip('"')]
 
             # 检查当前 agent_name 是否在该 agent 的 forbidden_agents 中
@@ -376,7 +382,7 @@ class SimpleAgent:
 
         # 查找匹配的 .md 文件（支持 file-edit.md 或 file_edit.md）
         for filename in os.listdir(agents_dir):
-            # 只处理 .md 文件，跳过 .json 文件
+            # 只处理 .md 文件，跳过 .yaml 文件
             if not filename.lower().endswith(".md"):
                 continue
 

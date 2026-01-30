@@ -1270,8 +1270,8 @@ def _parse_hint_command(command: str) -> tuple[dict, Optional[str]]:
 
 
 def _get_hints_root() -> Path:
-    root = _find_project_root(os.getcwd())
-    return root / "hints"
+    project_root = Path(__file__).resolve().parents[2]
+    return project_root / "hints"
 
 
 def _collect_hint_modules(name: str) -> list[Path]:
@@ -1296,11 +1296,11 @@ def _execute_builtin_hint(args: dict) -> _ExecResult:
         hints_root = _get_hints_root()
         prompt_path = hints_root / str(name) / "hint.md"
         if not prompt_path.exists():
-            return _ExecResult("", f"hint 提示词不存在: {prompt_path}", 1)
+            return _ExecResult("", "hint 提示词不存在", 1)
         try:
             content = prompt_path.read_text(encoding="utf-8").strip()
         except Exception as exc:
-            return _ExecResult("", f"读取 hint 提示词失败: {exc}", 1)
+            return _ExecResult("", "读取 hint 提示词失败", 1)
         if not content:
             return _ExecResult("", "hint 提示词为空", 1)
         _ACTIVE_HINT = str(name)

@@ -1,6 +1,0 @@
-{
-  "name": "git-commit",
-  "description": "自动化 Git 提交流程，包含智能文件过滤、.gitignore 生成、隐私安全检查",
-  "forbidden_agents": ["git-commit"],
-  "system_prompt_injection": "**【Git 操作规则】**\n\n  **【强制规则】Git 提交必须使用 git-commit 子 agent**\n  - ❌ 禁止：直接使用 `<ps_call>` 执行 `git commit` 命令\n  - ✅ 正确：使用 `<create_agent name=git-commit>任务描述</create_agent>`\n  - ✅ 允许：直接使用 `<ps_call>` 执行只读 Git 命令（git status、git log、git diff、git show）\n\n  **只读 Git 命令（允许直接使用）：**\n  <ps_call> git status </ps_call>\n  <ps_call> git log --oneline -10 </ps_call>\n  <ps_call> git diff </ps_call>\n  <ps_call> git show HEAD </ps_call>\n  <ps_call> git branch </ps_call>"
-}
