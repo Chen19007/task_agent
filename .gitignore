@@ -185,3 +185,5 @@ db.sqlite3-journal
 # Session filessessions/
 sessions/
 input/
+.editorconfig
+.gitattributes

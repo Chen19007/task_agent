@@ -96,6 +96,11 @@ _RUN_STATS = {
 _BACKGROUND_JOBS: dict[str, dict] = {}
 _ACTIVE_HINT: Optional[str] = None
 _ACTIVE_HINT_MODULES: list[Path] = []
+_AGENT_START_DIR = os.getcwd()
+
+
+def _ps_escape(text: str) -> str:
+    return text.replace("'", "''")
 
 
 def _find_project_root(start_dir: str) -> Path:
@@ -2003,14 +2008,22 @@ def _execute_command(command: str, timeout: int, config: Optional[Config] = None
     def build_import_prefix() -> str:
         if not _ACTIVE_HINT_MODULES:
             return ""
+        project_root = Path(__file__).resolve().parents[2]
+        start_dir = _ps_escape(_AGENT_START_DIR)
+        project_dir = _ps_escape(str(project_root))
+        env_prefix = (
+            f"$env:AGENT_START_DIR='{start_dir}'; "
+            f"$env:AGENT_PROJECT_DIR='{project_dir}'; "
+        )
         parts = []
         for module_path in _ACTIVE_HINT_MODULES:
-            path_text = str(module_path.resolve())
-            path_text = path_text.replace("'", "''")
-            parts.append(f"Import-Module '{path_text}'")
+            resolved_path = module_path.resolve()
+            path_text = _ps_escape(str(resolved_path))
+            module_dir = _ps_escape(str(resolved_path.parent))
+            parts.append(f"$env:HINT_MODULE_DIR='{module_dir}'; Import-Module '{path_text}'")
         if not parts:
             return ""
-        return "; ".join(parts) + "; "
+        return env_prefix + "; ".join(parts) + "; "
 
     import_prefix = build_import_prefix()
 
