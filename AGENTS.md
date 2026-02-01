@@ -36,3 +36,5 @@
 ## Agent-Specific Notes
 - The agent executes PowerShell on Windows and bash on other platforms.
 - Tool tags in LLM responses are parsed and executed; keep tag formats stable if edited.
+- 注意：已新增用于 Linux bash_call 的系统提示词与 hint 机制等上下文；修改 LLM 相关逻辑时请同步检查这些新增上下文。
+- 项目根目录新增 `TODO.md`，记录长期待办事项（非会话内 TODO）。
