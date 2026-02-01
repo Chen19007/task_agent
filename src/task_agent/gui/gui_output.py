@@ -83,13 +83,13 @@ class GUIOutput(OutputHandler):
                             self.chat_panel.add_text(block.content)
                             rendered += 1
                         continue
-                    if block.block_type in {"ps_call", "builtin", "create_agent"}:
+                    if block.block_type in {"ps_call", "bash_call", "builtin", "create_agent"}:
                         continue
                     if block.block_type == "return":
                         self.chat_panel.add_collapsible_block("[返回]", block.content, collapsed=True)
                         rendered += 1
                         continue
-                    if block.block_type == "ps_call_result":
+                    if block.block_type in {"ps_call_result", "bash_call_result"}:
                         self.chat_panel.add_collapsible_block("[命令结果]", block.content, collapsed=True)
                         rendered += 1
                         continue
@@ -156,7 +156,7 @@ class GUIOutput(OutputHandler):
                 self.chat_panel.add_collapsible_block("[返回]", block.content, collapsed=True)
                 rendered += 1
                 continue
-            if block.block_type == "ps_call":
+            if block.block_type in {"ps_call", "bash_call"}:
                 self.chat_panel.add_collapsible_block("[命令]", block.content, collapsed=False)
                 rendered += 1
                 continue
@@ -164,7 +164,7 @@ class GUIOutput(OutputHandler):
                 self.chat_panel.add_collapsible_block("[内置工具]", block.content, collapsed=False)
                 rendered += 1
                 continue
-            if block.block_type == "ps_call_result":
+            if block.block_type in {"ps_call_result", "bash_call_result"}:
                 self.chat_panel.add_collapsible_block("[命令结果]", block.content, collapsed=True)
                 rendered += 1
                 continue

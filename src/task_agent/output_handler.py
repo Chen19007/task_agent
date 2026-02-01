@@ -34,7 +34,7 @@ class OutputHandler(ABC):
 
     @abstractmethod
     def on_ps_call(self, command: str, index: int, depth_prefix: str) -> None:
-        """PowerShell 命令请求
+        """Shell 命令请求
 
         Args:
             command: 命令内容

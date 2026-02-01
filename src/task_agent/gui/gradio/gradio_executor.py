@@ -10,6 +10,7 @@ from typing import Optional, List, Tuple, Generator
 from task_agent.gui.adapter import ExecutorAdapter
 from task_agent.agent import CommandSpec
 from task_agent.output_handler import OutputHandler
+from task_agent.platform_utils import get_shell_result_tag
 
 
 class GradioExecutor:
@@ -127,17 +128,20 @@ class GradioExecutor:
                         message = "\u547d\u4ee4\u6267\u884c\u6210\u529f\uff08\u65e0\u8f93\u51fa\uff09"
                 else:
                     message = f"\u547d\u4ee4\u6267\u884c\u5931\u8d25\uff08\u9000\u51fa\u7801: {cmd_result.returncode}\uff09\uff1a\n{cmd_result.stderr}"
-                result_msg = f'<ps_call_result id="executed">\n{message}\n</ps_call_result>'
+                result_tag = get_shell_result_tag()
+                result_msg = f'<{result_tag} id="executed">\n{message}\n</{result_tag}>'
             else:  # rejected
                 message = "\u7528\u6237\u53d6\u6d88\u4e86\u547d\u4ee4\u6267\u884c"
-                result_msg = f'<ps_call_result id="rejected">\n{message}\n</ps_call_result>'
+                result_tag = get_shell_result_tag()
+                result_msg = f'<{result_tag} id="rejected">\n{message}\n</{result_tag}>'
 
             if self.adapter.executor.current_agent:
                 self.adapter.executor.current_agent._add_message("user", result_msg)
         except Exception as e:
             error_msg = f"\u547d\u4ee4\u6267\u884c\u5f02\u5e38\uff1a{e}"
             if self.adapter.executor.current_agent:
-                self.adapter.executor.current_agent._add_message("user", f'<ps_call_result id="executed">\n{error_msg}\n</ps_call_result>')
+                result_tag = get_shell_result_tag()
+                self.adapter.executor.current_agent._add_message("user", f'<{result_tag} id="executed">\n{error_msg}\n</{result_tag}>')
 
     def confirm_command(self, command_index: int, action: str, user_input: str = ""):
         """\u786e\u8ba4\u5e76\u6267\u884c\u547d\u4ee4"""
@@ -172,13 +176,15 @@ class GradioExecutor:
                             message = "\u547d\u4ee4\u6267\u884c\u6210\u529f\uff08\u65e0\u8f93\u51fa\uff09"
                     else:
                         message = f"\u547d\u4ee4\u6267\u884c\u5931\u8d25\uff08\u9000\u51fa\u7801: {cmd_result.returncode}\uff09\uff1a\n{cmd_result.stderr}"
-                    result_msg = f'<ps_call_result id="executed">\n{message}\n</ps_call_result>'
+                    result_tag = get_shell_result_tag()
+                    result_msg = f'<{result_tag} id="executed">\n{message}\n</{result_tag}>'
                 else:  # rejected
                     if user_input:
                         message = f"\u7528\u6237\u5efa\u8bae\uff1a{user_input}"
                     else:
                         message = "\u7528\u6237\u53d6\u6d88\u4e86\u547d\u4ee4\u6267\u884c"
-                    result_msg = f'<ps_call_result id="rejected">\n{message}\n</ps_call_result>'
+                    result_tag = get_shell_result_tag()
+                    result_msg = f'<{result_tag} id="rejected">\n{message}\n</{result_tag}>'
 
                 if self.adapter.executor.current_agent:
                     self.adapter.executor.current_agent._add_message("user", result_msg)
@@ -187,7 +193,8 @@ class GradioExecutor:
             except Exception as e:
                 error_msg = f"\u547d\u4ee4\u6267\u884c\u5f02\u5e38\uff1a{e}"
                 if self.adapter.executor.current_agent:
-                    self.adapter.executor.current_agent._add_message("user", f'<ps_call_result id="executed">\n{error_msg}\n</ps_call_result>')
+                    result_tag = get_shell_result_tag()
+                    self.adapter.executor.current_agent._add_message("user", f'<{result_tag} id="executed">\n{error_msg}\n</{result_tag}>')
                 self._continue_execution()
 
         threading.Thread(target=execute, daemon=True).start()

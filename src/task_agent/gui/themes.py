@@ -15,6 +15,8 @@ class ThemeColors:
     # Tool Tag 颜色
     PS_CALL_TEXT = (255, 200, 100)
     PS_CALL_BG = (80, 40, 40)
+    BASH_CALL_TEXT = (255, 200, 100)
+    BASH_CALL_BG = (80, 40, 40)
 
     BUILTIN_TEXT = (255, 200, 100)
 
@@ -26,6 +28,8 @@ class ThemeColors:
 
     PS_CALL_RESULT_TEXT = (200, 200, 200)
     PS_CALL_RESULT_BG = (50, 50, 70)
+    BASH_CALL_RESULT_TEXT = (200, 200, 200)
+    BASH_CALL_RESULT_BG = (50, 50, 70)
 
     # 界面颜色
     WINDOW_BG = (30, 30, 35)
@@ -44,10 +48,12 @@ class ThemeColors:
         """根据标签类型返回颜色"""
         color_map = {
             "ps_call": cls.PS_CALL_TEXT,
+            "bash_call": cls.BASH_CALL_TEXT,
             "builtin": cls.BUILTIN_TEXT,
             "create_agent": cls.CREATE_AGENT_TEXT,
             "think": cls.THINK_TEXT,
             "ps_call_result": cls.PS_CALL_RESULT_TEXT,
+            "bash_call_result": cls.BASH_CALL_RESULT_TEXT,
         }
         return color_map.get(tag_type, cls.USER_TEXT)
 

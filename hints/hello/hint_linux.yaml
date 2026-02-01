@@ -1,0 +1,5 @@
+name: "hello"
+description: "返回当前 Linux 用户名的 hello 消息，并可打印环境变量上下文。"
+system_prompt_injection: |
+  这个 hint 用于验证 hint 加载与 bash_call 流程。
+  你可以调用 print_context 查看注入的路径上下文。

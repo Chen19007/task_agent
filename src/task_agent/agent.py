@@ -8,6 +8,7 @@ import time
 import uuid
 import os
 import yaml
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Generator, Optional, Any, Callable
 from enum import Enum
@@ -15,6 +16,8 @@ from enum import Enum
 from .config import Config
 from .llm import create_client, ChatMessage
 from .output_handler import OutputHandler, NullOutputHandler
+from .platform_utils import get_hint_platform_suffix, get_shell_tool_name
+from .hint_utils import select_hint_file
 
 
 class Action(Enum):
@@ -38,13 +41,13 @@ class StepResult:
 class CommandSpec:
     """命令规格，携带上下文信息。"""
     command: str
-    tool: str = "ps_call"
+    tool: str = field(default_factory=get_shell_tool_name)
     background: bool = False
     timeout: Optional[int] = None
 
     def display(self) -> str:
         """命令显示文本"""
-        if self.tool == "ps_call" and self.background:
+        if self.tool in {"ps_call", "bash_call"} and self.background:
             return f"{self.command} (后台)"
         return self.command
 
@@ -211,7 +214,9 @@ class SimpleAgent:
             if name.startswith("."):
                 continue
 
-            meta_path = os.path.join(hint_dir, "hint.yaml")
+            meta_path = select_hint_file(Path(hint_dir), ".yaml")
+            if not meta_path:
+                continue
             try:
                 with open(meta_path, "r", encoding="utf-8-sig") as handle:
                     metadata = yaml.safe_load(handle)
@@ -292,12 +297,18 @@ class SimpleAgent:
             # 如果模板目录不存在，返回默认模板（向后兼容）
             return ""
 
-        template_path = os.path.join(templates_dir, "system_prompt.txt")
-        try:
-            with open(template_path, "r", encoding="utf-8") as f:
-                return f.read()
-        except (OSError, UnicodeDecodeError):
-            return ""
+        platform_suffix = get_hint_platform_suffix()
+        candidates = [
+            os.path.join(templates_dir, f"system_prompt_{platform_suffix}.txt"),
+            os.path.join(templates_dir, "system_prompt.txt"),
+        ]
+        for template_path in candidates:
+            try:
+                with open(template_path, "r", encoding="utf-8") as f:
+                    return f.read()
+            except (OSError, UnicodeDecodeError):
+                continue
+        return ""
 
     def _format_predefined_agent_section(self, agents: list[dict[str, str]]) -> str:
         """格式化预定义 agent 部分，注入 system_prompt_injection
@@ -781,7 +792,7 @@ class SimpleAgent:
 
     def _filter_action_blocks(self, response: str) -> tuple[str, bool]:
         """Keep only tool tags when present to avoid mixed output."""
-        pattern = r"<ps_call\b[^>]*>.*?</ps_call>|<builtin\b[^>]*>.*?</builtin>|<create_agent(?:\s+name=(\S+?))?\s*>.*?</create_agent>"
+        pattern = r"<(ps_call|bash_call)\b[^>]*>.*?</\1>|<builtin\b[^>]*>.*?</builtin>|<create_agent(?:\s+name=(\S+?))?\s*>.*?</create_agent>"
         matches = list(re.finditer(pattern, response, re.DOTALL | re.IGNORECASE))
         if not matches:
             return response, False
@@ -790,7 +801,7 @@ class SimpleAgent:
 
     def _has_action_tags(self, response: str) -> bool:
         """检查是否有操作标签"""
-        return bool(re.search(r'<(ps_call|builtin|create_agent|return)\b', response, re.IGNORECASE))
+        return bool(re.search(r'<(ps_call|bash_call|builtin|create_agent|return)\b', response, re.IGNORECASE))
 
     def _is_completed(self, response: str) -> bool:
         """检查是否完成"""
@@ -858,14 +869,14 @@ class SimpleAgent:
         command_blocks = []
 
         # 执行PowerShell命令与内置工具
-        for match in re.finditer(r'<(ps_call|builtin)([^>]*)>\s*(.+?)\s*</\1>', response, re.DOTALL | re.IGNORECASE):
+        for match in re.finditer(r'<(ps_call|bash_call|builtin)([^>]*)>\s*(.+?)\s*</\1>', response, re.DOTALL | re.IGNORECASE):
             tag_name = match.group(1).lower()
             raw_attrs = match.group(2)
             command = match.group(3).strip()
             attrs = self._parse_tag_attributes(raw_attrs)
-            background = self._parse_bool_attr(attrs.get("background")) if tag_name == "ps_call" else False
-            timeout = self._parse_int_attr(attrs.get("timeout")) if tag_name == "ps_call" else None
-            if tag_name == "ps_call" and timeout is None:
+            background = self._parse_bool_attr(attrs.get("background")) if tag_name in {"ps_call", "bash_call"} else False
+            timeout = self._parse_int_attr(attrs.get("timeout")) if tag_name in {"ps_call", "bash_call"} else None
+            if tag_name in {"ps_call", "bash_call"} and timeout is None:
                 timeout = 10
             if tag_name == "builtin":
                 command = self._normalize_builtin_command(command)
@@ -915,14 +926,14 @@ class SimpleAgent:
         command_blocks = []
 
         # 执行PowerShell命令与内置工具
-        for match in re.finditer(r'<(ps_call|builtin)([^>]*)>\s*(.+?)\s*</\1>', response, re.DOTALL | re.IGNORECASE):
+        for match in re.finditer(r'<(ps_call|bash_call|builtin)([^>]*)>\s*(.+?)\s*</\1>', response, re.DOTALL | re.IGNORECASE):
             tag_name = match.group(1).lower()
             raw_attrs = match.group(2)
             command = match.group(3).strip()
             attrs = self._parse_tag_attributes(raw_attrs)
-            background = self._parse_bool_attr(attrs.get("background")) if tag_name == "ps_call" else False
-            timeout = self._parse_int_attr(attrs.get("timeout")) if tag_name == "ps_call" else None
-            if tag_name == "ps_call" and timeout is None:
+            background = self._parse_bool_attr(attrs.get("background")) if tag_name in {"ps_call", "bash_call"} else False
+            timeout = self._parse_int_attr(attrs.get("timeout")) if tag_name in {"ps_call", "bash_call"} else None
+            if tag_name in {"ps_call", "bash_call"} and timeout is None:
                 timeout = 10
             if tag_name == "builtin":
                 command = self._normalize_builtin_command(command)
@@ -964,10 +975,10 @@ class SimpleAgent:
         return outputs, commands, command_blocks
 
     def _strip_trailing_after_ps_call(self, response: str) -> str:
-        """当包含 ps_call 或 builtin 时，去掉最后一个工具标签之后的文本，防止无回执的结果输出"""
-        if not re.search(r'<(ps_call|builtin)\b', response, re.IGNORECASE):
+        """当包含 shell_call 或 builtin 时，去掉最后一个工具标签之后的文本，防止无回执的结果输出"""
+        if not re.search(r'<(ps_call|bash_call|builtin)\b', response, re.IGNORECASE):
             return response
-        matches = list(re.finditer(r'</(ps_call|builtin)>', response, re.IGNORECASE))
+        matches = list(re.finditer(r'</(ps_call|bash_call|builtin)>', response, re.IGNORECASE))
         if not matches:
             return response
         last_end = matches[-1].end()
@@ -1011,7 +1022,7 @@ class Executor:
             output_handler: 输出处理器（可选）
             command_confirm_callback: 命令确认回调函数（可选）
                 输入: command (str)
-                输出: result_message (str) 格式: '<ps_call_result id="executed">...</ps_call_result>'
+                输出: result_message (str) 格式: '<shell_call_result id="executed">...</shell_call_result>'
         """
         self.config = config or Config.from_env()
         self.max_depth = max_depth
@@ -1058,7 +1069,7 @@ class Executor:
         Args:
             callback: 命令确认回调函数
                 输入: command (str)
-                输出: result_message (str) 格式: '<ps_call_result id="executed">...</ps_call_result>'
+                输出: result_message (str) 格式: '<shell_call_result id="executed">...</shell_call_result>'
         """
         self._command_confirm_callback = callback
 

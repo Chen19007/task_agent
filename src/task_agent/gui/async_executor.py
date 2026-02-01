@@ -10,6 +10,7 @@ from typing import Callable, Optional
 
 from ..agent import StepResult, CommandSpec
 from ..safety import is_safe_command
+from ..platform_utils import get_shell_result_tag
 from .adapter import ExecutorAdapter
 
 
@@ -153,6 +154,7 @@ class AsyncExecutor:
                 )
 
                 # 构建结果消息
+                result_tag = get_shell_result_tag()
                 if action == "executed":
                     if cmd_result.returncode == 0:
                         if cmd_result.stdout:
@@ -161,13 +163,13 @@ class AsyncExecutor:
                             message = "命令执行成功（无输出）"
                     else:
                         message = f"命令执行失败（退出码: {cmd_result.returncode}）：\n{cmd_result.stderr}"
-                    result_msg = f'<ps_call_result id="executed">\n{message}\n</ps_call_result>'
+                    result_msg = f'<{result_tag} id="executed">\n{message}\n</{result_tag}>'
                 else:  # rejected
                     if user_input:
                         message = f"用户建议：{user_input}"
                     else:
                         message = "用户取消了命令执行"
-                    result_msg = f'<ps_call_result id="rejected">\n{message}\n</ps_call_result>'
+                    result_msg = f'<{result_tag} id="rejected">\n{message}\n</{result_tag}>'
 
                 self._emit_command_result(message, action)
 
@@ -181,7 +183,8 @@ class AsyncExecutor:
             except Exception as e:
                 error_msg = f"命令执行异常：{str(e)}"
                 if self.adapter.executor.current_agent:
-                    self.adapter.executor.current_agent._add_message("user", f'<ps_call_result id="executed">\n{error_msg}\n</ps_call_result>')
+                    result_tag = get_shell_result_tag()
+                    self.adapter.executor.current_agent._add_message("user", f'<{result_tag} id="executed">\n{error_msg}\n</{result_tag}>')
                 self._continue_execution()
 
         thread = threading.Thread(target=execute, daemon=True)
@@ -338,7 +341,8 @@ class AsyncExecutor:
             else:
                 message = f"\u547d\u4ee4\u6267\u884c\u5931\u8d25\uff08\u9000\u51fa\u7801: {cmd_result.returncode}\uff09\uff1a\n{cmd_result.stderr}"
 
-            result_msg = f'<ps_call_result id="executed">\n{message}\n</ps_call_result>'
+            result_tag = get_shell_result_tag()
+            result_msg = f'<{result_tag} id="executed">\n{message}\n</{result_tag}>'
 
             self._emit_command_result(message, "executed")
 
@@ -348,7 +352,8 @@ class AsyncExecutor:
         except Exception as e:
             error_msg = f"\u547d\u4ee4\u6267\u884c\u5f02\u5e38\uff1a{e}"
             if self.adapter.executor.current_agent:
-                self.adapter.executor.current_agent._add_message("user", f'<ps_call_result id="executed">\n{error_msg}\n</ps_call_result>')
+                result_tag = get_shell_result_tag()
+                self.adapter.executor.current_agent._add_message("user", f'<{result_tag} id="executed">\n{error_msg}\n</{result_tag}>')
 
     def _emit_command_result(self, message: str, status: str):
         """直接向 GUI 输出命令结果"""

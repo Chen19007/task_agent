@@ -13,7 +13,7 @@ class MessageBlock:
     """消息块
 
     Attributes:
-        block_type: 块类型 ('text', 'ps_call', 'create_agent', 'think', 'ps_call_result', 'return')
+        block_type: 块类型 ('text', 'ps_call', 'bash_call', 'create_agent', 'think', 'ps_call_result', 'bash_call_result', 'return')
         content: 块内容
         collapsible: 是否可折叠（tool tags=True, text=False）
     """
@@ -35,9 +35,11 @@ class MessageParser:
     TOOL_TAG_PATTERNS = {
         "return": (r"<return>\s*([\s\S]*?)\s*</return>", True),
         "ps_call": (r"<ps_call\b[^>]*>\s*([\s\S]*?)\s*</ps_call>", True),
+        "bash_call": (r"<bash_call\b[^>]*>\s*([\s\S]*?)\s*</bash_call>", True),
         "builtin": (r"<builtin\b[^>]*>\s*([\s\S]*?)\s*</builtin>", True),
         "create_agent": (r"<create_agent(?:\s+name=(\S+?))?\s*([\s\S]*?)</create_agent>", True),
         "ps_call_result": (r"<ps_call_result[^>]*>\s*([\s\S]*?)\s*</ps_call_result>", True),
+        "bash_call_result": (r"<bash_call_result[^>]*>\s*([\s\S]*?)\s*</bash_call_result>", True),
     }
 
     def __init__(self):

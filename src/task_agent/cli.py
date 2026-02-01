@@ -24,6 +24,8 @@ from .llm import create_client, ChatMessage
 from .output_handler import NullOutputHandler
 from .session import SessionManager
 from .safety import is_safe_command
+from .platform_utils import get_shell_result_tag, is_windows
+from .hint_utils import select_hint_file
 
 # 自定义主题
 custom_theme = Theme(
@@ -38,10 +40,16 @@ custom_theme = Theme(
     }
 )
 
-import msvcrt
+try:
+    import msvcrt
+except ImportError:  # 非 Windows 环境
+    msvcrt = None
+
 
 def _clear_input_buffer():
     """清空 stdin 中的残留输入（Windows）"""
+    if not msvcrt:
+        return
     while msvcrt.kbhit():
         msvcrt.getch()
 
@@ -189,7 +197,16 @@ def _print_run_stats(console: Console) -> None:
     )
 
 
-def _extract_direct_ps_call(text: str) -> Optional[str]:
+def _format_shell_result(status: str, message: str) -> str:
+    tag = get_shell_result_tag()
+    return f'<{tag} id="{status}">\n{message}\n</{tag}>'
+
+
+def _contains_shell_result_tag(content: str) -> bool:
+    return bool(re.search(r"<(ps_call_result|bash_call_result)\b", content, re.IGNORECASE))
+
+
+def _extract_direct_shell_call(text: str) -> Optional[str]:
     stripped = text.lstrip()
     if not stripped.startswith(":"):
         return None
@@ -197,7 +214,7 @@ def _extract_direct_ps_call(text: str) -> Optional[str]:
     return command or None
 
 
-def _execute_direct_ps_call(command: str, console: Console, timeout: int) -> None:
+def _execute_direct_shell_call(command: str, console: Console, timeout: int) -> None:
     cmd_result = _execute_command(command, timeout)
     if cmd_result.returncode == 0:
         if cmd_result.stdout:
@@ -363,7 +380,7 @@ def print_help():
   - 统一逻辑，无父子区别
   - 深度优先执行，自动聚合结果
   - 最大支持4层深度（最多16个子Agent）
-  - 使用 <ps_call> 执行命令
+  - Windows 使用 <ps_call> 执行命令，Linux 使用 <bash_call>
   - 使用 <builtin> 调用内置工具（read_file/smart_edit）
   - 使用 <create_agent> 创建子Agent
   - 使用 <return> 标记任务完成
@@ -425,9 +442,9 @@ def main():
     console.print(f"[info]模型：{config.model} | 超时：{args.timeout}s[/info]\n")
 
     if args.task:
-        direct_command = _extract_direct_ps_call(args.task)
+        direct_command = _extract_direct_shell_call(args.task)
         if direct_command:
-            _execute_direct_ps_call(direct_command, console, args.timeout)
+            _execute_direct_shell_call(direct_command, console, args.timeout)
             return
         _run_single_task(config, args.task)
         return
@@ -619,9 +636,9 @@ def main():
                 console.print("[error]未知命令。可用命令: /list, /list-snapshot <id>, /new, /resume <id>, /rollback <id> <snapshot>, /compact, /auto, /exit[/error]\n")
                 continue
 
-            direct_command = _extract_direct_ps_call(task)
+            direct_command = _extract_direct_shell_call(task)
             if direct_command:
-                _execute_direct_ps_call(direct_command, console, args.timeout)
+                _execute_direct_shell_call(direct_command, console, args.timeout)
                 continue
 
             # 解析 @ 文件引用
@@ -790,9 +807,9 @@ def _run_single_task(config: Config, task: str, executor: 'Executor' = None, ses
             for error in errors:
                 console.print(error)
 
-        direct_command = _extract_direct_ps_call(user_input)
+        direct_command = _extract_direct_shell_call(user_input)
         if direct_command:
-            _execute_direct_ps_call(direct_command, console, args.timeout)
+            _execute_direct_shell_call(direct_command, console, args.timeout)
             waiting_for_user_input = False
             continue
 
@@ -839,7 +856,7 @@ def _create_cli_command_confirm_callback(executor: 'Executor', console: Console)
             command: 待执行的命令
 
         Returns:
-            命令结果消息，格式: '<ps_call_result id="executed">...</ps_call_result>'
+            命令结果消息，格式: '<shell_call_result id="executed">...</shell_call_result>'
         """
         # 检查是否自动执行
         current_dir = os.getcwd()
@@ -866,7 +883,7 @@ def _create_cli_command_confirm_callback(executor: 'Executor', console: Console)
 
             console.print(f"[dim]{result_msg}[/dim]\n")
             _update_smart_edit_stats(command, "executed", result_msg)
-            return f'<ps_call_result id="executed">\n{result_msg}\n</ps_call_result>'
+            return _format_shell_result("executed", result_msg)
 
         # 等待用户确认
         _clear_input_buffer()
@@ -900,18 +917,18 @@ def _create_cli_command_confirm_callback(executor: 'Executor', console: Console)
 
             console.print(f"\n[info]{result_msg}[/info]\n")
             _update_smart_edit_stats(command, "executed", result_msg)
-            return f'<ps_call_result id="executed">\n{result_msg}\n</ps_call_result>'
+            return _format_shell_result("executed", result_msg)
 
         elif confirm_lower == "c":
             console.print("[info]命令已取消[/info]\n")
             _update_smart_edit_stats(command, "rejected")
-            return '<ps_call_result id="rejected">\n用户取消了命令执行\n</ps_call_result>'
+            return _format_shell_result("rejected", "用户取消了命令执行")
 
         else:
             # 用户输入修改建议
             console.print("[info]已将您的建议发送给 Agent[/info]\n")
             _update_smart_edit_stats(command, "rejected")
-            return f'<ps_call_result id="rejected">\n用户建议：{confirm}\n</ps_call_result>'
+            return _format_shell_result("rejected", f"用户建议：{confirm}")
 
     return confirm_callback
 
@@ -965,7 +982,7 @@ def _handle_pending_commands(executor: 'Executor', console: Console, result: 'St
             console.print(f"[dim]{result_msg}[/dim]\n")
 
             if executor.current_agent:
-                executor.current_agent._add_message("user", f'<ps_call_result id="executed">\n{result_msg}\n</ps_call_result>')
+                executor.current_agent._add_message("user", _format_shell_result("executed", result_msg))
             _update_smart_edit_stats(command, "executed", result_msg)
         else:
             # 等待用户确认
@@ -1002,7 +1019,7 @@ def _handle_pending_commands(executor: 'Executor', console: Console, result: 'St
                 console.print(f"\n[info]{result_msg}[/info]\n")
 
                 if executor.current_agent:
-                    executor.current_agent._add_message("user", f'<ps_call_result id="executed">\n{result_msg}\n</ps_call_result>')
+                    executor.current_agent._add_message("user", _format_shell_result("executed", result_msg))
                 _update_smart_edit_stats(command, "executed", result_msg)
 
             elif confirm_lower == "c":
@@ -1010,13 +1027,13 @@ def _handle_pending_commands(executor: 'Executor', console: Console, result: 'St
                 _update_smart_edit_stats(command, "rejected")
                 # 发送取消消息给当前Agent
                 if executor.current_agent:
-                    executor.current_agent._add_message("user", f'<ps_call_result id="rejected">\n用户取消了命令执行\n</ps_call_result>')
+                    executor.current_agent._add_message("user", _format_shell_result("rejected", "用户取消了命令执行"))
             else:
                 # 用户输入修改建议
                 console.print("[info]已将您的建议发送给 Agent[/info]\n")
                 _update_smart_edit_stats(command, "rejected")
                 if executor.current_agent:
-                    executor.current_agent._add_message("user", f'<ps_call_result id="rejected">\n用户建议：{confirm}\n</ps_call_result>')
+                    executor.current_agent._add_message("user", _format_shell_result("rejected", f"用户建议：{confirm}"))
 
         processed_count += 1
 
@@ -1284,7 +1301,11 @@ def _collect_hint_modules(name: str) -> list[Path]:
     modules_dir = hints_root / name / "modules"
     if not modules_dir.exists() or not modules_dir.is_dir():
         return []
-    return sorted(modules_dir.glob("*.psm1"))
+    if is_windows():
+        modules = list(modules_dir.glob("*.psm1")) + list(modules_dir.glob("*.ps1"))
+    else:
+        modules = list(modules_dir.glob("*.sh"))
+    return sorted(modules)
 
 
 def _execute_builtin_hint(args: dict) -> _ExecResult:
@@ -1299,8 +1320,9 @@ def _execute_builtin_hint(args: dict) -> _ExecResult:
         if not name:
             return _ExecResult("", "hint load 需要参数: name", 1)
         hints_root = _get_hints_root()
-        prompt_path = hints_root / str(name) / "hint.md"
-        if not prompt_path.exists():
+        hint_dir = hints_root / str(name)
+        prompt_path = select_hint_file(hint_dir, ".md")
+        if not prompt_path or not prompt_path.exists():
             return _ExecResult("", "hint 提示词不存在", 1)
         try:
             content = prompt_path.read_text(encoding="utf-8").strip()
@@ -1618,7 +1640,7 @@ def _iter_snapshot_sequences(snapshot_data: dict) -> list[list[dict]]:
             content = (msg.get("content") or "").strip()
             if not content:
                 continue
-            if "<ps_call_result" in content:
+            if _contains_shell_result_tag(content):
                 continue
             messages.append({"role": role, "content": content})
         return messages
@@ -1668,7 +1690,7 @@ def _extract_context_tail(context_messages: list, count: int) -> str:
         if role not in ("user", "assistant"):
             continue
         content = (getattr(msg, "content", "") or "").strip()
-        if not content or "<ps_call_result" in content:
+        if not content or _contains_shell_result_tag(content):
             continue
         role_label = "用户" if role == "user" else "助手"
         kept.append(f"{role_label}: {content}")
@@ -2000,6 +2022,7 @@ def _execute_command(command: str, timeout: int, config: Optional[Config] = None
     """
     import subprocess
     import base64
+    import shlex
 
     builtin_result = _execute_builtin_tool(command, config, context_messages)
     if builtin_result is not None:
@@ -2025,30 +2048,90 @@ def _execute_command(command: str, timeout: int, config: Optional[Config] = None
             return ""
         return env_prefix + "; ".join(parts) + "; "
 
-    import_prefix = build_import_prefix()
+    if is_windows():
+        import_prefix = build_import_prefix()
 
-    # 设置 PowerShell 输出编码为 UTF-8，避免中文乱码
-    # Windows 中文系统默认输出是 GBK (CP936)，需要显式设置
-    if background:
-        prefixed_command = (
-            '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; '
-            '$PSDefaultParameterValues["Out-File:Encoding"] = "utf8"; '
-            '$ProgressPreference = "SilentlyContinue"; '
-            '$InformationPreference = "SilentlyContinue"; '
-            '$VerbosePreference = "SilentlyContinue"; '
-            '$WarningPreference = "SilentlyContinue"; '
-            f'{import_prefix}{command}'
-        )
-    else:
-        prefixed_command = (
-            '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; '
-            '$PSDefaultParameterValues["Out-File:Encoding"] = "utf8"; '
-            f'{import_prefix}{command}'
-        )
+        # 设置 PowerShell 输出编码为 UTF-8，避免中文乱码
+        # Windows 中文系统默认输出是 GBK (CP936)，需要显式设置
+        if background:
+            prefixed_command = (
+                '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; '
+                '$PSDefaultParameterValues["Out-File:Encoding"] = "utf8"; '
+                '$ProgressPreference = "SilentlyContinue"; '
+                '$InformationPreference = "SilentlyContinue"; '
+                '$VerbosePreference = "SilentlyContinue"; '
+                '$WarningPreference = "SilentlyContinue"; '
+                f'{import_prefix}{command}'
+            )
+        else:
+            prefixed_command = (
+                '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; '
+                '$PSDefaultParameterValues["Out-File:Encoding"] = "utf8"; '
+                f'{import_prefix}{command}'
+            )
 
-    # 使用 UTF-16 LE 编码并 Base64 编码命令，避免引号转义问题
-    encoded_command = base64.b64encode(prefixed_command.encode('utf-16-le')).decode('ascii')
-    full_cmd = f'powershell -EncodedCommand {encoded_command}'
+        # 使用 UTF-16 LE 编码并 Base64 编码命令，避免引号转义问题
+        encoded_command = base64.b64encode(prefixed_command.encode('utf-16-le')).decode('ascii')
+        full_cmd = f'powershell -EncodedCommand {encoded_command}'
+
+        try:
+            if background:
+                job_id = uuid.uuid4().hex[:8]
+                jobs_dir = _get_ps_jobs_dir()
+                log_path = jobs_dir / f"job_{job_id}.log"
+                log_handle = open(log_path, "ab")
+                process = subprocess.Popen(
+                    full_cmd, shell=True,
+                    stdout=log_handle,
+                    stderr=log_handle
+                )
+                log_handle.close()
+                _register_background_job(job_id, process, log_path)
+                rel_log = None
+                try:
+                    rel_log = log_path.relative_to(_find_project_root(os.getcwd()))
+                except ValueError:
+                    rel_log = log_path
+                result_msg = f"后台执行已启动\njob_id: {job_id}\nlog_path: {rel_log}"
+                return _ExecResult(stdout=result_msg, stderr="", returncode=0)
+
+            process = subprocess.run(
+                full_cmd, shell=True, capture_output=True,
+                timeout=timeout
+            )
+        except (subprocess.SubprocessError, OSError, FileNotFoundError) as e:
+            # 捕获命令执行异常（如命令行太长、文件未找到等）
+            # 创建一个错误结果对象
+            return _ExecResult(
+                stdout="",
+                stderr=str(e),
+                returncode=1
+            )
+
+        # 手动解码，处理编码错误
+        stdout = process.stdout.decode('utf-8', errors='replace')
+        stderr = process.stderr.decode('utf-8', errors='replace')
+        return _ExecResult(stdout, stderr, process.returncode)
+
+    def build_bash_prefix() -> str:
+        if not _ACTIVE_HINT_MODULES:
+            return ""
+        project_root = Path(__file__).resolve().parents[2]
+        start_dir = shlex.quote(_AGENT_START_DIR)
+        project_dir = shlex.quote(str(project_root))
+        parts = [
+            f"export AGENT_START_DIR={start_dir};",
+            f"export AGENT_PROJECT_DIR={project_dir};",
+        ]
+        for module_path in _ACTIVE_HINT_MODULES:
+            resolved_path = module_path.resolve()
+            module_dir = resolved_path.parent
+            parts.append(f"export HINT_MODULE_DIR={shlex.quote(str(module_dir))};")
+            parts.append(f"source {shlex.quote(str(resolved_path))};")
+        return " ".join(parts) + " "
+
+    import_prefix = build_bash_prefix()
+    prefixed_command = f"{import_prefix}{command}"
 
     try:
         if background:
@@ -2057,7 +2140,7 @@ def _execute_command(command: str, timeout: int, config: Optional[Config] = None
             log_path = jobs_dir / f"job_{job_id}.log"
             log_handle = open(log_path, "ab")
             process = subprocess.Popen(
-                full_cmd, shell=True,
+                ["bash", "-lc", prefixed_command],
                 stdout=log_handle,
                 stderr=log_handle
             )
@@ -2072,23 +2155,19 @@ def _execute_command(command: str, timeout: int, config: Optional[Config] = None
             return _ExecResult(stdout=result_msg, stderr="", returncode=0)
 
         process = subprocess.run(
-            full_cmd, shell=True, capture_output=True,
+            ["bash", "-lc", prefixed_command],
+            capture_output=True,
             timeout=timeout
         )
     except (subprocess.SubprocessError, OSError, FileNotFoundError) as e:
-        # 捕获命令执行异常（如命令行太长、文件未找到等）
-        # 创建一个错误结果对象
         return _ExecResult(
             stdout="",
             stderr=str(e),
             returncode=1
         )
 
-    # 手动解码，处理编码错误
     stdout = process.stdout.decode('utf-8', errors='replace')
     stderr = process.stderr.decode('utf-8', errors='replace')
-
-    # 创建一个类似 CompletedProcess 的对象
     return _ExecResult(stdout, stderr, process.returncode)
 
 
