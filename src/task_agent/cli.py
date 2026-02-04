@@ -8,6 +8,9 @@ import sys
 import time
 import atexit
 import uuid
+import shlex
+import subprocess
+import tempfile
 from pathlib import Path
 
 from typing import Optional
@@ -44,6 +47,10 @@ try:
     import msvcrt
 except ImportError:  # 非 Windows 环境
     msvcrt = None
+try:
+    import readline  # noqa: F401
+except Exception:
+    readline = None
 
 
 def _clear_input_buffer():
@@ -109,6 +116,52 @@ _AGENT_START_DIR = os.getcwd()
 
 def _ps_escape(text: str) -> str:
     return text.replace("'", "''")
+
+
+def _get_editor_command() -> list[str]:
+    editor = os.environ.get("VISUAL") or os.environ.get("EDITOR")
+    if editor:
+        try:
+            return shlex.split(editor)
+        except ValueError:
+            return [editor]
+    if is_windows():
+        try:
+            result = subprocess.run(
+                ["where", "notepad++"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                check=False,
+            )
+            if result.stdout.strip():
+                return ["notepad++"]
+        except Exception:
+            pass
+        return ["notepad"]
+    return ["vim"]
+
+
+def _open_external_editor(initial_text: str) -> Optional[str]:
+    editor_cmd = _get_editor_command()
+    tmp_file = None
+    try:
+        tmp_file = tempfile.NamedTemporaryFile(mode="w", delete=False, encoding="utf-8", suffix=".txt")
+        tmp_file.write(initial_text or "")
+        tmp_file.flush()
+        tmp_file.close()
+        subprocess.call(editor_cmd + [tmp_file.name])
+        with open(tmp_file.name, "r", encoding="utf-8") as handle:
+            return handle.read()
+    except Exception as exc:
+        console.print(f"[error]打开外部编辑器失败: {exc}[/error]")
+        return None
+    finally:
+        if tmp_file and tmp_file.name:
+            try:
+                os.unlink(tmp_file.name)
+            except OSError:
+                pass
 
 
 def _find_project_root(start_dir: str) -> Path:
@@ -349,6 +402,7 @@ def print_help():
     - /resume <id>- 恢复指定ID的会话
     - /rollback <id> <snapshot> - 回滚到指定会话快照点
     - /compact    - 压缩当前会话上下文
+    - /edit       - 打开外部编辑器输入（$VISUAL/$EDITOR）
     - /auto       - 切换自动同意
     - /exit       - 退出程序
 
@@ -359,6 +413,7 @@ def print_help():
     - /exit       - 终止当前任务
     - /list       - 查看会话列表
     - /compact    - 压缩当前会话上下文
+    - /edit       - 打开外部编辑器输入（$VISUAL/$EDITOR）
 
 [bold yellow]命令行参数：[/bold yellow]
   -m, --model   - 指定模型名称（默认：minimax-m2）
@@ -452,6 +507,9 @@ def main():
     # 交互模式
     session_manager = SessionManager()
     executor = Executor(config, session_manager=session_manager)  # 保持 Executor 实例，保留上下文
+    paste_mode = False
+    paste_lines: list[str] = []
+    paste_prompt_shown = False
 
     while True:
         try:
@@ -467,13 +525,52 @@ def main():
             # 显示当前会话状态
             auto_status = " | [success]自动同意: 启[/success]" if executor.auto_approve else ""
             hint_status = f" | 当前 hint: {_ACTIVE_HINT}" if _ACTIVE_HINT else ""
-            if session_manager.current_session_id:
-                console.print(f"[dim]当前会话 #{session_manager.current_session_id} | 输入任务继续，/new 新建，/list 列表，/auto 切换自动同意，/exit 退出{auto_status}{hint_status}[/dim]")
-            else:
-                console.print(f"[dim]临时会话 | 输入任务创建会话，/list 列表，/auto 切换自动同意，/exit 退出{auto_status}{hint_status}[/dim]")
+            if not paste_mode:
+                if session_manager.current_session_id:
+                    console.print(f"[dim]当前会话 #{session_manager.current_session_id} | 输入任务继续，/edit 外部编辑器，/new 新建，/list 列表，/auto 切换自动同意，/exit 退出{auto_status}{hint_status}[/dim]")
+                else:
+                    console.print(f"[dim]临时会话 | 输入任务创建会话，/edit 外部编辑器，/list 列表，/auto 切换自动同意，/exit 退出{auto_status}{hint_status}[/dim]")
+            elif not paste_prompt_shown:
+                paste_prompt_shown = True
 
             _clear_input_buffer()
-            task = console.input("[user]任务> [/user]")
+            if paste_mode:
+                task = input("")
+            else:
+                task = input("任务> ")
+
+            if paste_mode:
+                if task.lower() == "/send":
+                    if not paste_lines:
+                        console.print("[warning]粘贴内容为空，已忽略[/warning]")
+                        continue
+                    paste_mode = False
+                    task = "\n".join(paste_lines)
+                    paste_lines = []
+                    paste_prompt_shown = False
+                elif task.lower() == "/cancel":
+                    paste_mode = False
+                    paste_lines = []
+                    paste_prompt_shown = False
+                    console.print("[info]已取消粘贴[/info]")
+                    continue
+                else:
+                    paste_lines.append(task)
+                    continue
+            elif task.lower() == "/paste":
+                paste_mode = True
+                paste_lines = []
+                paste_prompt_shown = False
+                console.print("[info]粘贴模式：/send 发送，/cancel 取消[/info]")
+                continue
+            elif task.lower() == "/edit":
+                editor_text = _open_external_editor("")
+                if editor_text is None:
+                    continue
+                if not editor_text.strip():
+                    console.print("[warning]编辑内容为空，已忽略[/warning]")
+                    continue
+                task = editor_text
 
             if not task:
                 continue
@@ -734,17 +831,59 @@ def _run_single_task(config: Config, task: str, executor: 'Executor' = None, ses
     while waiting_for_user_input and executor.current_agent:
         console.print("\n" + "=" * 60)
         console.print("[bold yellow]Agent 等待您的回复[/bold yellow]")
-        console.print("[dim]输入内容后按空行结束（/exit 退出，/list 查看会话，/compact 压缩上下文）[/dim]")
+        console.print("[dim]输入内容后按空行结束（/exit 退出，/list 查看会话，/compact 压缩上下文，/edit 外部编辑器）[/dim]")
         if _ACTIVE_HINT:
             console.print(f"[dim]当前 hint: {_ACTIVE_HINT}[/dim]")
         console.print("=" * 60 + "\n")
 
         lines = []
+        submitted = False
 
         while True:
             try:
                 _clear_input_buffer()
-                line = console.input("[info]> [/info]")
+                if paste_mode:
+                    if not paste_prompt_shown:
+                        paste_prompt_shown = True
+                    line = input("")
+                else:
+                    line = input("> ")
+
+                if paste_mode:
+                    if line.lower() == "/send":
+                        if not paste_lines:
+                            console.print("[warning]粘贴内容为空，已忽略[/warning]")
+                            continue
+                        paste_mode = False
+                        lines = paste_lines[:]
+                        paste_lines = []
+                        paste_prompt_shown = False
+                        submitted = True
+                        break
+                    if line.lower() == "/cancel":
+                        paste_mode = False
+                        paste_lines = []
+                        paste_prompt_shown = False
+                        console.print("[info]已取消粘贴[/info]")
+                        continue
+                    paste_lines.append(line)
+                    continue
+                if line.lower() == "/paste":
+                    paste_mode = True
+                    paste_lines = []
+                    paste_prompt_shown = False
+                    console.print("[info]粘贴模式：/send 发送，/cancel 取消[/info]")
+                    continue
+                if line.lower() == "/edit":
+                    editor_text = _open_external_editor("")
+                    if editor_text is None:
+                        continue
+                    if not editor_text.strip():
+                        console.print("[warning]编辑内容为空，已忽略[/warning]")
+                        continue
+                    lines = editor_text.splitlines()
+                    submitted = True
+                    break
 
                 if line.lower() == "/exit":
                     _print_run_stats(console)
@@ -775,10 +914,6 @@ def _run_single_task(config: Config, task: str, executor: 'Executor' = None, ses
                         continue  # 继续等待输入
 
                 if not line:  # 空行，结束输入
-                    # 清空当前行的提示信息
-                    sys.stdout.write("\r" + " " * 50 + "\r")
-                    sys.stdout.flush()
-                    console.print("[success]输入已接收，正在处理...[/success]\n", end="")
                     break
 
                 lines.append(line)
@@ -789,6 +924,12 @@ def _run_single_task(config: Config, task: str, executor: 'Executor' = None, ses
 
         if not waiting_for_user_input:
             break
+
+        if submitted or lines:
+            # 结束输入后的统一提示
+            sys.stdout.write("\r" + " " * 50 + "\r")
+            sys.stdout.flush()
+            console.print("[success]输入已接收，正在处理...[/success]\n", end="")
 
         user_input = "\n".join(lines)
 
