@@ -121,6 +121,18 @@ class SessionManager:
             current_data = None
             if executor.current_agent:
                 current_data = self._serialize_agent(executor.current_agent)
+
+            fs_snapshot_status = "skipped"
+            try:
+                ok, status = self._save_filesystem_snapshot(session_id, snapshot_index)
+                if not ok:
+                    fs_snapshot_status = "failed"
+                else:
+                    fs_snapshot_status = status
+            except Exception as e:
+                fs_snapshot_status = "failed"
+                print(f"[warning]保存目录快照失败: {e}[/warning]")
+
             data = {
                 "session_id": session_id,
                 "snapshot_index": snapshot_index,
@@ -130,16 +142,12 @@ class SessionManager:
                 "current_agent": current_data,
                 "auto_approve": getattr(executor, 'auto_approve', False),
                 "workspace_root": str(self._get_workspace_root(session_id)),
+                "fs_snapshot_status": fs_snapshot_status,
             }
             with open(snapshot_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
             self.current_session_id = session_id
             self.current_snapshot_index[session_id] = snapshot_index
-            # 保存工作目录快照（用于回滚）
-            try:
-                self._save_filesystem_snapshot(session_id, snapshot_index)
-            except Exception as e:
-                print(f"[warning]保存目录快照失败: {e}[/warning]")
             return True
         except Exception as e:
             print(f"[error]保存快照失败: {e}[/error]")
@@ -415,30 +423,17 @@ class SessionManager:
             print("[error]baseline 不存在，无法回滚[/error]")
             return False
 
-        snapshots_root = self._get_snapshots_root(session_id)
-        snapshot_dirs = {}
-        for path in snapshots_root.glob("snapshot_*"):
-            try:
-                index = int(path.name.split("_", 1)[1]) - 1
-            except (ValueError, IndexError):
-                continue
-            snapshot_dirs[index] = path
-
-        if snapshot_index not in snapshot_dirs:
-            print(f"[error]快照不存在: {snapshot_index}[/error]")
-            return False
-
-        missing = [i for i in range(0, snapshot_index + 1) if i not in snapshot_dirs]
-        if missing:
-            print(f"[error]回滚失败，缺少快照: {missing}[/error]")
+        if snapshot_index < 0:
+            print(f"[error]快照索引非法: {snapshot_index}[/error]")
             return False
 
         workspace_root = self._get_workspace_root(session_id)
         try:
             self._clear_workspace(workspace_root, exclude_roots=[self.session_dir])
             self._copy_workspace(baseline_dir, workspace_root)
-            for idx in range(0, snapshot_index + 1):
-                self._apply_snapshot_dir(snapshot_dirs[idx], workspace_root)
+            latest_index, latest_dir = self._get_latest_saved_snapshot_dir(session_id, snapshot_index)
+            if latest_dir is not None:
+                self._apply_snapshot_dir(latest_dir, workspace_root)
             self._trim_session_records(session_id, snapshot_index)
             return True
         except Exception as e:
@@ -648,16 +643,12 @@ class SessionManager:
             return True
         return self._file_hash(baseline_path) == self._file_hash(current_path)
 
-    def _save_filesystem_snapshot(self, session_id: int, snapshot_index: int) -> bool:
+    def _save_filesystem_snapshot(self, session_id: int, snapshot_index: int) -> tuple[bool, str]:
         baseline_dir = self._ensure_baseline(session_id)
         if not baseline_dir:
-            return False
+            return False, "failed"
 
         workspace_root = self._get_workspace_root(session_id)
-        snapshot_dir = self._get_snapshot_dir(session_id, snapshot_index)
-        if snapshot_dir.exists():
-            shutil.rmtree(snapshot_dir, ignore_errors=True)
-        snapshot_dir.mkdir(parents=True, exist_ok=True)
 
         baseline_files = {
             rel: abs_path for abs_path, rel in self._iter_files(baseline_dir)
@@ -666,23 +657,83 @@ class SessionManager:
             rel: abs_path for abs_path, rel in self._iter_files(workspace_root, exclude_roots=[self.session_dir])
         }
 
-        # 新增或修改文件
+        changed_files: list[tuple[Path, Path]] = []
         for rel_path, current_path in current_files.items():
             baseline_path = baseline_files.get(rel_path)
             if baseline_path is None or not self._files_are_equal(baseline_path, current_path):
-                dest_path = snapshot_dir / rel_path
-                dest_path.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(current_path, dest_path)
+                changed_files.append((rel_path, current_path))
 
-        # 删除标记文件
+        deleted_files: list[Path] = []
         for rel_path in baseline_files:
             if rel_path not in current_files:
-                marker_path = snapshot_dir / f"{rel_path}.___deleted___"
-                marker_path.parent.mkdir(parents=True, exist_ok=True)
-                with open(marker_path, "w", encoding="utf-8"):
-                    pass
+                deleted_files.append(rel_path)
 
-        return True
+        current_signature = self._build_snapshot_signature_from_changes(changed_files, deleted_files)
+        prev_signature = self._get_previous_snapshot_signature(session_id, snapshot_index)
+        if prev_signature is not None and current_signature == prev_signature:
+            return True, "skipped"
+        if prev_signature is None and not current_signature:
+            return True, "skipped"
 
+        snapshot_dir = self._get_snapshot_dir(session_id, snapshot_index)
+        if snapshot_dir.exists():
+            shutil.rmtree(snapshot_dir, ignore_errors=True)
+        snapshot_dir.mkdir(parents=True, exist_ok=True)
 
+        for rel_path, current_path in changed_files:
+            dest_path = snapshot_dir / rel_path
+            dest_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(current_path, dest_path)
 
+        for rel_path in deleted_files:
+            marker_path = snapshot_dir / f"{rel_path}.___deleted___"
+            marker_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(marker_path, "w", encoding="utf-8"):
+                pass
+
+        return True, "saved"
+
+    def _get_latest_saved_snapshot_dir(self, session_id: int, snapshot_index: int) -> tuple[Optional[int], Optional[Path]]:
+        snapshots_root = self._get_snapshots_root(session_id)
+        latest_index = None
+        latest_dir = None
+        for path in snapshots_root.glob("snapshot_*"):
+            try:
+                index = int(path.name.split("_", 1)[1]) - 1
+            except (ValueError, IndexError):
+                continue
+            if index > snapshot_index:
+                continue
+            if latest_index is None or index > latest_index:
+                latest_index = index
+                latest_dir = path
+        return latest_index, latest_dir
+
+    def _build_snapshot_signature_from_changes(
+        self,
+        changed_files: list[tuple[Path, Path]],
+        deleted_files: list[Path],
+    ) -> dict[str, str]:
+        signature: dict[str, str] = {}
+        for rel_path, current_path in changed_files:
+            signature[str(rel_path)] = self._file_hash(current_path)
+        for rel_path in deleted_files:
+            signature[f"{rel_path}.___deleted___"] = "DELETED"
+        return signature
+
+    def _build_snapshot_signature_from_dir(self, snapshot_dir: Path) -> dict[str, str]:
+        signature: dict[str, str] = {}
+        for abs_path, rel_path in self._iter_files(snapshot_dir):
+            if rel_path.name.endswith(".___deleted___"):
+                signature[str(rel_path)] = "DELETED"
+            else:
+                signature[str(rel_path)] = self._file_hash(abs_path)
+        return signature
+
+    def _get_previous_snapshot_signature(self, session_id: int, snapshot_index: int) -> Optional[dict[str, str]]:
+        if snapshot_index <= 0:
+            return None
+        prev_index, prev_dir = self._get_latest_saved_snapshot_dir(session_id, snapshot_index - 1)
+        if prev_dir is None:
+            return None
+        return self._build_snapshot_signature_from_dir(prev_dir)
