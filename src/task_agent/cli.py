@@ -150,7 +150,23 @@ def _open_external_editor(initial_text: str) -> Optional[str]:
         tmp_file.write(initial_text or "")
         tmp_file.flush()
         tmp_file.close()
-        subprocess.call(editor_cmd + [tmp_file.name])
+        if is_windows() and editor_cmd and "notepad++" in editor_cmd[0].lower():
+            cmd = [
+                "cmd",
+                "/c",
+                "start",
+                "/wait",
+                "",
+                editor_cmd[0],
+                *editor_cmd[1:],
+                "-multiInst",
+                "-nosession",
+                "-noPlugin",
+                tmp_file.name,
+            ]
+            subprocess.call(cmd)
+        else:
+            subprocess.call(editor_cmd + [tmp_file.name])
         with open(tmp_file.name, "r", encoding="utf-8") as handle:
             return handle.read()
     except Exception as exc:
