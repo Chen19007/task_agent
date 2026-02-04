@@ -430,8 +430,11 @@ class SessionManager:
         workspace_root = self._get_workspace_root(session_id)
         try:
             self._clear_workspace(workspace_root, exclude_roots=[self.session_dir])
-            self._copy_workspace(baseline_dir, workspace_root)
+            # baseline 目录位于 sessions 下，_copy_workspace 会排除 session_dir，
+            # 这里改用 _apply_snapshot_dir 以确保 baseline 能正确恢复到工作区
             latest_index, latest_dir = self._get_latest_saved_snapshot_dir(session_id, snapshot_index)
+            print(f"回滚信息：工作目录={workspace_root} | baseline={baseline_dir} | 快照目录={latest_dir or '无'}")
+            self._apply_snapshot_dir(baseline_dir, workspace_root)
             if latest_dir is not None:
                 self._apply_snapshot_dir(latest_dir, workspace_root)
             self._trim_session_records(session_id, snapshot_index)
@@ -441,6 +444,7 @@ class SessionManager:
             return False
 
     def _trim_session_records(self, session_id: int, snapshot_index: int) -> None:
+        snapshot_files_to_delete: list[Path] = []
         for snapshot_file in self.session_dir.glob(f"{session_id}.*.json"):
             try:
                 parts = snapshot_file.stem.split(".")
@@ -448,20 +452,59 @@ class SessionManager:
                     continue
                 index = int(parts[1])
                 if index > snapshot_index or (index == snapshot_index and "after" in parts[2:]):
-                    snapshot_file.unlink()
+                    snapshot_files_to_delete.append(snapshot_file)
             except (ValueError, OSError):
                 continue
 
         fs_root = self._get_session_fs_root(session_id)
         snapshots_root = self._get_snapshots_root(session_id)
+        fs_snapshots_to_delete: list[Path] = []
         if snapshots_root.exists():
             for path in snapshots_root.glob("snapshot_*"):
                 try:
-                    index = int(path.name.split("_", 1)[1]) - 1
+                    index = int(path.name.split("_", 1)[1])
                 except (ValueError, IndexError):
                     continue
                 if index > snapshot_index:
-                    shutil.rmtree(path, ignore_errors=True)
+                    fs_snapshots_to_delete.append(path)
+
+        if snapshot_files_to_delete or fs_snapshots_to_delete:
+            print(f"回滚清理：将清理快照索引 > {snapshot_index} 的记录")
+            if snapshot_files_to_delete:
+                snapshot_files_to_delete.sort(
+                    key=lambda p: int(p.name.split(".")[1]) if len(p.name.split(".")) >= 3 else 0
+                )
+                min_snapshot = snapshot_files_to_delete[0].name if snapshot_files_to_delete else ""
+                min_snapshot_index = int(min_snapshot.split(".")[1]) if min_snapshot else None
+                print(f"  会话快照文件（将删除）：{len(snapshot_files_to_delete)}")
+                if min_snapshot:
+                    print(f"    - 最小索引={min_snapshot_index}（文件名={min_snapshot}）")
+                for path in snapshot_files_to_delete[:3]:
+                    print(f"    - {path.name}")
+                if len(snapshot_files_to_delete) > 3:
+                    print(f"    ... 省略 {len(snapshot_files_to_delete) - 3} 个")
+            if fs_snapshots_to_delete:
+                fs_snapshots_to_delete.sort(
+                    key=lambda p: int(p.name.split("_", 1)[1]) if "_" in p.name else 0
+                )
+                min_fs_snapshot = fs_snapshots_to_delete[0].name if fs_snapshots_to_delete else ""
+                min_fs_index = int(min_fs_snapshot.split("_", 1)[1]) if min_fs_snapshot else None
+                print(f"  文件系统快照目录（将删除）：{len(fs_snapshots_to_delete)}")
+                if min_fs_snapshot:
+                    print(f"    - 最小索引={min_fs_index}（目录名={min_fs_snapshot}）")
+                for path in fs_snapshots_to_delete[:3]:
+                    print(f"    - {path.name}")
+                if len(fs_snapshots_to_delete) > 3:
+                    print(f"    ... 省略 {len(fs_snapshots_to_delete) - 3} 个")
+
+        for snapshot_file in snapshot_files_to_delete:
+            try:
+                snapshot_file.unlink()
+            except OSError:
+                continue
+
+        for path in fs_snapshots_to_delete:
+            shutil.rmtree(path, ignore_errors=True)
 
         if fs_root.exists():
             # 保留 baseline，仅清理超出回滚点的快照目录
@@ -523,8 +566,8 @@ class SessionManager:
         return self._get_session_fs_root(session_id) / "snapshots"
 
     def _get_snapshot_dir(self, session_id: int, snapshot_index: int) -> Path:
-        # 使用 1-based 命名，符合 snapshot_001 风格
-        return self._get_snapshots_root(session_id) / f"snapshot_{snapshot_index + 1:03d}"
+        # 使用 0-based 命名，snapshot_000 对应 index=0
+        return self._get_snapshots_root(session_id) / f"snapshot_{snapshot_index:03d}"
 
     def _get_workspace_root(self, session_id: int) -> Path:
         if session_id not in self._session_workspace:
@@ -699,7 +742,7 @@ class SessionManager:
         latest_dir = None
         for path in snapshots_root.glob("snapshot_*"):
             try:
-                index = int(path.name.split("_", 1)[1]) - 1
+                index = int(path.name.split("_", 1)[1])
             except (ValueError, IndexError):
                 continue
             if index > snapshot_index:

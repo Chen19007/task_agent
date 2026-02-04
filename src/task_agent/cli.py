@@ -847,109 +847,91 @@ def _run_single_task(config: Config, task: str, executor: 'Executor' = None, ses
 
     # 如果等待用户输入，继续循环
     while waiting_for_user_input and executor.current_agent:
+        paste_mode = False
+        paste_lines: list[str] = []
+        paste_prompt_shown = False
+
         console.print("\n" + "=" * 60)
         console.print("[bold yellow]Agent 等待您的回复[/bold yellow]")
-        console.print("[dim]输入内容后按空行结束（/exit 退出，/list 查看会话，/compact 压缩上下文，/edit 外部编辑器）[/dim]")
+        console.print("[dim]输入内容继续（/exit 退出，/list 查看会话，/compact 压缩上下文，/edit 外部编辑器）[/dim]")
         if _ACTIVE_HINT:
             console.print(f"[dim]当前 hint: {_ACTIVE_HINT}[/dim]")
         console.print("=" * 60 + "\n")
 
-        lines = []
-        submitted = False
-
-        while True:
-            try:
-                _clear_input_buffer()
-                if paste_mode:
-                    if not paste_prompt_shown:
-                        paste_prompt_shown = True
-                    line = input("")
-                else:
-                    line = input("> ")
-
-                if paste_mode:
-                    if line.lower() == "/send":
-                        if not paste_lines:
-                            console.print("[warning]粘贴内容为空，已忽略[/warning]")
-                            continue
-                        paste_mode = False
-                        lines = paste_lines[:]
-                        paste_lines = []
-                        paste_prompt_shown = False
-                        submitted = True
-                        break
-                    if line.lower() == "/cancel":
-                        paste_mode = False
-                        paste_lines = []
-                        paste_prompt_shown = False
-                        console.print("[info]已取消粘贴[/info]")
-                        continue
-                    paste_lines.append(line)
-                    continue
-                if line.lower() == "/paste":
-                    paste_mode = True
-                    paste_lines = []
-                    paste_prompt_shown = False
-                    console.print("[info]粘贴模式：/send 发送，/cancel 取消[/info]")
-                    continue
-                if line.lower() == "/edit":
-                    editor_text = _open_external_editor("")
-                    if editor_text is None:
-                        continue
-                    if not editor_text.strip():
-                        console.print("[warning]编辑内容为空，已忽略[/warning]")
-                        continue
-                    lines = editor_text.splitlines()
-                    submitted = True
-                    break
-
-                if line.lower() == "/exit":
-                    _print_run_stats(console)
-                    console.print("[info]任务已终止[/info]")
-                    waiting_for_user_input = False
-                    break
-
-                # 检查是否是会话命令（在收集到完整输入前就检查）
-                if line.startswith("/"):
-                    if line.lower() == "/list":
-                        sessions = session_manager.list_sessions()
-                        console.print("\n[bold cyan]保存的会话：[/bold cyan]\n")
-                        if not sessions:
-                            console.print("[dim]  （暂无保存的会话）[/dim]\n")
-                        for s in sessions:
-                            msg_preview = s.get('first_message', '')
-                            if msg_preview:
-                                console.print(f"  会话 {s['session_id']} | {s['created_at'][:19]} | 消息数: {s['message_count']} | 深度: {s['depth']} | [dim]{msg_preview}[/dim]")
-                            else:
-                                console.print(f"  会话 {s['session_id']} | {s['created_at'][:19]} | 消息数: {s['message_count']} | 深度: {s['depth']}")
-                        console.print("")
-                        continue  # 继续等待输入
-                    if line.lower() == "/compact":
-                        _handle_compact_command(executor, console, reason="手动压缩")
-                        continue  # 继续等待输入
-                    else:
-                        console.print("[warning]提示：在等待输入模式下，只支持 /list 和 /compact 命令[/warning]\n")
-                        continue  # 继续等待输入
-
-                if not line:  # 空行，结束输入
-                    break
-
-                lines.append(line)
-
-            except KeyboardInterrupt:
-                console.print("\n[warning]输入已取消[/warning]")
-                break
-
-        if not waiting_for_user_input:
+        try:
+            _clear_input_buffer()
+            if paste_mode:
+                if not paste_prompt_shown:
+                    paste_prompt_shown = True
+                line = input("")
+            else:
+                line = input("> ")
+        except KeyboardInterrupt:
+            console.print("\n[warning]输入已取消[/warning]")
             break
 
-        if submitted or lines:
-            # 结束输入后的统一提示
-            sys.stdout.write("\r" + " " * 50 + "\r")
-            sys.stdout.flush()
-            console.print("[success]输入已接收，正在处理...[/success]\n", end="")
+        if paste_mode:
+            if line.lower() == "/send":
+                if not paste_lines:
+                    console.print("[warning]粘贴内容为空，已忽略[/warning]")
+                    continue
+                paste_mode = False
+                user_input = "\n".join(paste_lines)
+                paste_lines = []
+                paste_prompt_shown = False
+            elif line.lower() == "/cancel":
+                paste_mode = False
+                paste_lines = []
+                paste_prompt_shown = False
+                console.print("[info]已取消粘贴[/info]")
+                continue
+            else:
+                paste_lines.append(line)
+                continue
+        else:
+            if line.lower() == "/paste":
+                paste_mode = True
+                paste_lines = []
+                paste_prompt_shown = False
+                console.print("[info]粘贴模式：/send 发送，/cancel 取消[/info]")
+                continue
+            if line.lower() == "/edit":
+                editor_text = _open_external_editor("")
+                if editor_text is None:
+                    continue
+                if not editor_text.strip():
+                    console.print("[warning]编辑内容为空，已忽略[/warning]")
+                    continue
+                user_input = editor_text
+            elif line.lower() == "/exit":
+                _print_run_stats(console)
+                console.print("[info]任务已终止[/info]")
+                waiting_for_user_input = False
+                break
+            elif line.startswith("/"):
+                if line.lower() == "/list":
+                    sessions = session_manager.list_sessions()
+                    console.print("\n[bold cyan]保存的会话：[/bold cyan]\n")
+                    if not sessions:
+                        console.print("[dim]  （暂无保存的会话）[/dim]\n")
+                    for s in sessions:
+                        msg_preview = s.get('first_message', '')
+                        if msg_preview:
+                            console.print(f"  会话 {s['session_id']} | {s['created_at'][:19]} | 消息数: {s['message_count']} | 深度: {s['depth']} | [dim]{msg_preview}[/dim]")
+                        else:
+                            console.print(f"  会话 {s['session_id']} | {s['created_at'][:19]} | 消息数: {s['message_count']} | 深度: {s['depth']}")
+                    console.print("")
+                    continue
+                if line.lower() == "/compact":
+                    _handle_compact_command(executor, console, reason="手动压缩")
+                    continue
+                console.print("[warning]提示：在等待输入模式下，只支持 /list 和 /compact 命令[/warning]\n")
+                continue
+            else:
+                user_input = line
 
-        user_input = "\n".join(lines)
+        if user_input:
+            console.print("[success]输入已接收，正在处理...[/success]\n", end="")
 
         if not user_input:
             console.print("[warning]空输入，已忽略[/warning]\n")
@@ -1019,7 +1001,7 @@ def _create_cli_command_confirm_callback(executor: 'Executor', console: Console)
         """
         # 检查是否自动执行
         current_dir = os.getcwd()
-        auto_execute = executor.auto_approve and _is_safe_command(command, current_dir)
+        auto_execute = executor.auto_approve and is_safe_command(command, current_dir)
 
         if auto_execute:
             # 自动执行安全命令
@@ -1046,8 +1028,8 @@ def _create_cli_command_confirm_callback(executor: 'Executor', console: Console)
 
         # 等待用户确认
         _clear_input_buffer()
-        auto_status = " [dim](自动: 启)[/dim]" if executor.auto_approve else ""
-        confirm = console.input(f"[bold yellow]执行命令[y] / 取消[c] / 执行并开启自动[a]{auto_status} [/bold yellow]")
+        auto_status = " (自动: 启)" if executor.auto_approve else ""
+        confirm = input(f"执行命令[y] / 取消[c] / 执行并开启自动[a]{auto_status} ")
         confirm_lower = confirm.lower().strip()
 
         if confirm_lower == "a":
@@ -1146,8 +1128,8 @@ def _handle_pending_commands(executor: 'Executor', console: Console, result: 'St
         else:
             # 等待用户确认
             _clear_input_buffer()
-            auto_status = " [dim](自动: 启)[/dim]" if executor.auto_approve else ""
-            confirm = console.input(f"[bold yellow]执行命令[y] / 取消[c] / 执行并开启自动[a]{auto_status} [/bold yellow]")
+            auto_status = " (自动: 启)" if executor.auto_approve else ""
+            confirm = input(f"执行命令[y] / 取消[c] / 执行并开启自动[a]{auto_status} ")
             confirm_lower = confirm.lower().strip()
 
             if confirm_lower == "a":
