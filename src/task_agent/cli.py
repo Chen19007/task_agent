@@ -590,7 +590,7 @@ def main():
                     continue
                 task = editor_text
 
-            if not task:
+            if not task.strip():
                 continue
 
             if task.lower() == "/exit":
@@ -930,10 +930,10 @@ def _run_single_task(config: Config, task: str, executor: 'Executor' = None, ses
             else:
                 user_input = line
 
-        if user_input:
+        if user_input.strip():
             console.print("[success]输入已接收，正在处理...[/success]\n", end="")
 
-        if not user_input:
+        if not user_input.strip():
             console.print("[warning]空输入，已忽略[/warning]\n")
             continue
 

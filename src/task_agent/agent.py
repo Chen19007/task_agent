@@ -226,6 +226,9 @@ class SimpleAgent:
             if not isinstance(metadata, dict):
                 continue
 
+            if self._metadata_disabled(metadata.get("disable")):
+                continue
+
             hint_name = metadata.get("name") or name
             description = str(metadata.get("description", "")).strip()
             injection = str(metadata.get("system_prompt_injection", "")).strip()
@@ -239,10 +242,27 @@ class SimpleAgent:
         if not metadata_list:
             return ""
 
-        try:
-            return yaml.safe_dump(metadata_list, allow_unicode=True, sort_keys=False).strip()
-        except Exception:
-            return ""
+        lines = ["**当前可用 hint：**"]
+        for idx, item in enumerate(metadata_list, start=1):
+            hint_name = item.get("name", "")
+            injection = item.get("system_prompt_injection", "")
+            lines.append(f"{idx}. {hint_name}")
+            if injection:
+                lines.append(injection)
+            lines.append("")
+        return "\n".join(lines).strip()
+
+    @staticmethod
+    def _metadata_disabled(value: object) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return False
+        if isinstance(value, (int, float)):
+            return value != 0
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+        return False
 
     def _get_hints_dir(self) -> str:
         """获取 hints 根目录路径"""
@@ -257,11 +277,8 @@ class SimpleAgent:
             return []
         agents: list[dict[str, str]] = []
 
-        # 遍历 .yaml 文件
-        for filename in sorted(os.listdir(agents_dir)):
-            if not filename.lower().endswith((".yaml", ".yml")):
-                continue
-
+        selected_files = self._select_agent_files_for_platform((".yaml", ".yml"))
+        for filename in selected_files.values():
             yaml_path = os.path.join(agents_dir, filename)
             try:
                 with open(yaml_path, "r", encoding="utf-8-sig") as f:
@@ -270,7 +287,8 @@ class SimpleAgent:
                     continue
                 # 确保 name 字段存在（从文件名推断）
                 if "name" not in metadata:
-                    base_name = os.path.splitext(filename)[0]
+                    stem = os.path.splitext(filename)[0]
+                    base_name, _ = self._split_agent_platform_suffix(stem)
                     metadata["name"] = base_name
                 metadata["file"] = filename
                 agents.append(metadata)
@@ -283,6 +301,57 @@ class SimpleAgent:
         project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
         agents_dir = os.path.join(project_root, "agents")
         return agents_dir if os.path.isdir(agents_dir) else ""
+
+    def _normalize_agent_key(self, name: str) -> str:
+        return name.lower().replace("_", "-")
+
+    def _split_agent_platform_suffix(self, stem: str) -> tuple[str, str]:
+        if stem.endswith("_linux"):
+            return stem[:-6], "linux"
+        if stem.endswith("_windows"):
+            return stem[:-8], "windows"
+        return stem, ""
+
+    def _collect_agent_candidates(self, exts: tuple[str, ...]) -> dict[str, dict[str, str]]:
+        agents_dir = self._get_project_agents_dir()
+        if not agents_dir:
+            return {}
+        candidates: dict[str, dict[str, str]] = {}
+        for filename in sorted(os.listdir(agents_dir)):
+            if not filename.lower().endswith(exts):
+                continue
+            stem = os.path.splitext(filename)[0]
+            base, suffix = self._split_agent_platform_suffix(stem)
+            key = self._normalize_agent_key(base)
+            if key not in candidates:
+                candidates[key] = {}
+            if suffix not in candidates[key]:
+                candidates[key][suffix] = filename
+        return candidates
+
+    def _select_agent_files_for_platform(self, exts: tuple[str, ...]) -> dict[str, str]:
+        candidates = self._collect_agent_candidates(exts)
+        if not candidates:
+            return {}
+        platform_suffix = get_hint_platform_suffix()
+        selected: dict[str, str] = {}
+        for key, files in candidates.items():
+            if platform_suffix in files:
+                selected[key] = files[platform_suffix]
+            elif "" in files:
+                selected[key] = files[""]
+        return selected
+
+    def _select_agent_markdown_path(self, agent_name: str) -> Optional[str]:
+        agents_dir = self._get_project_agents_dir()
+        if not agents_dir:
+            return None
+        selected_files = self._select_agent_files_for_platform((".md",))
+        key = self._normalize_agent_key(agent_name)
+        filename = selected_files.get(key)
+        if not filename:
+            return None
+        return os.path.join(agents_dir, filename)
 
     def _get_templates_dir(self) -> str:
         """获取模板目录路径"""
@@ -317,8 +386,10 @@ class SimpleAgent:
         如果不在，则收集该 agent 的 system_prompt_injection，最后返回拼接后的注入内容。
         """
         # 收集不在 forbidden 中的 system_prompt_injection
-        injections = []
+        injections: list[tuple[str, str]] = []
         for agent in agents:
+            if self._metadata_disabled(agent.get("disable")):
+                continue
             agent_name = agent.get("name", "")
             # forbidden_agents from YAML metadata
             forbidden = agent.get("forbidden_agents", "")
@@ -341,41 +412,39 @@ class SimpleAgent:
             injection = agent.get("system_prompt_injection", "")
 
             if should_inject and injection:
-                injections.append(injection)
+                injections.append((agent_name, injection))
 
         # 返回拼接后的注入内容（如果有的话）
         if injections:
-            return "\n\n".join(injections) + "\n"
+            lines = ["**当前可用 agent：**"]
+            for idx, (name, injection) in enumerate(injections, start=1):
+                lines.append(f"{idx}. {name}")
+                lines.append(str(injection).strip())
+                lines.append("")
+            return "\n".join(lines).strip() + "\n"
 
         # 如果没有注入内容，返回空字符串
         return ""
 
     def _get_agent_forbidden_agents(self, agent_name: str) -> list[str]:
         """获取指定 agent 的 forbidden_agents 列表"""
-        agents_dir = self._get_project_agents_dir()
-        if not agents_dir:
+        path = self._select_agent_markdown_path(agent_name)
+        if not path:
             return []
-
-        for filename in os.listdir(agents_dir):
-            base_name = os.path.splitext(filename)[0].replace('_', '-')
-            if base_name.lower() == agent_name.lower().replace('_', '-'):
-                path = os.path.join(agents_dir, filename)
-                try:
-                    with open(path, "r", encoding="utf-8") as handle:
-                        text = handle.read()
-                    metadata = self._parse_agent_frontmatter(text)
-                    # 解析 forbidden_agents 列表
-                    forbidden_str = metadata.get("forbidden_agents", "")
-                    if not forbidden_str:
-                        return []
-                    # 解析 YAML 列表格式: [a, b, c]
-                    forbidden_str = forbidden_str.strip()
-                    if forbidden_str.startswith("[") and forbidden_str.endswith("]"):
-                        items = forbidden_str[1:-1].split(",")
-                        return [item.strip().strip("'").strip('"') for item in items if item.strip()]
-                    return [forbidden_str.strip().strip("'").strip('"')]
-                except (OSError, UnicodeDecodeError):
-                    return []
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                text = handle.read()
+            metadata = self._parse_agent_frontmatter(text)
+            forbidden_str = metadata.get("forbidden_agents", "")
+            if not forbidden_str:
+                return []
+            forbidden_str = forbidden_str.strip()
+            if forbidden_str.startswith("[") and forbidden_str.endswith("]"):
+                items = forbidden_str[1:-1].split(",")
+                return [item.strip().strip("'").strip('"') for item in items if item.strip()]
+            return [forbidden_str.strip().strip("'").strip('"')]
+        except (OSError, UnicodeDecodeError):
+            return []
         return []
 
     def _load_agent_full_content(self, agent_name: str) -> Optional[str]:
@@ -387,48 +456,30 @@ class SimpleAgent:
         Returns:
             markdown 正文内容，如果文件不存在则返回 None
         """
-        agents_dir = self._get_project_agents_dir()
-        if not agents_dir:
+        path = self._select_agent_markdown_path(agent_name)
+        if not path:
             return None
-
-        # 查找匹配的 .md 文件（支持 file-edit.md 或 file_edit.md）
-        for filename in os.listdir(agents_dir):
-            # 只处理 .md 文件，跳过 .yaml 文件
-            if not filename.lower().endswith(".md"):
-                continue
-
-            base_name = os.path.splitext(filename)[0].replace('_', '-')
-            if base_name.lower() == agent_name.lower().replace('_', '-'):
-                path = os.path.join(agents_dir, filename)
-                try:
-                    with open(path, "r", encoding="utf-8") as handle:
-                        return handle.read().strip()
-                except (OSError, UnicodeDecodeError):
-                    return None
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                return handle.read().strip()
+        except (OSError, UnicodeDecodeError):
+            return None
         return None
 
     def _get_agent_flow_name(self, agent_name: str) -> Optional[str]:
         """获取预定义 agent 的流程名（读取首个非空行）"""
-        agents_dir = self._get_project_agents_dir()
-        if not agents_dir:
+        path = self._select_agent_markdown_path(agent_name)
+        if not path:
             return None
-
-        for filename in os.listdir(agents_dir):
-            if not filename.lower().endswith(".md"):
-                continue
-
-            base_name = os.path.splitext(filename)[0].replace('_', '-')
-            if base_name.lower() == agent_name.lower().replace('_', '-'):
-                path = os.path.join(agents_dir, filename)
-                try:
-                    with open(path, "r", encoding="utf-8") as handle:
-                        for line in handle:
-                            stripped = line.strip()
-                            if not stripped:
-                                continue
-                            return stripped.lstrip("#").strip()
-                except (OSError, UnicodeDecodeError):
-                    return None
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                for line in handle:
+                    stripped = line.strip()
+                    if not stripped:
+                        continue
+                    return stripped.lstrip("#").strip()
+        except (OSError, UnicodeDecodeError):
+            return None
         return None
 
     def start(self, task: str):
