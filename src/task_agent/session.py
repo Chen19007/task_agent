@@ -429,7 +429,7 @@ class SessionManager:
 
         workspace_root = self._get_workspace_root(session_id)
         try:
-            self._clear_workspace(workspace_root, exclude_roots=[self.session_dir])
+            self._clear_workspace(workspace_root, exclude_roots=[self.session_dir, self.fs_snapshot_root])
             # baseline 目录位于 sessions 下，_copy_workspace 会排除 session_dir，
             # 这里改用 _apply_snapshot_dir 以确保 baseline 能正确恢复到工作区
             latest_index, latest_dir = self._get_latest_saved_snapshot_dir(session_id, snapshot_index)
@@ -628,7 +628,7 @@ class SessionManager:
         return results
 
     def _copy_workspace(self, workspace_root: Path, baseline_dir: Path) -> None:
-        exclude_roots = [self.session_dir]
+        exclude_roots = [self.session_dir, self.fs_snapshot_root]
         for dirpath, dirnames, filenames in os.walk(workspace_root):
             current_dir = Path(dirpath)
             if self._is_excluded_dir(current_dir, exclude_roots):
@@ -697,7 +697,7 @@ class SessionManager:
             rel: abs_path for abs_path, rel in self._iter_files(baseline_dir)
         }
         current_files = {
-            rel: abs_path for abs_path, rel in self._iter_files(workspace_root, exclude_roots=[self.session_dir])
+            rel: abs_path for abs_path, rel in self._iter_files(workspace_root, exclude_roots=[self.session_dir, self.fs_snapshot_root])
         }
 
         changed_files: list[tuple[Path, Path]] = []
