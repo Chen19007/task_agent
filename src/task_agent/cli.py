@@ -76,6 +76,8 @@ def _resolve_file_references(text: str) -> tuple[str, list[str]]:
 
     def replace_match(match):
         file_path = match.group(1)
+        if not os.path.exists(file_path):
+            return match.group(0)  # 非文件路径，保持原样
         # 检查是否为目录
         if os.path.isdir(file_path):
             errors.append(f"[warning]路径是目录而非文件: @{file_path}[/warning]")
