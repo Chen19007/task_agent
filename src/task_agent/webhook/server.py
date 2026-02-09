@@ -72,6 +72,7 @@ def _clean_incoming_text(text: str) -> str:
         return ""
 
     cleaned = re.sub(r"<at\b[^>]*>.*?</at>", " ", text, flags=re.IGNORECASE | re.DOTALL)
+    cleaned = re.sub(r"^(?:@\S+\s*)+", " ", cleaned)
     cleaned = cleaned.replace("\u200b", "").replace("\ufeff", "").replace("\xa0", " ")
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned
@@ -462,6 +463,26 @@ def handle_message(data):
                 message_id = getattr(message, 'message_id', '')
                 logger.info(f"chat_type: {chat_type}, message_id: {message_id}")
 
+                # 解析结构化 @ 信息（用于区分 @ 的对象）
+                mentions = getattr(message, "mentions", None)
+                mention_items = []
+                if mentions:
+                    try:
+                        for m in mentions:
+                            mention_id = getattr(m, "id", None)
+                            mention_items.append(
+                                {
+                                    "name": getattr(m, "name", ""),
+                                    "key": getattr(m, "key", ""),
+                                    "open_id": getattr(mention_id, "open_id", "") if mention_id else "",
+                                    "user_id": getattr(mention_id, "user_id", "") if mention_id else "",
+                                    "union_id": getattr(mention_id, "union_id", "") if mention_id else "",
+                                }
+                            )
+                    except Exception as e:
+                        logger.warning(f"mentions 解析失败: {e}")
+                logger.info(f"mentions: count={len(mention_items)}, data={mention_items}")
+
                 # message_id 去重（补充 uuid 去重，防止重复投递）
                 if message_id:
                     with _processed_lock:
@@ -510,6 +531,17 @@ def handle_message(data):
                 text_raw = content.get("text", "") if isinstance(content, dict) else str(content)
                 text = _clean_incoming_text(text_raw)
                 logger.info(f"入站消息解析文本: raw={text_raw!r}, cleaned={text!r}")
+
+                # 群聊模式：默认忽略纯文本 @提及，避免把群成员对话发给 Agent
+                if chat_type != "p2p":
+                    is_slash_command = text.startswith("/")
+                    looks_like_plain_mention = str(text_raw).lstrip().startswith("@")
+                    if looks_like_plain_mention and not is_slash_command:
+                        logger.info(
+                            f"[丢弃事件] 原因=群聊纯文本@消息 chat_id={chat_id} "
+                            f"message_id={message_id} raw={str(text_raw)[:120]!r}"
+                        )
+                        return
 
                 # 内建命令：清理当前会话上下文
                 if _is_clear_command(text):
