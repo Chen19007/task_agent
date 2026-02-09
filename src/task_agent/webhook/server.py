@@ -87,18 +87,6 @@ def _is_clear_command(text: str) -> bool:
     return re.fullmatch(r"/?clear", text_norm) is not None
 
 
-def _is_non_task_instruction(text: str) -> bool:
-    """识别“非任务指令”包装消息，避免误触发 Agent。"""
-    if not text:
-        return False
-    markers = [
-        "用户消息（非任务指令）",
-        "这不是给 agent 的任务指令",
-        "无需处理",
-    ]
-    return any(marker in text for marker in markers)
-
-
 def _build_session_key(chat_type: str, chat_id: str) -> str:
     return f"{chat_type}:{chat_id}"
 
@@ -522,13 +510,6 @@ def handle_message(data):
                 text_raw = content.get("text", "") if isinstance(content, dict) else str(content)
                 text = _clean_incoming_text(text_raw)
                 logger.info(f"入站消息解析文本: raw={text_raw!r}, cleaned={text!r}")
-
-                if _is_non_task_instruction(text):
-                    logger.info(
-                        f"[丢弃事件] 原因=非任务指令包装消息 message_id={message_id} "
-                        f"chat_id={chat_id} text={text!r}"
-                    )
-                    return
 
                 # 内建命令：清理当前会话上下文
                 if _is_clear_command(text):
