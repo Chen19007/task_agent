@@ -14,6 +14,7 @@ from typing import Optional, Set, Dict, Any
 
 from ..agent import Action
 from ..config import Config
+from ..safety import is_safe_command
 from .adapter import WebhookAdapter
 from .platforms import FeishuPlatform
 
@@ -25,9 +26,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# 全局适配器管理（单用户模式）
-_adapter: Optional[WebhookAdapter] = None
+# 全局配置与平台
+_config: Optional[Config] = None
 _platform: Optional[FeishuPlatform] = None
+_adapters: Dict[str, WebhookAdapter] = {}
+_adapters_lock = threading.Lock()
 
 # 已处理的消息ID去重
 _processed_uuids: Set[str] = set()
@@ -61,6 +64,88 @@ def _is_truthy(value: Any) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _clean_incoming_text(text: str) -> str:
+    """清洗飞书入站文本，移除 @ 标签与不可见空白。"""
+    import re
+
+    if not text:
+        return ""
+
+    cleaned = re.sub(r"<at\b[^>]*>.*?</at>", " ", text, flags=re.IGNORECASE | re.DOTALL)
+    cleaned = cleaned.replace("\u200b", "").replace("\ufeff", "").replace("\xa0", " ")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
+def _is_clear_command(text: str) -> bool:
+    """判断是否为 clear 命令（支持 /clear 或 clear）。"""
+    import re
+
+    if not text:
+        return False
+    text_norm = text.strip().lower()
+    return re.fullmatch(r"/?clear", text_norm) is not None
+
+
+def _is_non_task_instruction(text: str) -> bool:
+    """识别“非任务指令”包装消息，避免误触发 Agent。"""
+    if not text:
+        return False
+    markers = [
+        "用户消息（非任务指令）",
+        "这不是给 agent 的任务指令",
+        "无需处理",
+    ]
+    return any(marker in text for marker in markers)
+
+
+def _build_session_key(chat_type: str, chat_id: str) -> str:
+    return f"{chat_type}:{chat_id}"
+
+
+def _get_or_create_adapter(chat_type: str, chat_id: str) -> WebhookAdapter:
+    """按会话键获取独立适配器，避免私聊/群聊共享同一会话。"""
+    global _config, _platform, _adapters
+    session_key = _build_session_key(chat_type, chat_id)
+    with _adapters_lock:
+        adapter = _adapters.get(session_key)
+        if adapter is None:
+            if _config is None or _platform is None:
+                raise RuntimeError("Webhook 服务未初始化完成")
+            adapter = WebhookAdapter(config=_config, platform=_platform, chat_id=chat_id)
+            _adapters[session_key] = adapter
+            logger.info(f"[会话] 创建新会话适配器: session_key={session_key}")
+        return adapter
+
+
+def _clear_session_context(chat_type: str, chat_id: str) -> bool:
+    """清理指定会话上下文（adapter + 待授权状态）。"""
+    session_key = _build_session_key(chat_type, chat_id)
+    removed = False
+
+    with _adapters_lock:
+        if session_key in _adapters:
+            del _adapters[session_key]
+            removed = True
+
+    with _pending_auth_lock:
+        latest_card_id = _pending_latest_card_by_chat.pop(chat_id, None)
+        if latest_card_id and latest_card_id in _pending_authorizations:
+            del _pending_authorizations[latest_card_id]
+            removed = True
+
+        stale_keys = [
+            card_id
+            for card_id, ctx in _pending_authorizations.items()
+            if ctx.get("chat_id") == chat_id and ctx.get("chat_type") == chat_type
+        ]
+        for card_id in stale_keys:
+            del _pending_authorizations[card_id]
+            removed = True
+
+    return removed
+
+
 def _continue_executor_after_auth(adapter: WebhookAdapter, platform: FeishuPlatform,
                                   chat_id: str, chat_type: str, source_message_id: str) -> None:
     """在命令确认后继续执行 Executor 流程。"""
@@ -78,6 +163,9 @@ def _continue_executor_after_auth(adapter: WebhookAdapter, platform: FeishuPlatf
                     platform.send_message("\n".join(fallback), chat_id, chat_type, source_message_id)
 
         if step_result.pending_commands:
+            if _try_auto_execute_pending_commands(adapter, step_result.pending_commands):
+                logger.info("继续流程命中自动授权，已自动执行待授权命令，跳过卡片")
+                continue
             command_content = "\n".join(
                 [
                     cmd.display() if hasattr(cmd, "display") else str(getattr(cmd, "command", ""))
@@ -113,6 +201,60 @@ def _continue_executor_after_auth(adapter: WebhookAdapter, platform: FeishuPlatf
             break
 
     logger.info(f"授权后继续执行完成，本轮输出 {total_outputs} 条")
+
+
+def _try_auto_execute_pending_commands(adapter: WebhookAdapter, pending_commands: list) -> bool:
+    """当 auto_approve 开启且命令安全时，自动执行待授权命令。"""
+    if not adapter.executor.auto_approve:
+        return False
+
+    try:
+        from ..cli import _execute_command, _format_shell_result
+
+        current_dir = os.getcwd()
+
+        # 先全量判断安全性，任一不安全则回退到卡片授权
+        for command_spec in pending_commands:
+            command = command_spec.command if hasattr(command_spec, "command") else str(command_spec)
+            if not is_safe_command(command, current_dir):
+                logger.info(f"[自动授权] 检测到非安全命令，回退卡片授权: {command}")
+                return False
+
+        for command_spec in pending_commands:
+            command = command_spec.command if hasattr(command_spec, "command") else str(command_spec)
+            command_timeout = (
+                command_spec.timeout
+                if hasattr(command_spec, "timeout") and command_spec.timeout is not None
+                else adapter.executor.config.timeout
+            )
+            background = bool(getattr(command_spec, "background", False))
+
+            cmd_result = _execute_command(
+                command,
+                command_timeout,
+                config=adapter.executor.config,
+                context_messages=(adapter.executor.current_agent.history if adapter.executor.current_agent else None),
+                background=background,
+            )
+
+            if cmd_result.returncode == 0:
+                if cmd_result.stdout:
+                    result_msg = f"命令执行成功，输出：\n{cmd_result.stdout}"
+                else:
+                    result_msg = "命令执行成功（无输出）"
+            else:
+                result_msg = f"命令执行失败（退出码: {cmd_result.returncode}）：\n{cmd_result.stderr}"
+
+            if adapter.executor.current_agent:
+                adapter.executor.current_agent._add_message(
+                    "user", _format_shell_result("executed", result_msg)
+                )
+
+        logger.info(f"[自动授权] 已自动执行 {len(pending_commands)} 条命令")
+        return True
+    except Exception as e:
+        logger.error(f"[自动授权] 自动执行失败，回退卡片授权: {e}")
+        return False
 
 
 def _process_card_action_async(card_message_id: str, action: str, auto: bool,
@@ -281,7 +423,7 @@ def handle_message(data):
     Args:
         data: lark.im.v1.P2ImMessageReceiveV1
     """
-    global _adapter, _platform, _processed_uuids, _processed_message_ids, _processed_lock
+    global _platform, _processed_uuids, _processed_message_ids, _processed_lock
 
     try:
         # 事件头信息（用于定位是否同一事件被重投）
@@ -377,12 +519,40 @@ def handle_message(data):
                     except:
                         pass
 
-                text = content.get("text", "") if isinstance(content, dict) else str(content)
+                text_raw = content.get("text", "") if isinstance(content, dict) else str(content)
+                text = _clean_incoming_text(text_raw)
+                logger.info(f"入站消息解析文本: raw={text_raw!r}, cleaned={text!r}")
 
-                # 去除 @机器人 提及
-                import re
-                text = re.sub(r'<at[^>]*>.*?</at>', "", text).strip()
-                logger.info(f"入站消息解析文本: {text!r}")
+                if _is_non_task_instruction(text):
+                    logger.info(
+                        f"[丢弃事件] 原因=非任务指令包装消息 message_id={message_id} "
+                        f"chat_id={chat_id} text={text!r}"
+                    )
+                    return
+
+                # 内建命令：清理当前会话上下文
+                if _is_clear_command(text):
+                    cleared = _clear_session_context(chat_type, chat_id)
+                    if _platform is not None:
+                        if cleared:
+                            _platform.send_message(
+                                "✅ 已清理当前会话上下文（仅当前私聊/群聊）",
+                                chat_id,
+                                chat_type,
+                                message_id,
+                            )
+                        else:
+                            _platform.send_message(
+                                "ℹ️ 当前会话没有可清理的上下文",
+                                chat_id,
+                                chat_type,
+                                message_id,
+                            )
+                    logger.info(
+                        f"[内建命令] /clear 执行完成: cleared={cleared}, "
+                        f"session_key={_build_session_key(chat_type, chat_id)}"
+                    )
+                    return
 
                 # 仅处理实时事件：create_time 超过窗口则丢弃（防止历史补投再次触发）
                 delay_seconds = None
@@ -407,7 +577,8 @@ def handle_message(data):
 
                 if text:
                     # 异步执行任务（不阻塞主线程）
-                    _executor.submit(execute_task_async, text, chat_id, chat_type, message_id, _adapter, _platform)
+                    session_key = _build_session_key(chat_type, chat_id)
+                    _executor.submit(execute_task_async, text, chat_id, chat_type, message_id, session_key)
                 else:
                     logger.info(
                         f"[丢弃事件] 原因=文本为空 message_id={message_id} chat_id={chat_id} "
@@ -420,9 +591,13 @@ def handle_message(data):
         traceback.print_exc()
 
 
-def execute_task_async(task: str, chat_id: str, chat_type: str, message_id: str, adapter: WebhookAdapter, platform: FeishuPlatform):
+def execute_task_async(task: str, chat_id: str, chat_type: str, message_id: str, session_key: str):
     """异步执行任务（在后台线程中）"""
     try:
+        if _platform is None:
+            raise RuntimeError("平台未初始化")
+        platform = _platform
+        adapter = _get_or_create_adapter(chat_type, chat_id)
         start_time = time.time()
 
         # 更新 chat_id
@@ -441,6 +616,9 @@ def execute_task_async(task: str, chat_id: str, chat_type: str, message_id: str,
         total_outputs = 0
         for output_list, step_result in adapter.execute_task(task):
             if step_result.pending_commands:
+                if _try_auto_execute_pending_commands(adapter, step_result.pending_commands):
+                    logger.info("命中自动授权，已自动执行待授权命令，跳过卡片")
+                    continue
                 if adapter.output_handler and hasattr(adapter.output_handler, "clear"):
                     adapter.output_handler.clear()
                 command_content = "\n".join(
@@ -497,7 +675,7 @@ def execute_task_async(task: str, chat_id: str, chat_type: str, message_id: str,
                 break
 
         elapsed = time.time() - start_time
-        logger.info(f"任务执行完成，共 {total_outputs} 条输出，耗时 {elapsed:.2f}秒")
+        logger.info(f"任务执行完成，共 {total_outputs} 条输出，耗时 {elapsed:.2f}秒，session_key={session_key}")
 
     except Exception as e:
         logger.error(f"执行任务失败: {e}")
@@ -512,11 +690,12 @@ def main(config: Optional[Config] = None):
     Args:
         config: 配置对象，如果为 None 则从环境变量加载
     """
-    global _adapter, _platform
+    global _config, _platform, _adapters
 
     # 加载配置
     if config is None:
         config = Config.from_env()
+    _config = config
 
     # 检查必要的环境变量
     app_id = getattr(config, "webhook_app_id", None) or os.environ.get(
@@ -533,11 +712,13 @@ def main(config: Optional[Config] = None):
     # 创建平台实例
     _platform = FeishuPlatform(app_id=app_id, app_secret=app_secret)
 
-    # 创建适配器
-    _adapter = WebhookAdapter(config=config, platform=_platform, chat_id="")
+    # 重置会话适配器池（启动时）
+    with _adapters_lock:
+        _adapters.clear()
 
     logger.info("✓ 配置加载成功")
     logger.info("✓ 飞书平台初始化完成")
+    logger.info("✓ 会话模式: 按 chat_type + chat_id 隔离上下文")
     logger.info("")
     logger.info("正在启动长连接...")
 
