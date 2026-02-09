@@ -216,6 +216,126 @@ class FeishuPlatform(Platform):
             traceback.print_exc()
             return ""
 
+    def update_authorization_card_result(
+        self,
+        message_id: str,
+        command_content: str,
+        result_text: str,
+    ) -> bool:
+        """仅更新授权区域：保留命令展示区，按钮区域替换为结果文案。"""
+        try:
+            from lark_oapi.api.im.v1 import PatchMessageRequest, PatchMessageRequestBody
+
+            card = {
+                "schema": "2.0",
+                "config": {
+                    "update_multi": True,
+                    "style": {
+                        "text_size": {
+                            "normal_v2": {
+                                "default": "normal",
+                                "pc": "normal",
+                                "mobile": "heading"
+                            }
+                        }
+                    }
+                },
+                "body": {
+                    "direction": "vertical",
+                    "elements": [
+                        {
+                            "tag": "column_set",
+                            "flex_mode": "stretch",
+                            "background_style": "blue-50",
+                            "horizontal_align": "left",
+                            "columns": [
+                                {
+                                    "tag": "column",
+                                    "width": "weighted",
+                                    "elements": [
+                                        {
+                                            "tag": "markdown",
+                                            "content": f"**待授权命令：**\n{command_content}",
+                                            "text_align": "left",
+                                            "text_size": "normal_v2"
+                                        }
+                                    ],
+                                    "vertical_spacing": "8px",
+                                    "horizontal_align": "left",
+                                    "vertical_align": "top",
+                                    "weight": 1
+                                }
+                            ],
+                            "margin": "0px 0px 0px 0px"
+                        },
+                        {
+                            "tag": "column_set",
+                            "flex_mode": "stretch",
+                            "horizontal_spacing": "8px",
+                            "horizontal_align": "left",
+                            "columns": [
+                                {
+                                    "tag": "column",
+                                    "width": "weighted",
+                                    "elements": [
+                                        {
+                                            "tag": "markdown",
+                                            "content": result_text,
+                                            "text_align": "left",
+                                            "text_size": "normal_v2"
+                                        }
+                                    ],
+                                    "vertical_spacing": "8px",
+                                    "horizontal_align": "left",
+                                    "vertical_align": "top",
+                                    "weight": 1
+                                }
+                            ],
+                            "margin": "0px 0px 0px 0px"
+                        }
+                    ]
+                },
+                "header": {
+                    "title": {
+                        "tag": "plain_text",
+                        "content": "应用授权请求"
+                    },
+                    "subtitle": {
+                        "tag": "plain_text",
+                        "content": ""
+                    },
+                    "template": "blue",
+                    "padding": "12px 8px 12px 8px"
+                }
+            }
+
+            content_json = json.dumps(card, ensure_ascii=False)
+            request = (
+                PatchMessageRequest.builder()
+                .message_id(message_id)
+                .request_body(
+                    PatchMessageRequestBody.builder()
+                    .content(content_json)
+                    .build()
+                )
+                .build()
+            )
+
+            response = self.client.im.v1.message.patch(request)
+            if not response.success():
+                logger.error(
+                    f"✗ 更新授权卡片失败: message_id={message_id}, code={response.code}, msg={response.msg}"
+                )
+                return False
+
+            logger.info(f"✓ 更新授权卡片成功: message_id={message_id}")
+            return True
+        except Exception as e:
+            logger.error(f"✗ 更新授权卡片异常: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
     def send_authorization_card(
         self,
         chat_id: str,

@@ -139,6 +139,22 @@ def _process_card_action_async(card_message_id: str, action: str, auto: bool,
         f"card_message_id={card_message_id}, commands={len(pending_commands)}"
     )
 
+    cmd_preview = " | ".join(
+        [
+            cmd.display() if hasattr(cmd, "display") else str(getattr(cmd, "command", ""))
+            for cmd in pending_commands
+        ]
+    ).strip()
+    if action == "approve":
+        if auto:
+            status_text = "✅ 已授权并开启自动授权"
+        else:
+            status_text = "✅ 已授权执行"
+    else:
+        status_text = "⛔ 已拒绝授权"
+
+    platform.update_authorization_card_result(card_message_id, cmd_preview, status_text)
+
     if auto:
         adapter.executor.auto_approve = True
         logger.info("[卡片交互] 已开启 auto_approve")
