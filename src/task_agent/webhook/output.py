@@ -45,6 +45,9 @@ class WebhookOutput(OutputHandler):
         # 含 <return> 的完整响应会在 on_agent_complete 再输出一次，这里跳过避免重复
         if "<return>" in content and "</return>" in content:
             return
+        # 工具标签（ps_call/bash_call/builtin/create_agent）由专门流程处理，避免与授权卡片重复
+        if re.search(r"<(ps_call|bash_call|builtin|create_agent)\b", content, re.IGNORECASE):
+            return
         formatted = self.platform.format_output(content, "content")
         self._queue.put(("content", formatted))
 
@@ -63,7 +66,7 @@ class WebhookOutput(OutputHandler):
         agent_info = f" [{agent_name}]" if agent_name else ""
         # 限制任务描述长度，避免太长
         task_short = task[:50] + "..." if len(task) > 50 else task
-        text = f"🤖 创建子Agent{agent_info}: {task_short}"
+        text = f"子Agent{agent_info}: {task_short}"
         formatted = self.platform.format_output(text, "create_agent")
         self._queue.put(("content", formatted))
 

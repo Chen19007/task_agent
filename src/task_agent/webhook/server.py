@@ -425,6 +425,8 @@ def execute_task_async(task: str, chat_id: str, chat_type: str, message_id: str,
         total_outputs = 0
         for output_list, step_result in adapter.execute_task(task):
             if step_result.pending_commands:
+                if adapter.output_handler and hasattr(adapter.output_handler, "clear"):
+                    adapter.output_handler.clear()
                 command_content = "\n".join(
                     [
                         cmd.display() if hasattr(cmd, "display") else str(getattr(cmd, "command", ""))
