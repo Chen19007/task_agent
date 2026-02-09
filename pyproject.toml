@@ -21,6 +21,11 @@ gui = [
 gradio = [
     "gradio>=5.0.0,<6.0.0",
 ]
+webhook = [
+    "fastapi>=0.104.0",
+    "uvicorn>=0.24.0",
+    "lark-oapi>=1.0.0",
+]
 
 [build-system]
 requires = ["setuptools>=61.0"]
@@ -40,3 +45,4 @@ norecursedirs = "sessions .tmp_pytest pytest-cache-files-* .pytest_cache"
 task-agent = "task_agent.cli:main"
 task-agent-gui = "task_agent.gui.app:main"
 task-agent-gradio = "task_agent.gui.gradio_app:main"
+task-agent-webhook = "task_agent.webhook.cli:main"

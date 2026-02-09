@@ -27,6 +27,13 @@ class Config:
     compact_keep_messages: int = 6
     compact_chunk_chars: int = 12000
 
+    # Webhook 配置
+    webhook_platform: str = "feishu"
+    webhook_app_id: str = ""
+    webhook_app_secret: str = ""
+    webhook_host: str = "0.0.0.0"
+    webhook_port: int = 8080
+
     @classmethod
     def from_env(cls) -> "Config":
         """从环境变量加载配置"""
@@ -65,6 +72,11 @@ class Config:
             auto_compact_threshold=to_float(os.environ.get("AGENT_AUTO_COMPACT_THRESHOLD"), 0.75),
             compact_keep_messages=to_int(os.environ.get("AGENT_COMPACT_KEEP_MESSAGES"), 6),
             compact_chunk_chars=to_int(os.environ.get("AGENT_COMPACT_CHUNK_CHARS"), 12000),
+            webhook_platform=os.environ.get("WEBHOOK_PLATFORM", "feishu"),
+            webhook_app_id=os.environ.get("WEBHOOK_APP_ID", ""),
+            webhook_app_secret=os.environ.get("WEBHOOK_APP_SECRET", ""),
+            webhook_host=os.environ.get("WEBHOOK_HOST", "0.0.0.0"),
+            webhook_port=int(os.environ.get("WEBHOOK_PORT", "8080")),
         )
 
     def to_dict(self) -> dict:
