@@ -79,13 +79,13 @@ def _clean_incoming_text(text: str) -> str:
 
 
 def _is_clear_command(text: str) -> bool:
-    """判断是否为 clear 命令（支持 /clear 或 clear）。"""
+    """判断是否为 clear 命令（仅支持 /clear）。"""
     import re
 
     if not text:
         return False
     text_norm = text.strip().lower()
-    return re.fullmatch(r"/?clear", text_norm) is not None
+    return re.fullmatch(r"/clear", text_norm) is not None
 
 
 def _build_session_key(chat_type: str, chat_id: str) -> str:
@@ -531,17 +531,6 @@ def handle_message(data):
                 text_raw = content.get("text", "") if isinstance(content, dict) else str(content)
                 text = _clean_incoming_text(text_raw)
                 logger.info(f"入站消息解析文本: raw={text_raw!r}, cleaned={text!r}")
-
-                # 群聊模式：默认忽略纯文本 @提及，避免把群成员对话发给 Agent
-                if chat_type != "p2p":
-                    is_slash_command = text.startswith("/")
-                    looks_like_plain_mention = str(text_raw).lstrip().startswith("@")
-                    if looks_like_plain_mention and not is_slash_command:
-                        logger.info(
-                            f"[丢弃事件] 原因=群聊纯文本@消息 chat_id={chat_id} "
-                            f"message_id={message_id} raw={str(text_raw)[:120]!r}"
-                        )
-                        return
 
                 # 内建命令：清理当前会话上下文
                 if _is_clear_command(text):
