@@ -64,6 +64,31 @@ def _is_truthy(value: Any) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _extract_reject_reason(action_value: Dict[str, Any], event: Any) -> str:
+    """从卡片回调中提取拒绝原因（优先表单字段）。"""
+    # 1) action.value 里直传
+    reason = str(action_value.get("reject_reason", "")).strip()
+    if reason:
+        return reason
+
+    # 2) action.form_value（常见于 form submit）
+    action_obj = getattr(event, "action", None) if event else None
+    form_value = getattr(action_obj, "form_value", None) if action_obj else None
+    if isinstance(form_value, dict):
+        reason = str(form_value.get("reject_reason", "")).strip()
+        if reason:
+            return reason
+
+        # 兼容嵌套结构，如 {"reject_form": {"reject_reason": "..."}}
+        for v in form_value.values():
+            if isinstance(v, dict):
+                reason = str(v.get("reject_reason", "")).strip()
+                if reason:
+                    return reason
+
+    return ""
+
+
 def _clean_incoming_text(text: str) -> str:
     """清洗飞书入站文本，移除 @ 标签与不可见空白。"""
     import re
@@ -276,13 +301,15 @@ def _process_card_action_async(card_message_id: str, action: str, auto: bool,
             for cmd in pending_commands
         ]
     ).strip()
+    reject_reason = str(action_value.get("reject_reason", "")).strip()
+
     if action == "approve":
         if auto:
             status_text = "✅ 已授权并开启自动授权"
         else:
             status_text = "✅ 已授权执行"
     else:
-        status_text = "⛔ 已拒绝授权"
+        status_text = f"⛔ 已拒绝授权\n原因: {reject_reason}" if reject_reason else "⛔ 已拒绝授权"
 
     platform.update_authorization_card_result(card_message_id, cmd_preview, status_text)
 
@@ -324,7 +351,7 @@ def _process_card_action_async(card_message_id: str, action: str, auto: bool,
                         "user", _format_shell_result("executed", result_msg)
                     )
         else:
-            reject_reason = action_value.get("reason") or "用户取消了命令执行"
+            reject_reason = reject_reason or str(action_value.get("reason") or "用户取消了命令执行")
             if adapter.executor.current_agent:
                 adapter.executor.current_agent._add_message(
                     "user", _format_shell_result("rejected", str(reject_reason))
@@ -361,10 +388,17 @@ def handle_card_action_trigger(data):
         action_value = getattr(action_obj, "value", None) if action_obj else None
         action_value = action_value if isinstance(action_value, dict) else {}
         raw_action = str(action_value.get("action", "")).strip().lower()
-        # 卡片动作约定：approve / reject / auto_approve
+        reject_reason = _extract_reject_reason(action_value, event)
+        if reject_reason:
+            action_value["reject_reason"] = reject_reason
+
+        # 卡片动作约定：approve / reject / auto_approve / submit_reject
         if raw_action == "auto_approve":
             action = "approve"
             auto = True
+        elif raw_action == "submit_reject":
+            action = "reject"
+            auto = False
         elif raw_action in {"approve", "reject"}:
             action = raw_action
             auto = False
@@ -382,7 +416,8 @@ def handle_card_action_trigger(data):
 
         logger.info(
             f"[卡片交互] 解析结果: action={action}, auto={auto}, "
-            f"open_message_id={open_message_id}, open_chat_id={open_chat_id}"
+            f"open_message_id={open_message_id}, open_chat_id={open_chat_id}, "
+            f"reject_reason={reject_reason!r}"
         )
 
         if open_message_id:

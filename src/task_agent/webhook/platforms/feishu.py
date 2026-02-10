@@ -342,10 +342,14 @@ class FeishuPlatform(Platform):
         chat_type: str = "p2p",
         message_id: str = "",
         command_content: str = "",
+        input_content: str = "",
     ) -> str:
         """发送授权卡片消息（template 卡片）。"""
         data = {"template_id": self.auth_card_template_id}
-        data["template_variable"] = {"content": command_content}
+        data["template_variable"] = {
+            "content": command_content,
+            "input_content": input_content,
+        }
         if self.auth_card_template_version_name:
             data["template_version_name"] = self.auth_card_template_version_name
 
@@ -354,7 +358,7 @@ class FeishuPlatform(Platform):
         logger.info(
             f"[DEBUG] 发送授权卡片: template_id={self.auth_card_template_id}, "
             f"template_version_name={self.auth_card_template_version_name or 'latest'}, "
-            f"content={command_content[:100]}"
+            f"content={command_content[:100]}, input_content={input_content[:80]}"
         )
         return self.send_message(
             content=content,
