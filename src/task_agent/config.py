@@ -1,6 +1,39 @@
 """配置管理模块"""
 
 from dataclasses import dataclass
+from pathlib import Path
+
+
+def load_local_env(env_file: str = ".env", overwrite: bool = False) -> None:
+    """从项目本地 .env 文件加载环境变量。"""
+    import os
+
+    env_path = Path(env_file)
+    if not env_path.is_absolute():
+        env_path = Path.cwd() / env_path
+    if not env_path.exists() or not env_path.is_file():
+        return
+
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.lower().startswith("export "):
+            line = line[7:].strip()
+        if "=" not in line:
+            continue
+
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            continue
+
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+
+        if overwrite or key not in os.environ:
+            os.environ[key] = value
 
 
 @dataclass
@@ -38,6 +71,8 @@ class Config:
     def from_env(cls) -> "Config":
         """从环境变量加载配置"""
         import os
+        load_local_env(".env", overwrite=False)
+
         def to_bool(value: str, default: bool) -> bool:
             if value is None:
                 return default

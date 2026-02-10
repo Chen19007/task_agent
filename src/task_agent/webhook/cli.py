@@ -49,8 +49,8 @@ def parse_args():
     parser.add_argument("--base-url", "-b", default="http://localhost:3000/v1",
                         help="OpenAI Base URL（默认：http://localhost:3000/v1）")
 
-    parser.add_argument("--api-key", "-k", default="sk-1qTPR2NfODm9Y8YwQTXtGVONXF0g2bxWWreaZaMvPK4ErKOV",
-                        help="OpenAI API Key")
+    parser.add_argument("--api-key", "-k", default=None,
+                        help="OpenAI API Key（可选，未传时读取 OPENAI_API_KEY）")
 
     parser.add_argument("--max-tokens", "-M", type=int, default=None,
                         help="最大输出token数（默认：Ollama=4096, OpenAI=32768）")
@@ -66,6 +66,10 @@ def parse_args():
 
 def main():
     """task-agent-webhook 命令入口"""
+    from ..config import load_local_env
+
+    # 优先从项目本地 .env 加载，避免依赖系统级环境变量
+    load_local_env(".env", overwrite=False)
     args = parse_args()
 
     c = console.Console()
@@ -128,11 +132,12 @@ def main():
         from ..llm.base import create_client
         from ..config import Config
 
+        api_key = args.api_key if args.api_key else os.environ.get("OPENAI_API_KEY", "")
         config = Config(
             api_type=args.api_type,
             ollama_host=args.host,
             openai_base_url=args.base_url,
-            openai_api_key=args.api_key,
+            openai_api_key=api_key,
             model=args.model,
             timeout=args.timeout,
             max_output_tokens=max_tokens,
