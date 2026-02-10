@@ -52,6 +52,7 @@ class WebhookAdapter:
         # 创建执行器
         self.executor = Executor(
             self.config,
+            max_depth=2,  # webhook 场景限制深度，便于在移动端控制
             session_manager=self.session_manager,
             output_handler=self.output_handler,
         )

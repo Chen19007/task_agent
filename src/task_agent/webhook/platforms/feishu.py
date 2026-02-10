@@ -38,6 +38,9 @@ class FeishuPlatform(Platform):
         # 授权卡片模板：默认使用你提供的模板 ID；版本为空时由飞书使用最新版本
         self.auth_card_template_id = "AAq2kN1jyTHdr"
         self.auth_card_template_version_name = ""
+        # 工作目录切换卡片模板
+        self.workspace_card_template_id = "AAq23eC4R3QlX"
+        self.workspace_card_template_version_name = ""
 
     @property
     def client(self):
@@ -367,6 +370,91 @@ class FeishuPlatform(Platform):
             message_id=message_id,
             msg_type=MessageType.INTERACTIVE,
         )
+
+    def send_workspace_selection_card(
+        self,
+        chat_id: str,
+        chat_type: str = "p2p",
+        message_id: str = "",
+        dir_list: Optional[list] = None,
+    ) -> str:
+        """发送切换目录卡片（template 卡片）。"""
+        data = {"template_id": self.workspace_card_template_id}
+        data["template_variable"] = {
+            "dir_list": dir_list or [],
+        }
+        if self.workspace_card_template_version_name:
+            data["template_version_name"] = self.workspace_card_template_version_name
+
+        card_payload = {"type": "template", "data": data}
+        content = json.dumps(card_payload, ensure_ascii=False)
+        logger.info(
+            f"[DEBUG] 发送切换目录卡片: template_id={self.workspace_card_template_id}, "
+            f"template_version_name={self.workspace_card_template_version_name or 'latest'}, "
+            f"options={len(dir_list or [])}"
+        )
+        return self.send_message(
+            content=content,
+            chat_id=chat_id,
+            chat_type=chat_type,
+            message_id=message_id,
+            msg_type=MessageType.INTERACTIVE,
+        )
+
+    def update_workspace_selection_card_result(
+        self,
+        message_id: str,
+        result_text: str,
+    ) -> bool:
+        """将切换目录卡片更新为结果态，避免重复点击。"""
+        try:
+            from lark_oapi.api.im.v1 import PatchMessageRequest, PatchMessageRequestBody
+
+            card = {
+                "schema": "2.0",
+                "config": {"update_multi": True},
+                "body": {
+                    "direction": "vertical",
+                    "elements": [
+                        {
+                            "tag": "markdown",
+                            "content": result_text,
+                            "text_align": "left",
+                        }
+                    ],
+                },
+                "header": {
+                    "title": {"tag": "plain_text", "content": "切换目录"},
+                    "subtitle": {"tag": "plain_text", "content": ""},
+                    "template": "blue",
+                },
+            }
+
+            content_json = json.dumps(card, ensure_ascii=False)
+            request = (
+                PatchMessageRequest.builder()
+                .message_id(message_id)
+                .request_body(
+                    PatchMessageRequestBody.builder()
+                    .content(content_json)
+                    .build()
+                )
+                .build()
+            )
+            response = self.client.im.v1.message.patch(request)
+            if not response.success():
+                logger.error(
+                    f"✗ 更新切换目录卡片失败: message_id={message_id}, code={response.code}, msg={response.msg}"
+                )
+                return False
+
+            logger.info(f"✓ 更新切换目录卡片成功: message_id={message_id}")
+            return True
+        except Exception as e:
+            logger.error(f"✗ 更新切换目录卡片异常: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
 
     def format_output(self, content: str, output_type: str) -> str:
         """

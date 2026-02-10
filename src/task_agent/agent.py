@@ -85,6 +85,7 @@ class SimpleAgent:
                  global_subagent_count: int = 0,
                  agent_name: Optional[str] = None,
                  output_handler: Optional[OutputHandler] = None,
+                 workspace_dir: Optional[str] = None,
                  init_system_prompt: bool = True):
         """初始化 Agent
 
@@ -106,6 +107,7 @@ class SimpleAgent:
         self.depth = depth
         self.max_depth = max_depth
         self.agent_name = agent_name  # 当前 agent 名称
+        self.workspace_dir = workspace_dir
 
         # 统计
         self.total_sub_agents_created = 0
@@ -172,7 +174,7 @@ class SimpleAgent:
 
         tree_info = f"""
 **当前状态：**
-- 当前工作目录: {os.getcwd()}
+- 当前工作目录: {self.workspace_dir or os.getcwd()}
 - Agent ID: {self.agent_id}
 - 当前深度: {self.depth}
 - 最大深度: {self.max_depth}
@@ -1063,7 +1065,8 @@ class Executor:
     """
 
     def __init__(self, config: Optional[Config] = None, max_depth: int = 4, session_manager: Optional['SessionManager'] = None,
-                 output_handler: Optional[OutputHandler] = None, command_confirm_callback: Optional[Callable[[str], str]] = None):
+                 output_handler: Optional[OutputHandler] = None, command_confirm_callback: Optional[Callable[[str], str]] = None,
+                 workspace_dir: Optional[str] = None):
         """初始化执行器
 
         Args:
@@ -1080,6 +1083,7 @@ class Executor:
         self.context_stack: list[SimpleAgent] = []
         self.current_agent: Optional[SimpleAgent] = None
         self._is_running = False
+        self.workspace_dir = workspace_dir
 
         # 全局子Agent配额（防止层级间循环）- 累加计数
         self._global_subagent_total = max_depth ** 2 * 2  # 总配额
@@ -1158,6 +1162,7 @@ class Executor:
             max_depth=self.max_depth,
             global_subagent_count=global_subagent_count,
             agent_name=agent_name,
+            workspace_dir=self.workspace_dir,
             output_handler=self._output_handler  # 传递 output_handler
         )
         # 设置双回调（前快照 + 后快照）

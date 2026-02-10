@@ -6,6 +6,8 @@
 
 import logging
 import os
+import json
+import subprocess
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -43,6 +45,11 @@ _REALTIME_WINDOW_SECONDS = 60
 _pending_authorizations: Dict[str, Dict[str, Any]] = {}
 _pending_latest_card_by_chat: Dict[str, str] = {}
 _pending_auth_lock = threading.Lock()
+_pending_workspace_cards: Dict[str, Dict[str, Any]] = {}
+_pending_workspace_latest_by_chat: Dict[str, str] = {}
+_pending_workspace_lock = threading.Lock()
+_session_workspaces: Dict[str, str] = {}
+_session_workspace_lock = threading.Lock()
 
 
 def _format_event_create_time(create_time_ms: str) -> str:
@@ -113,8 +120,152 @@ def _is_clear_command(text: str) -> bool:
     return re.fullmatch(r"/clear", text_norm) is not None
 
 
+def _is_change_workspace_command(text: str) -> bool:
+    """判断是否为切换工作目录命令。"""
+    import re
+
+    if not text:
+        return False
+    text_norm = text.strip().lower()
+    return re.fullmatch(r"/(?:change_workspace|cw|ws)", text_norm) is not None
+
+
+def _query_zlocation_options(limit: int = 10) -> list[dict]:
+    """
+    获取 ZLocation 候选目录并转换为卡片 select_static options。
+    返回格式: [{"text": {"tag": "plain_text", "content": "..."}, "value": "..."}]
+    """
+    command = (
+        "Import-Module ZLocation -ErrorAction SilentlyContinue; "
+        f"$items = z -l | Select-Object -First {max(1, limit)} Weight,Path; "
+        "$items | ConvertTo-Json -Compress"
+    )
+    options: list[dict] = []
+    try:
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", command],
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+        if proc.returncode != 0:
+            logger.warning(
+                f"[change_workspace] Get-ZLocation 执行失败: code={proc.returncode}, stderr={proc.stderr[:200]}"
+            )
+        else:
+            stdout = (proc.stdout or "").strip()
+            if stdout:
+                data = json.loads(stdout)
+                items = data if isinstance(data, list) else [data]
+                seen = set()
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    path = str(item.get("Path", "")).strip()
+                    score = item.get("Weight", "")
+                    if not path or path in seen or not os.path.isdir(path):
+                        continue
+                    seen.add(path)
+                    label = f"[{score}] {path}" if score != "" else path
+                    if len(label) > 120:
+                        label = f"{label[:117]}..."
+                    options.append(
+                        {
+                            "text": label,
+                            "value": path,
+                        }
+                    )
+    except Exception as e:
+        logger.warning(f"[change_workspace] 读取 ZLocation 候选失败: {e}")
+
+    # 兜底：至少提供当前目录
+    if not options:
+        cwd = os.getcwd()
+        options.append(
+            {
+                "text": f"[current] {cwd}",
+                "value": cwd,
+            }
+        )
+    return options
+
+
+def _extract_workspace_selection(action_value: Dict[str, Any], event: Any) -> str:
+    """从卡片 submit_selection 回调中提取 dynamic_list 选项值。"""
+    value = action_value.get("dynamic_list")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    if isinstance(value, list) and value:
+        v0 = value[0]
+        if isinstance(v0, str):
+            return v0.strip()
+        if isinstance(v0, dict):
+            candidate = str(v0.get("value", "")).strip()
+            if candidate:
+                return candidate
+
+    action_obj = getattr(event, "action", None) if event else None
+    form_value = getattr(action_obj, "form_value", None) if action_obj else None
+    if isinstance(form_value, dict):
+        # 常见结构：{"dynamic_list": "..."} 或 {"selection_form": {"dynamic_list": "..."}}
+        raw = form_value.get("dynamic_list")
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()
+        if isinstance(raw, dict):
+            candidate = str(raw.get("value", "")).strip()
+            if candidate:
+                return candidate
+        if isinstance(raw, list) and raw:
+            first = raw[0]
+            if isinstance(first, str):
+                return first.strip()
+            if isinstance(first, dict):
+                candidate = str(first.get("value", "")).strip()
+                if candidate:
+                    return candidate
+
+        for nested in form_value.values():
+            if isinstance(nested, dict):
+                raw_nested = nested.get("dynamic_list")
+                if isinstance(raw_nested, str) and raw_nested.strip():
+                    return raw_nested.strip()
+                if isinstance(raw_nested, dict):
+                    candidate = str(raw_nested.get("value", "")).strip()
+                    if candidate:
+                        return candidate
+                if isinstance(raw_nested, list) and raw_nested:
+                    first = raw_nested[0]
+                    if isinstance(first, str):
+                        return first.strip()
+                    if isinstance(first, dict):
+                        candidate = str(first.get("value", "")).strip()
+                        if candidate:
+                            return candidate
+    return ""
+
+
 def _build_session_key(chat_type: str, chat_id: str) -> str:
     return f"{chat_type}:{chat_id}"
+
+
+def _get_session_workspace(chat_type: str, chat_id: str) -> str:
+    """获取会话级工作目录，未设置时回退到进程 cwd。"""
+    session_key = _build_session_key(chat_type, chat_id)
+    with _session_workspace_lock:
+        return _session_workspaces.get(session_key, os.getcwd())
+
+
+def _set_session_workspace(chat_type: str, chat_id: str, workspace_dir: str) -> None:
+    """设置会话级工作目录。"""
+    session_key = _build_session_key(chat_type, chat_id)
+    with _session_workspace_lock:
+        _session_workspaces[session_key] = workspace_dir
+
+
+def _wrap_command_with_workspace(command: str, workspace_dir: str) -> str:
+    """在命令前注入切换目录（PowerShell）。"""
+    escaped = workspace_dir.replace("'", "''")
+    return f"Set-Location -LiteralPath '{escaped}'; {command}"
 
 
 def _get_or_create_adapter(chat_type: str, chat_id: str) -> WebhookAdapter:
@@ -127,8 +278,12 @@ def _get_or_create_adapter(chat_type: str, chat_id: str) -> WebhookAdapter:
             if _config is None or _platform is None:
                 raise RuntimeError("Webhook 服务未初始化完成")
             adapter = WebhookAdapter(config=_config, platform=_platform, chat_id=chat_id)
+            workspace_dir = _get_session_workspace(chat_type, chat_id)
+            adapter.executor.workspace_dir = workspace_dir
             _adapters[session_key] = adapter
             logger.info(f"[会话] 创建新会话适配器: session_key={session_key}")
+        else:
+            adapter.executor.workspace_dir = _get_session_workspace(chat_type, chat_id)
         return adapter
 
 
@@ -157,11 +312,78 @@ def _clear_session_context(chat_type: str, chat_id: str) -> bool:
             del _pending_authorizations[card_id]
             removed = True
 
+    with _pending_workspace_lock:
+        latest_ws_card_id = _pending_workspace_latest_by_chat.pop(chat_id, None)
+        if latest_ws_card_id and latest_ws_card_id in _pending_workspace_cards:
+            del _pending_workspace_cards[latest_ws_card_id]
+            removed = True
+
+        stale_ws_keys = [
+            card_id
+            for card_id, ctx in _pending_workspace_cards.items()
+            if ctx.get("chat_id") == chat_id and ctx.get("chat_type") == chat_type
+        ]
+        for card_id in stale_ws_keys:
+            del _pending_workspace_cards[card_id]
+            removed = True
+
     return removed
 
 
+def _process_workspace_selection_async(card_message_id: str, selected_path: str) -> None:
+    """异步处理切换目录卡片选择。"""
+    with _pending_workspace_lock:
+        ws_ctx = _pending_workspace_cards.pop(card_message_id, None)
+        if ws_ctx:
+            _pending_workspace_latest_by_chat.pop(ws_ctx["chat_id"], None)
+
+    if not ws_ctx:
+        logger.warning(f"[change_workspace] 未找到待处理卡片上下文: card_message_id={card_message_id}")
+        return
+
+    platform: FeishuPlatform = ws_ctx["platform"]
+    chat_id: str = ws_ctx["chat_id"]
+    chat_type: str = ws_ctx["chat_type"]
+    source_message_id: str = ws_ctx["source_message_id"]
+    allowed_paths = set(ws_ctx.get("allowed_paths", []))
+
+    selected_path = (selected_path or "").strip()
+    logger.info(
+        f"[change_workspace] 提交选择: card_message_id={card_message_id}, "
+        f"selected_path={selected_path!r}, allowed_count={len(allowed_paths)}"
+    )
+
+    if not selected_path:
+        platform.update_workspace_selection_card_result(card_message_id, "❌ 切换失败：未选择目录。")
+        platform.send_message("❌ 未选择目录，请重新发送 /cw", chat_id, chat_type, source_message_id)
+        return
+
+    if allowed_paths and selected_path not in allowed_paths:
+        platform.update_workspace_selection_card_result(card_message_id, f"❌ 切换失败：目录不在候选列表。\n`{selected_path}`")
+        platform.send_message("❌ 目录不在候选列表，请重新发送 /cw", chat_id, chat_type, source_message_id)
+        return
+
+    if not os.path.isdir(selected_path):
+        platform.update_workspace_selection_card_result(card_message_id, f"❌ 切换失败：目录不存在。\n`{selected_path}`")
+        platform.send_message(f"❌ 目录不存在：{selected_path}", chat_id, chat_type, source_message_id)
+        return
+
+    try:
+        _set_session_workspace(chat_type, chat_id, selected_path)
+        logger.info(f"[change_workspace] 已切换会话工作目录: session={_build_session_key(chat_type, chat_id)}, cwd={selected_path}")
+        # 切换目录后重建当前会话，避免沿用旧目录注入和旧对话上下文
+        _clear_session_context(chat_type, chat_id)
+        platform.update_workspace_selection_card_result(card_message_id, f"✅ 已切换工作目录\n`{selected_path}`")
+        platform.send_message(f"✅ 已切换工作目录：{selected_path}", chat_id, chat_type, source_message_id)
+    except Exception as e:
+        logger.error(f"[change_workspace] 切换目录失败: path={selected_path}, error={e}")
+        platform.update_workspace_selection_card_result(card_message_id, f"❌ 切换失败：{e}")
+        platform.send_message(f"❌ 切换目录失败：{e}", chat_id, chat_type, source_message_id)
+
+
 def _continue_executor_after_auth(adapter: WebhookAdapter, platform: FeishuPlatform,
-                                  chat_id: str, chat_type: str, source_message_id: str) -> None:
+                                  chat_id: str, chat_type: str, source_message_id: str,
+                                  session_key: str = "") -> None:
     """在命令确认后继续执行 Executor 流程。"""
     total_outputs = 0
     for output_list, step_result in adapter.executor._execute_loop():
@@ -211,7 +433,10 @@ def _continue_executor_after_auth(adapter: WebhookAdapter, platform: FeishuPlatf
             break
 
         if step_result.action == Action.WAIT:
-            logger.info("授权后流程进入 WAIT 状态，按配置不发送“等待用户输入...”提示")
+            logger.info(
+                f"授权后流程进入 WAIT 状态，已回到主循环等待输入，"
+                f"session_key={session_key or _build_session_key(chat_type, chat_id)}"
+            )
             break
 
     logger.info(f"授权后继续执行完成，本轮输出 {total_outputs} 条")
@@ -225,17 +450,18 @@ def _try_auto_execute_pending_commands(adapter: WebhookAdapter, pending_commands
     try:
         from ..cli import _execute_command, _format_shell_result
 
-        current_dir = os.getcwd()
+        workspace_dir = getattr(adapter.executor, "workspace_dir", None) or os.getcwd()
 
         # 先全量判断安全性，任一不安全则回退到卡片授权
         for command_spec in pending_commands:
             command = command_spec.command if hasattr(command_spec, "command") else str(command_spec)
-            if not is_safe_command(command, current_dir):
+            if not is_safe_command(command, workspace_dir):
                 logger.info(f"[自动授权] 检测到非安全命令，回退卡片授权: {command}")
                 return False
 
         for command_spec in pending_commands:
             command = command_spec.command if hasattr(command_spec, "command") else str(command_spec)
+            wrapped_command = _wrap_command_with_workspace(command, workspace_dir)
             command_timeout = (
                 command_spec.timeout
                 if hasattr(command_spec, "timeout") and command_spec.timeout is not None
@@ -244,7 +470,7 @@ def _try_auto_execute_pending_commands(adapter: WebhookAdapter, pending_commands
             background = bool(getattr(command_spec, "background", False))
 
             cmd_result = _execute_command(
-                command,
+                wrapped_command,
                 command_timeout,
                 config=adapter.executor.config,
                 context_messages=(adapter.executor.current_agent.history if adapter.executor.current_agent else None),
@@ -321,8 +547,10 @@ def _process_card_action_async(card_message_id: str, action: str, auto: bool,
         from ..cli import _execute_command, _format_shell_result
 
         if action == "approve":
+            workspace_dir = getattr(adapter.executor, "workspace_dir", None) or _get_session_workspace(chat_type, chat_id)
             for command_spec in pending_commands:
                 command = command_spec.command if hasattr(command_spec, "command") else str(command_spec)
+                wrapped_command = _wrap_command_with_workspace(command, workspace_dir)
                 command_timeout = (
                     command_spec.timeout
                     if hasattr(command_spec, "timeout") and command_spec.timeout is not None
@@ -331,7 +559,7 @@ def _process_card_action_async(card_message_id: str, action: str, auto: bool,
                 background = bool(getattr(command_spec, "background", False))
 
                 cmd_result = _execute_command(
-                    command,
+                    wrapped_command,
                     command_timeout,
                     config=adapter.executor.config,
                     context_messages=(adapter.executor.current_agent.history if adapter.executor.current_agent else None),
@@ -358,7 +586,10 @@ def _process_card_action_async(card_message_id: str, action: str, auto: bool,
                 )
 
         adapter.executor._is_running = True
-        _continue_executor_after_auth(adapter, platform, chat_id, chat_type, source_message_id)
+        _continue_executor_after_auth(
+            adapter, platform, chat_id, chat_type, source_message_id,
+            session_key=_build_session_key(chat_type, chat_id)
+        )
     except Exception as e:
         logger.error(f"[卡片交互] 授权处理失败: {e}")
         import traceback
@@ -392,12 +623,15 @@ def handle_card_action_trigger(data):
         if reject_reason:
             action_value["reject_reason"] = reject_reason
 
-        # 卡片动作约定：approve / reject / auto_approve / submit_reject
+        # 卡片动作约定：approve / reject / auto_approve / submit_reject / submit_selection
         if raw_action == "auto_approve":
             action = "approve"
             auto = True
         elif raw_action == "submit_reject":
             action = "reject"
+            auto = False
+        elif raw_action == "submit_selection":
+            action = "submit_selection"
             auto = False
         elif raw_action in {"approve", "reject"}:
             action = raw_action
@@ -413,6 +647,9 @@ def handle_card_action_trigger(data):
         if not open_message_id and open_chat_id:
             with _pending_auth_lock:
                 open_message_id = _pending_latest_card_by_chat.get(open_chat_id, "")
+            if not open_message_id:
+                with _pending_workspace_lock:
+                    open_message_id = _pending_workspace_latest_by_chat.get(open_chat_id, "")
 
         logger.info(
             f"[卡片交互] 解析结果: action={action}, auto={auto}, "
@@ -420,7 +657,14 @@ def handle_card_action_trigger(data):
             f"reject_reason={reject_reason!r}"
         )
 
-        if open_message_id:
+        if action == "submit_selection":
+            selected_path = _extract_workspace_selection(action_value, event)
+            logger.info(f"[change_workspace] 卡片提交选项: selected_path={selected_path!r}")
+            if open_message_id:
+                _executor.submit(_process_workspace_selection_async, open_message_id, selected_path)
+            else:
+                logger.warning("[change_workspace] 缺少 open_message_id，无法处理目录切换")
+        elif open_message_id:
             _executor.submit(_process_card_action_async, open_message_id, action, auto, action_value)
         else:
             logger.warning("[卡片交互] 缺少 open_message_id，无法匹配待授权上下文")
@@ -591,6 +835,55 @@ def handle_message(data):
                     )
                     return
 
+                # 内建命令：切换当前进程工作目录（通过卡片选择）
+                if _is_change_workspace_command(text):
+                    if _platform is None:
+                        logger.error("[change_workspace] 平台未初始化")
+                        return
+                    if not isinstance(_platform, FeishuPlatform):
+                        _platform.send_message(
+                            "❌ 当前平台不支持切换目录卡片。",
+                            chat_id,
+                            chat_type,
+                            message_id,
+                        )
+                        return
+
+                    dir_options = _query_zlocation_options(limit=10)
+                    logger.info(
+                        f"[change_workspace] 准备发送目录选择卡片: options={len(dir_options)}, "
+                        f"chat_id={chat_id}, message_id={message_id}"
+                    )
+
+                    card_message_id = _platform.send_workspace_selection_card(
+                        chat_id=chat_id,
+                        chat_type=chat_type,
+                        message_id=message_id,
+                        dir_list=dir_options,
+                    )
+                    if card_message_id:
+                        with _pending_workspace_lock:
+                            _pending_workspace_cards[card_message_id] = {
+                                "platform": _platform,
+                                "chat_id": chat_id,
+                                "chat_type": chat_type,
+                                "source_message_id": message_id,
+                                "allowed_paths": [opt.get("value", "") for opt in dir_options if isinstance(opt, dict)],
+                            }
+                            _pending_workspace_latest_by_chat[chat_id] = card_message_id
+                        logger.info(
+                            f"[change_workspace] 已缓存目录选择上下文: card_message_id={card_message_id}, "
+                            f"allowed_paths={len(dir_options)}"
+                        )
+                    else:
+                        _platform.send_message(
+                            "❌ 目录选择卡片发送失败，请稍后重试。",
+                            chat_id,
+                            chat_type,
+                            message_id,
+                        )
+                    return
+
                 # 仅处理实时事件：create_time 超过窗口则丢弃（防止历史补投再次触发）
                 delay_seconds = None
                 if create_time:
@@ -636,6 +929,8 @@ def execute_task_async(task: str, chat_id: str, chat_type: str, message_id: str,
         platform = _platform
         adapter = _get_or_create_adapter(chat_type, chat_id)
         start_time = time.time()
+        workspace_dir = _get_session_workspace(chat_type, chat_id)
+        adapter.executor.workspace_dir = workspace_dir
 
         # 更新 chat_id
         adapter.chat_id = chat_id
@@ -708,7 +1003,15 @@ def execute_task_async(task: str, chat_id: str, chat_type: str, message_id: str,
 
             # 检查是否需要等待用户输入
             if step_result.action == Action.WAIT:
-                logger.info("任务进入 WAIT 状态，按配置不发送“等待用户输入...”提示")
+                logger.info(
+                    f"任务进入 WAIT 状态，已回到主循环等待输入，session_key={session_key}"
+                )
+                platform.send_message(
+                    "✅ 已回到主循环，等待你的下一条指令",
+                    chat_id,
+                    chat_type,
+                    message_id,
+                )
                 break
 
         elapsed = time.time() - start_time

@@ -74,14 +74,11 @@ def main():
 
     c = console.Console()
     c.print(
-        "\n[bold cyan]╔═══════════════════════════════════════════╗[/bold cyan]"
-    )
-    c.print("[bold cyan]║[/bold cyan]   [bold cyan]task-agent webhook 服务[/bold cyan]           [bold cyan]║[/bold cyan]")
-    c.print(
-        "[bold cyan]║[/bold cyan]   [dim]飞书长连接模式 - 无需公网服务器[/dim]    [bold cyan]║[/bold cyan]"
-    )
-    c.print(
-        "[bold cyan]╚═══════════════════════════════════════════╝[/bold cyan]\n"
+        "\n"
+        "╔═══════════════════════════════════════════╗\n"
+        "   task-agent webhook 服务\n"
+        "   飞书长连接模式 - 无需公网服务器\n"
+        "╚═══════════════════════════════════════════╝\n"
     )
 
     # 检查环境变量
