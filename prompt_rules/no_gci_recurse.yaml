@@ -1,0 +1,12 @@
+name: no-gci-recurse
+description: Get-ChildItem -Recurse 不要随便调用，先做范围收敛
+platforms:
+  - windows
+shell_tools:
+  - ps_call
+disable: false
+system_prompt_injection: |
+  - `Get-ChildItem -Recurse` 默认禁止直接使用，避免无边界扫描。
+  - 先用更轻量方式收敛范围：`rg --files`（优先）或限定路径的 `Get-ChildItem`。
+  - 只有在“目标目录已明确 + 递归确有必要”时，才允许使用 `Get-ChildItem -Recurse`。
+  - 允许递归时必须加边界条件（如固定根目录、`-Filter`、结果数量控制），禁止对工作区根目录做全量递归。

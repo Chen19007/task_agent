@@ -209,6 +209,10 @@ class SimpleAgent:
             plugin_metadata="",
         )
 
+        prompt_rules_section = self._build_prompt_rules_section()
+        if prompt_rules_section:
+            base_system_prompt = f"{base_system_prompt.rstrip()}\n\n{prompt_rules_section}\n"
+
         self.history.append(Message(role="system", content=base_system_prompt))
 
     def _load_hint_metadata(self) -> str:
@@ -500,6 +504,83 @@ class SimpleAgent:
         if isinstance(value, str):
             return value.strip().lower() in {"1", "true", "yes", "y", "on"}
         return False
+
+    def _get_prompt_rules_dir(self) -> str:
+        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        rules_dir = os.path.join(project_root, "prompt_rules")
+        return rules_dir if os.path.isdir(rules_dir) else ""
+
+    @staticmethod
+    def _normalize_rule_values(value: Any) -> list[str]:
+        if isinstance(value, list):
+            return [str(item).strip().lower() for item in value if str(item).strip()]
+        if isinstance(value, str):
+            text = value.strip().lower()
+            return [text] if text else []
+        return []
+
+    def _is_prompt_rule_applicable(self, rule: dict[str, Any]) -> bool:
+        rule_platforms = self._normalize_rule_values(rule.get("platforms"))
+        if rule_platforms:
+            current_platform = get_hint_platform_suffix().lower()
+            if "all" not in rule_platforms and current_platform not in rule_platforms:
+                return False
+
+        shell_tools = self._normalize_rule_values(rule.get("shell_tools"))
+        if shell_tools:
+            current_shell_tool = get_shell_tool_name().lower()
+            if "all" not in shell_tools and current_shell_tool not in shell_tools:
+                return False
+
+        required_scene = str(rule.get("required_scene", "")).strip().lower()
+        if required_scene and required_scene != self.runtime_scene:
+            return False
+        return True
+
+    def _load_prompt_rules(self) -> list[dict[str, Any]]:
+        rules_dir = self._get_prompt_rules_dir()
+        if not rules_dir:
+            return []
+
+        rules: list[dict[str, Any]] = []
+        for filename in sorted(os.listdir(rules_dir)):
+            if not filename.lower().endswith((".yaml", ".yml")):
+                continue
+
+            rule_path = os.path.join(rules_dir, filename)
+            try:
+                with open(rule_path, "r", encoding="utf-8-sig") as handle:
+                    raw = yaml.safe_load(handle)
+            except (OSError, UnicodeDecodeError, yaml.YAMLError):
+                continue
+
+            if not isinstance(raw, dict):
+                continue
+            if self._metadata_disabled(raw.get("disable")):
+                continue
+            if not self._is_prompt_rule_applicable(raw):
+                continue
+            rules.append(raw)
+        return rules
+
+    def _build_prompt_rules_section(self) -> str:
+        rules = self._load_prompt_rules()
+        if not rules:
+            return ""
+
+        lines = ["**动态执行规则（按当前环境自动加载）**"]
+        for idx, rule in enumerate(rules, start=1):
+            name = str(rule.get("name", f"rule-{idx}")).strip() or f"rule-{idx}"
+            description = str(rule.get("description", "")).strip()
+            injection = str(rule.get("system_prompt_injection", "")).strip()
+
+            lines.append(f"{idx}. {name}")
+            if description:
+                lines.append(f"- 说明：{description}")
+            if injection:
+                lines.append(injection)
+            lines.append("")
+        return "\n".join(lines).strip()
 
     def _get_hints_dir(self) -> str:
         """获取 hints 根目录路径"""

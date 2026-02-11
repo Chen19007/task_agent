@@ -36,9 +36,9 @@ git status
 
 **Step 3: 列出目录内容**
 ```powershell
-Get-ChildItem
+Get-ChildItem -Depth 1
 ```
-了解项目结构
+了解项目结构（仅当前目录，不递归）
 
 ### Phase 2: Git 初始化
 
