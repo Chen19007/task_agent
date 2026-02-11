@@ -89,12 +89,17 @@ def can_auto_execute_command(
     command_spec: CommandSpec,
     auto_approve: bool,
     workspace_dir: str = "",
+    config: object | None = None,
 ) -> bool:
     if not auto_approve:
         return False
     if is_builtin_command(command_spec):
         return not builtin_requires_authorization(command_spec.command, workspace_dir)
-    return is_safe_command(command_spec.command, workspace_dir or ".")
+    return is_safe_command(
+        command_spec.command,
+        workspace_dir or ".",
+        str(getattr(command_spec, "tool", "")).strip().lower() or "ps_call",
+    )
 
 
 def format_shell_result(status: str, message: str) -> str:

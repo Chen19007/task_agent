@@ -1,0 +1,18 @@
+blocked_command_regex: []
+allowed_command_regex: []
+
+tools:
+  ps_call:
+    blocked_command_regex:
+      - '(?i)^git\s+push\b.*\s--force(?:-with-lease)?\b'
+      - '(?i)^git\s+reset\b.*\s--hard\b'
+      - '(?i)^git\s+clean\b.*\s-f\b'
+    allowed_command_regex:
+      - '(?i)^git\s+push\b(?!.*\s--force(?:-with-lease)?\b).*'
+  bash_call:
+    blocked_command_regex:
+      - '(?i)^git\s+push\b.*\s--force(?:-with-lease)?\b'
+      - '(?i)^git\s+reset\b.*\s--hard\b'
+      - '(?i)^git\s+clean\b.*\s-f\b'
+    allowed_command_regex:
+      - '(?i)^git\s+push\b(?!.*\s--force(?:-with-lease)?\b).*'

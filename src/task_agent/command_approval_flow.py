@@ -37,11 +37,12 @@ class CommandApprovalFlow:
         commands: Iterable[CommandSpec],
         auto_approve: bool,
         workspace_dir: str,
+        config: object | None = None,
     ) -> tuple[list[CommandSpec], list[CommandSpec]]:
         auto_list: list[CommandSpec] = []
         manual_list: list[CommandSpec] = []
         for command_spec in commands:
-            if can_auto_execute_command(command_spec, auto_approve, workspace_dir):
+            if can_auto_execute_command(command_spec, auto_approve, workspace_dir, config=config):
                 auto_list.append(command_spec)
             else:
                 manual_list.append(command_spec)
@@ -81,7 +82,12 @@ class CommandApprovalFlow:
         if not executor.auto_approve:
             return False
         normalized = self.normalize_commands(pending_commands)
-        auto_list, manual_list = self.split_auto_executable(normalized, True, workspace_dir)
+        auto_list, manual_list = self.split_auto_executable(
+            normalized,
+            True,
+            workspace_dir,
+            config=getattr(executor, "config", None),
+        )
         if manual_list:
             return False
         self.execute_commands(executor, auto_list, workspace_dir, output_result)
@@ -98,4 +104,3 @@ class CommandApprovalFlow:
             output_result(reject_text, "rejected")
         if executor.current_agent:
             executor.current_agent._add_message("user", format_shell_result("rejected", reject_text))
-
