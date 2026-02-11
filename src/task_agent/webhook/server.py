@@ -330,6 +330,16 @@ def _clear_session_context(chat_type: str, chat_id: str) -> bool:
     return removed
 
 
+def _reset_session_and_get_id(chat_type: str, chat_id: str) -> Optional[int]:
+    """清理后立即重建会话适配器，并返回新的会话ID。"""
+    try:
+        adapter = _get_or_create_adapter(chat_type, chat_id)
+        return adapter.get_current_session_id()
+    except Exception as e:
+        logger.error(f"[session] 重建会话失败: chat_type={chat_type}, chat_id={chat_id}, error={e}")
+        return None
+
+
 def _process_workspace_selection_async(card_message_id: str, selected_path: str) -> None:
     """异步处理切换目录卡片选择。"""
     with _pending_workspace_lock:
@@ -373,6 +383,8 @@ def _process_workspace_selection_async(card_message_id: str, selected_path: str)
         logger.info(f"[change_workspace] 已切换会话工作目录: session={_build_session_key(chat_type, chat_id)}, cwd={selected_path}")
         # 切换目录后重建当前会话，避免沿用旧目录注入和旧对话上下文
         _clear_session_context(chat_type, chat_id)
+        new_session_id = _reset_session_and_get_id(chat_type, chat_id)
+        logger.info(f"[change_workspace] 会话重建完成: session_key={_build_session_key(chat_type, chat_id)}, session_id={new_session_id}, cwd={selected_path}")
         platform.update_workspace_selection_card_result(card_message_id, f"✅ 已切换工作目录\n`{selected_path}`")
         platform.send_message(f"✅ 已切换工作目录：{selected_path}", chat_id, chat_type, source_message_id)
     except Exception as e:
@@ -790,6 +802,7 @@ def handle_message(data):
                 # 内建命令：清理当前会话上下文
                 if _is_clear_command(text):
                     cleared = _clear_session_context(chat_type, chat_id)
+                    new_session_id = _reset_session_and_get_id(chat_type, chat_id)
                     if _platform is not None:
                         if cleared:
                             _platform.send_message(
@@ -806,7 +819,7 @@ def handle_message(data):
                                 message_id,
                             )
                     logger.info(
-                        f"[内建命令] /clear 执行完成: cleared={cleared}, "
+                        f"[内建命令] /clear 执行完成: cleared={cleared}, new_session_id={new_session_id}, "
                         f"session_key={_build_session_key(chat_type, chat_id)}"
                     )
                     return
