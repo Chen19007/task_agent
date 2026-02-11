@@ -18,6 +18,10 @@ from .llm import create_client, ChatMessage
 from .output_handler import OutputHandler, NullOutputHandler
 from .platform_utils import get_hint_platform_suffix, get_shell_tool_name
 from .hint_utils import select_hint_file
+from .builtin_schema import (
+    build_builtin_read_file_example_lines,
+    build_builtin_smart_edit_example_lines,
+)
 
 
 class Action(Enum):
@@ -463,7 +467,27 @@ class SimpleAgent:
             lines.append(f"**2.{idx} {title}**")
             lines.extend(body_lines)
             lines.append("")
-        return "\n".join(lines).strip()
+        section_text = "\n".join(lines).strip()
+        return self._sync_builtin_examples_from_schema(section_text)
+
+    @staticmethod
+    def _sync_builtin_examples_from_schema(section_text: str) -> str:
+        """用 schema 生成 read_file/smart_edit 示例，避免提示词与实现漂移。"""
+        read_example = "\n".join(build_builtin_read_file_example_lines())
+        smart_edit_example = "\n".join(build_builtin_smart_edit_example_lines())
+        section_text = re.sub(
+            r"<builtin>\s*\nread_file[\s\S]*?</builtin>",
+            read_example,
+            section_text,
+            count=1,
+        )
+        section_text = re.sub(
+            r"<builtin>\s*\nsmart_edit[\s\S]*?</builtin>",
+            smart_edit_example,
+            section_text,
+            count=1,
+        )
+        return section_text
 
     @staticmethod
     def _metadata_disabled(value: object) -> bool:

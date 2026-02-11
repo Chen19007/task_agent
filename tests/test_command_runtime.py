@@ -23,7 +23,7 @@ class _FakeExecResult:
         self.returncode = 0
 
 
-def _fake_execute_command(command, timeout, config=None, context_messages=None, background=False):
+def _fake_execute_command(command, timeout, config=None, context_messages=None, background=False, workspace_dir=""):
     return _FakeExecResult(command)
 
 
@@ -51,3 +51,23 @@ def test_execute_command_spec_builtin_not_wrapped():
 def test_can_auto_execute_builtin_when_auto_on():
     spec = normalize_command_spec(CommandSpec(command="builtin.read_file\npath: a.txt", tool="builtin"))
     assert can_auto_execute_command(spec, True, "E:/project/python/task_agent")
+
+
+def test_can_auto_execute_builtin_outside_workspace_requires_authorization():
+    spec = normalize_command_spec(
+        CommandSpec(command="builtin.read_file\npath: C:/Windows/System32/drivers/etc/hosts", tool="builtin")
+    )
+    assert not can_auto_execute_command(spec, True, "E:/project/python/task_agent")
+
+
+def test_execute_command_spec_passes_workspace_to_execute_command():
+    received = {}
+
+    def _capture_execute_command(command, timeout, config=None, context_messages=None, background=False, workspace_dir=""):
+        received["workspace_dir"] = workspace_dir
+        return _FakeExecResult(command)
+
+    spec = CommandSpec(command="builtin.read_file\npath: a.txt", tool="builtin")
+    context = ExecutionContext(config=Config(), workspace_dir="E:/project/python/task_agent")
+    execute_command_spec(spec, context, _capture_execute_command)
+    assert received["workspace_dir"] == "E:/project/python/task_agent"

@@ -4,6 +4,7 @@
 """
 
 from typing import Generator, Optional
+import os
 
 from ..agent import Executor, StepResult
 from ..config import Config
@@ -33,6 +34,7 @@ class ExecutorAdapter:
             session_manager=self.session_manager,
             output_handler=output_handler,
             runtime_scene="gui",
+            workspace_dir=os.getcwd(),
         )
 
     def execute_task(self, task: str) -> Generator[tuple[list[str], StepResult], None, None]:

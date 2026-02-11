@@ -5,6 +5,7 @@ Webhook 适配器
 """
 
 import logging
+import os
 from typing import Generator, Optional
 
 from ..agent import Executor, StepResult
@@ -56,6 +57,7 @@ class WebhookAdapter:
             session_manager=self.session_manager,
             output_handler=self.output_handler,
             runtime_scene="webhook",
+            workspace_dir=os.getcwd(),
         )
 
     def execute_task(self, task: str) -> Generator[tuple[list[str], StepResult], None, None]:

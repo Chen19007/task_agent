@@ -36,6 +36,7 @@ from .output_handler import NullOutputHandler
 from .session import SessionManager
 from .platform_utils import is_windows
 from .hint_utils import select_hint_file
+from .builtin_schema import resolve_path_against_workspace
 from .webhook.calendar_service import create_feishu_calendar_event
 
 # 自定义主题
@@ -126,6 +127,11 @@ _AGENT_START_DIR = os.getcwd()
 
 def _ps_escape(text: str) -> str:
     return text.replace("'", "''")
+
+
+def _get_effective_workspace_dir(workspace_dir: Optional[str]) -> str:
+    """获取有效工作目录，不对 builtin 做 cwd 隐式兜底。"""
+    return (workspace_dir or "").strip()
 
 
 def _get_editor_command() -> list[str]:
@@ -531,7 +537,12 @@ def main():
 
     # 交互模式
     session_manager = SessionManager()
-    executor = Executor(config, session_manager=session_manager, runtime_scene="cli")  # 保持 Executor 实例，保留上下文
+    executor = Executor(
+        config,
+        session_manager=session_manager,
+        runtime_scene="cli",
+        workspace_dir=os.getcwd(),
+    )  # 保持 Executor 实例，保留上下文
     paste_mode = False
     paste_lines: list[str] = []
     paste_prompt_shown = False
@@ -817,6 +828,7 @@ def _run_single_task(config: Config, task: str, executor: 'Executor' = None, ses
             session_manager=session_manager,
             output_handler=cli_output,
             runtime_scene="cli",
+            workspace_dir=os.getcwd(),
         )
     else:
         # 更新现有 executor 的 output_handler
@@ -1013,7 +1025,7 @@ def _create_cli_command_confirm_callback(executor: 'Executor', console: Console)
         """
         # 检查是否自动执行
         command_spec = normalize_command_spec(CommandSpec(command=command))
-        current_dir = os.getcwd()
+        current_dir = _get_effective_workspace_dir(executor.workspace_dir)
         auto_execute = can_auto_execute_command(command_spec, executor.auto_approve, current_dir)
 
         if auto_execute:
@@ -1101,7 +1113,7 @@ def _handle_pending_commands(executor: 'Executor', console: Console, result: 'St
         command = command_spec.command
 
         # 检查是否自动执行
-        current_dir = os.getcwd()
+        current_dir = _get_effective_workspace_dir(executor.workspace_dir)
         auto_execute = can_auto_execute_command(command_spec, executor.auto_approve, current_dir)
 
         if auto_execute:
@@ -1205,19 +1217,23 @@ def _prefix_builtin_result(tool_name: str, result: _ExecResult) -> _ExecResult:
     return result
 
 
-def _execute_builtin_tool(command: str, config: Optional[Config] = None,
-                          context_messages: Optional[list] = None) -> Optional[_ExecResult]:
+def _execute_builtin_tool(
+    command: str,
+    config: Optional[Config] = None,
+    context_messages: Optional[list] = None,
+    workspace_dir: str = "",
+) -> Optional[_ExecResult]:
     stripped = command.strip()
     if stripped.lower().startswith("builtin.smart_edit"):
         parsed_args, error = _parse_smart_edit_command(stripped)
         if error:
             return _prefix_builtin_result("smart_edit", _ExecResult("", error, 1))
-        return _prefix_builtin_result("smart_edit", _execute_builtin_smart_edit(parsed_args))
+        return _prefix_builtin_result("smart_edit", _execute_builtin_smart_edit(parsed_args, workspace_dir))
     if stripped.lower().startswith("builtin.read_file"):
         parsed_args, error = _parse_read_file_command(stripped)
         if error:
             return _prefix_builtin_result("read_file", _ExecResult("", error, 1))
-        return _prefix_builtin_result("read_file", _execute_builtin_read_file(parsed_args))
+        return _prefix_builtin_result("read_file", _execute_builtin_read_file(parsed_args, workspace_dir))
     if stripped.lower().startswith("builtin.get_job_log"):
         parsed_args, error = _parse_job_log_command(stripped)
         if error:
@@ -1300,10 +1316,24 @@ def _read_text_file(path: str, start_line: int, max_lines: int, encoding: str):
     return lines, has_more, capped, end_line, max_lines, None
 
 
-def _execute_builtin_read_file(args: dict) -> _ExecResult:
+def _resolve_builtin_file_path(raw_path: str, workspace_dir: str) -> tuple[Optional[str], Optional[str]]:
+    """解析 builtin 文件路径，禁止 cwd 隐式兜底。"""
+    resolved, error = resolve_path_against_workspace(raw_path, workspace_dir)
+    if error:
+        return None, error
+    if resolved is None:
+        return None, "路径解析失败"
+    return str(resolved), None
+
+
+def _execute_builtin_read_file(args: dict, workspace_dir: str = "") -> _ExecResult:
     path = args.get("path") or args.get("file") or args.get("filepath")
     if not path:
         return _ExecResult("", "read_file 需要参数: path", 1)
+    abs_path, resolve_error = _resolve_builtin_file_path(str(path), workspace_dir)
+    if resolve_error:
+        return _ExecResult("", resolve_error, 1)
+    assert abs_path is not None
 
     try:
         start_line = int(args.get("start_line", 1))
@@ -1313,7 +1343,7 @@ def _execute_builtin_read_file(args: dict) -> _ExecResult:
 
     encoding = args.get("encoding") or "utf-8-sig"
     lines, has_more, capped, end_line, max_lines, error = _read_text_file(
-        path, start_line, max_lines, encoding
+        abs_path, start_line, max_lines, encoding
     )
     if error:
         return _ExecResult("", error, 1)
@@ -1321,7 +1351,7 @@ def _execute_builtin_read_file(args: dict) -> _ExecResult:
     returned = len(lines)
     header_lines = [
         "内置工具 builtin.read_file 执行成功。",
-        f"路径: {path}",
+        f"路径: {abs_path}",
         f"返回行范围: {start_line}-{end_line}",
         f"返回行数: {returned}",
     ]
@@ -2236,10 +2266,14 @@ def _execute_builtin_create_schedule(args: dict, config: Config) -> _ExecResult:
     return _ExecResult("\n".join(lines), "", 0)
 
 
-def _execute_builtin_smart_edit(args: dict) -> _ExecResult:
+def _execute_builtin_smart_edit(args: dict, workspace_dir: str = "") -> _ExecResult:
     path = args.get("path") or args.get("file") or args.get("filepath")
     if not path:
         return _ExecResult("", "smart_edit 需要参数: path", 1)
+    abs_path, resolve_error = _resolve_builtin_file_path(str(path), workspace_dir)
+    if resolve_error:
+        return _ExecResult("", resolve_error, 1)
+    assert abs_path is not None
 
     mode = (args.get("mode") or "Patch").strip().lower()
     mode_map = {
@@ -2256,10 +2290,6 @@ def _execute_builtin_smart_edit(args: dict) -> _ExecResult:
     new_text = args.get("new_text")
     if new_text is None:
         return _ExecResult("", "smart_edit 需要参数: new_text", 1)
-
-    abs_path = path
-    if os.path.exists(path):
-        abs_path = os.path.abspath(path)
 
     if mode == "Create":
         if os.path.exists(abs_path):
@@ -2328,8 +2358,14 @@ def _execute_builtin_smart_edit(args: dict) -> _ExecResult:
     return _ExecResult(f"成功 ({mode})", "", 0)
 
 
-def _execute_command(command: str, timeout: int, config: Optional[Config] = None,
-                     context_messages: Optional[list] = None, background: bool = False):
+def _execute_command(
+    command: str,
+    timeout: int,
+    config: Optional[Config] = None,
+    context_messages: Optional[list] = None,
+    background: bool = False,
+    workspace_dir: str = "",
+):
     """执行命令（CLI 和 GUI 共用）
 
     Args:
@@ -2344,7 +2380,7 @@ def _execute_command(command: str, timeout: int, config: Optional[Config] = None
     import base64
     import shlex
 
-    builtin_result = _execute_builtin_tool(command, config, context_messages)
+    builtin_result = _execute_builtin_tool(command, config, context_messages, workspace_dir=workspace_dir)
     if builtin_result is not None:
         return builtin_result
 

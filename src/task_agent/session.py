@@ -232,6 +232,7 @@ class SessionManager:
                 session_manager=self,
                 output_handler=output_handler,
                 runtime_scene=snapshot_scene,
+                workspace_dir=workspace_root or os.getcwd(),
             )
             executor._global_subagent_count = data.get("global_subagent_count", 0)
             executor.auto_approve = data.get("auto_approve", False)
@@ -362,6 +363,7 @@ class SessionManager:
             session_manager=self,
             output_handler=executor._output_handler,
             runtime_scene=getattr(executor, "runtime_scene", "cli"),
+            workspace_dir=getattr(executor, "workspace_dir", None) or os.getcwd(),
         )
 
         if temp:

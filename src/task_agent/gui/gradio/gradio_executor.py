@@ -78,8 +78,7 @@ class GradioExecutor:
                             for idx, command in enumerate(result.pending_commands, 1):
                                 command_spec = self._normalize_command_spec(command)
                                 # 检查命令是否安全
-                                import os
-                                current_dir = os.getcwd()
+                                current_dir = (self.adapter.executor.workspace_dir or "").strip()
                                 if can_auto_execute_command(command_spec, True, current_dir):
                                     self._execute_command_sync(command_spec, "executed")
                                 else:
@@ -115,8 +114,7 @@ class GradioExecutor:
         """\u540c\u6b65\u6267\u884c\u547d\u4ee4\uff08\u7528\u4e8e\u81ea\u52a8\u540c\u610f\u6a21\u5f0f\uff09"""
         try:
             from task_agent.cli import _execute_command
-            import os
-            current_dir = os.getcwd()
+            current_dir = (self.adapter.executor.workspace_dir or "").strip()
             exec_result = execute_command_spec(
                 command_spec=command_spec,
                 context=ExecutionContext(
@@ -158,8 +156,7 @@ class GradioExecutor:
         def execute():
             try:
                 from task_agent.cli import _execute_command
-                import os
-                current_dir = os.getcwd()
+                current_dir = (self.adapter.executor.workspace_dir or "").strip()
                 exec_result = execute_command_spec(
                     command_spec=command_spec,
                     context=ExecutionContext(

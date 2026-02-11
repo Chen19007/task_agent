@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 
 from .agent import CommandSpec
+from .builtin_schema import builtin_requires_authorization
 from .platform_utils import get_shell_result_tag
 from .safety import is_safe_command
 
@@ -92,7 +93,7 @@ def can_auto_execute_command(
     if not auto_approve:
         return False
     if is_builtin_command(command_spec):
-        return True
+        return not builtin_requires_authorization(command_spec.command, workspace_dir)
     return is_safe_command(command_spec.command, workspace_dir or ".")
 
 
@@ -122,6 +123,7 @@ def execute_command_spec(
         config=context.config,
         context_messages=context.context_messages or [],
         background=bool(getattr(command_spec, "background", False)),
+        workspace_dir=context.workspace_dir,
     )
     return CommandExecutionResult(
         command_spec=command_spec,

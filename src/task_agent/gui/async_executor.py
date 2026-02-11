@@ -3,7 +3,6 @@
 在线程中执行 Agent，通过队列更新 GUI。
 """
 
-import os
 import queue
 import threading
 from typing import Callable, Optional
@@ -77,7 +76,7 @@ class AsyncExecutor:
                     if result and result.pending_commands:
                         # 检查 auto_approve 模式
                         if self.adapter.executor.auto_approve:
-                            current_dir = os.getcwd()
+                            current_dir = (self.adapter.executor.workspace_dir or "").strip()
                             # 过滤出安全命令自动执行
                             safe_commands = []
                             unsafe_commands = []
@@ -149,7 +148,7 @@ class AsyncExecutor:
         def execute():
             try:
                 from ..cli import _execute_command
-                current_dir = os.getcwd()
+                current_dir = (self.adapter.executor.workspace_dir or "").strip()
                 exec_result = execute_command_spec(
                     command_spec=command_spec,
                     context=ExecutionContext(
@@ -208,7 +207,7 @@ class AsyncExecutor:
                     if result and result.pending_commands:
                         # 检查 auto_approve 模式
                         if self.adapter.executor.auto_approve:
-                            current_dir = os.getcwd()
+                            current_dir = (self.adapter.executor.workspace_dir or "").strip()
                             # 过滤出安全命令自动执行
                             safe_commands = []
                             unsafe_commands = []
@@ -277,7 +276,7 @@ class AsyncExecutor:
                     if result and result.pending_commands:
                         # 检查 auto_approve 模式
                         if self.adapter.executor.auto_approve:
-                            current_dir = os.getcwd()
+                            current_dir = (self.adapter.executor.workspace_dir or "").strip()
                             # 过滤出安全命令自动执行
                             safe_commands = []
                             unsafe_commands = []
@@ -325,7 +324,7 @@ class AsyncExecutor:
         """\u81ea\u52a8\u6267\u884c\u5b89\u5168\u547d\u4ee4"""
         try:
             from ..cli import _execute_command
-            current_dir = os.getcwd()
+            current_dir = (self.adapter.executor.workspace_dir or "").strip()
             exec_result = execute_command_spec(
                 command_spec=command_spec,
                 context=ExecutionContext(
