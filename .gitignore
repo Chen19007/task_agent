@@ -187,3 +187,24 @@ sessions/
 input/
 .editorconfig
 .gitattributes
+# ========================================
+# IDE Configuration Files
+# ========================================
+.vscode/
+*.code-workspace
+.idea/
+*.iml
+*.iws
+*.ipr
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+.cursor/
+*.swp
+*.swo
+*~
+*~
+.#*
+.#*

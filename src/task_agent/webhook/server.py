@@ -494,6 +494,10 @@ def _try_auto_execute_pending_commands(adapter: WebhookAdapter, pending_commands
             )
 
             result_msg = exec_result.human_message()
+            status = "executed" if exec_result.returncode == 0 else "rejected"
+
+            if adapter.output_handler:
+                adapter.output_handler.on_ps_call_result(result_msg, status)
 
             if adapter.executor.current_agent:
                 adapter.executor.current_agent._add_message(
@@ -571,6 +575,10 @@ def _process_card_action_async(card_message_id: str, action: str, auto: bool,
                 )
 
                 result_msg = exec_result.human_message()
+                status = "executed" if exec_result.returncode == 0 else "rejected"
+
+                if adapter.output_handler:
+                    adapter.output_handler.on_ps_call_result(result_msg, status)
 
                 if adapter.executor.current_agent:
                     adapter.executor.current_agent._add_message(
@@ -578,6 +586,8 @@ def _process_card_action_async(card_message_id: str, action: str, auto: bool,
                     )
         else:
             reject_reason = reject_reason or str(action_value.get("reason") or "用户取消了命令执行")
+            if adapter.output_handler:
+                adapter.output_handler.on_ps_call_result(str(reject_reason), "rejected")
             if adapter.executor.current_agent:
                 adapter.executor.current_agent._add_message(
                     "user", format_shell_result("rejected", str(reject_reason))

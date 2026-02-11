@@ -6,6 +6,7 @@
 
 import json
 import logging
+import time
 from typing import Optional
 
 from .base import Platform, MessageType
@@ -166,7 +167,9 @@ class FeishuPlatform(Platform):
             # 私聊用 create，群聊用 reply
             if chat_type == "p2p":
                 # 私聊：使用 create API
-                logger.info(f"[DEBUG] 发送消息到私聊: chat_id={chat_id}, content={content[:50]}...")
+                logger.info(
+                    f"[DEBUG] 发送消息到私聊: chat_id={chat_id}, chars={len(content)}, content={content[:50]}..."
+                )
 
                 request = CreateMessageRequest.builder() \
                     .receive_id_type("chat_id") \
@@ -177,7 +180,22 @@ class FeishuPlatform(Platform):
                         .build()) \
                     .build()
 
-                response = self.client.im.v1.message.create(request)
+                response = None
+                last_error = None
+                for attempt in range(2):
+                    try:
+                        response = self.client.im.v1.message.create(request)
+                        break
+                    except Exception as e:
+                        last_error = e
+                        if attempt == 0:
+                            logger.warning(f"[DEBUG] 飞书私聊发送失败，准备重试: {e}")
+                            time.sleep(0.3)
+                            continue
+                        raise
+
+                if response is None and last_error is not None:
+                    raise last_error
 
                 if not response.success():
                     logger.error(f"✗ 飞书消息发送失败: code={response.code}, msg={response.msg}")
@@ -189,7 +207,9 @@ class FeishuPlatform(Platform):
 
             else:
                 # 群聊：使用 reply API
-                logger.info(f"[DEBUG] 回复群聊消息: message_id={message_id}, content={content[:50]}...")
+                logger.info(
+                    f"[DEBUG] 回复群聊消息: message_id={message_id}, chars={len(content)}, content={content[:50]}..."
+                )
 
                 if not message_id:
                     logger.error("✗ 群聊回复失败：缺少 message_id")
@@ -203,7 +223,22 @@ class FeishuPlatform(Platform):
                         .build()) \
                     .build()
 
-                response = self.client.im.v1.message.reply(request)
+                response = None
+                last_error = None
+                for attempt in range(2):
+                    try:
+                        response = self.client.im.v1.message.reply(request)
+                        break
+                    except Exception as e:
+                        last_error = e
+                        if attempt == 0:
+                            logger.warning(f"[DEBUG] 飞书群聊回复失败，准备重试: {e}")
+                            time.sleep(0.3)
+                            continue
+                        raise
+
+                if response is None and last_error is not None:
+                    raise last_error
 
                 if not response.success():
                     logger.error(f"✗ 飞书群聊回复失败: code={response.code}, msg={response.msg}")

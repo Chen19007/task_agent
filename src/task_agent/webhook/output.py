@@ -91,8 +91,10 @@ class WebhookOutput(OutputHandler):
         self._emit("on_create_agent", text, "create_agent")
 
     def on_agent_complete(self, summary: str, stats: dict) -> None:
-        """Agent 完成 - 最简提示"""
-        self._emit("on_agent_complete", "✅ 子流程完成，继续汇总中...", "agent_complete")
+        """Agent 完成 - 输出完整摘要"""
+        clean_summary = re.sub(r"</?return>", "", summary or "").strip()
+        text = clean_summary or "任务完成"
+        self._emit("on_agent_complete", text, "agent_complete")
 
     def on_depth_limit(self) -> None:
         """达到深度限制 - 最简提示"""
