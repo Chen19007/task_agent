@@ -7,7 +7,6 @@ Webhook 输出处理
 import logging
 import queue
 import re
-from typing import Optional
 
 from ..output_handler import OutputHandler
 from .platforms.base import Platform
@@ -36,9 +35,31 @@ class WebhookOutput(OutputHandler):
         self._buffer: list[str] = []  # 缓存待发送的消息
         self._buffer_size = 10  # 每多少条消息发送一次
 
+    def _emit(self, callback_name: str, content: str, output_type: str = "content") -> None:
+        """统一输出入口：为消息增加回调标识，便于排查路由。"""
+        tagged = f"[{callback_name}] {content}"
+        formatted = self.platform.format_output(tagged, output_type)
+        self._queue.put(("content", formatted))
+
+    def _summarize_multiline_result(self, result: str, head: int = 8, tail: int = 8) -> str:
+        """命令结果摘要：短输出全显，长输出显示前后窗口。"""
+        text = (result or "").rstrip("\n")
+        if not text.strip():
+            return "（无输出）"
+
+        lines = text.splitlines()
+        total = len(lines)
+        if total <= head + tail:
+            return "\n".join(lines)
+
+        omitted = total - head - tail
+        first = "\n".join(lines[:head])
+        last = "\n".join(lines[-tail:])
+        return f"{first}\n...（中间省略 {omitted} 行）...\n{last}"
+
     def on_think(self, content: str) -> None:
-        """LLM 推理内容 - 隐藏"""
-        pass  # 飞书不显示思考过程
+        """LLM 推理内容 - 最简提示"""
+        self._emit("on_think", "💭 正在思考...", "content")
 
     def on_content(self, content: str) -> None:
         """普通文本内容"""
@@ -48,46 +69,42 @@ class WebhookOutput(OutputHandler):
         # 工具标签（ps_call/bash_call/builtin/create_agent）由专门流程处理，避免与授权卡片重复
         if re.search(r"<(ps_call|bash_call|builtin|create_agent)\b", content, re.IGNORECASE):
             return
-        formatted = self.platform.format_output(content, "content")
-        self._queue.put(("content", formatted))
+        self._emit("on_content", content, "content")
 
     def on_ps_call(self, command: str, index: int, depth_prefix: str) -> None:
-        """Shell 命令请求 - 隐藏"""
-        pass  # 飞书不显示命令请求
+        """Shell 命令请求 - 完整显示"""
+        prefix = depth_prefix or ""
+        cmd_text = f"#{index}\n{prefix}{command}"
+        self._emit("on_ps_call", cmd_text, "ps_call")
 
     def on_ps_call_result(self, result: str, status: str) -> None:
-        """命令执行结果 - 隐藏"""
-        pass  # 飞书不显示命令结果
+        """命令执行结果 - 摘要显示"""
+        summary = self._summarize_multiline_result(result, head=8, tail=8)
+        self._emit("on_ps_call_result", f"status={status}\n{summary}", "ps_call_result")
 
     def on_create_agent(
         self, task: str, depth: int, agent_name: str, context_info: dict
     ) -> None:
-        """创建子 Agent - 简化版"""
+        """创建子 Agent - 完整显示"""
         agent_info = f" [{agent_name}]" if agent_name else ""
-        # 限制任务描述长度，避免太长
-        task_short = task[:50] + "..." if len(task) > 50 else task
-        text = f"子Agent{agent_info}: {task_short}"
-        formatted = self.platform.format_output(text, "create_agent")
-        self._queue.put(("content", formatted))
+        text = f"depth={depth}{agent_info}\n{task}"
+        self._emit("on_create_agent", text, "create_agent")
 
     def on_agent_complete(self, summary: str, stats: dict) -> None:
-        """Agent 完成"""
-        clean_summary = re.sub(r"</?return>", "", summary or "").strip()
-        text = clean_summary or "任务完成"
-        formatted = self.platform.format_output(text, "agent_complete")
-        self._queue.put(("content", formatted))
+        """Agent 完成 - 最简提示"""
+        self._emit("on_agent_complete", "✅ 子流程完成，继续汇总中...", "agent_complete")
 
     def on_depth_limit(self) -> None:
-        """达到深度限制 - 隐藏"""
-        pass  # 飞书不显示警告
+        """达到深度限制 - 最简提示"""
+        self._emit("on_depth_limit", "⚠️ 达到深度限制，停止继续下钻", "content")
 
     def on_quota_limit(self, limit_type: str) -> None:
-        """配额限制 - 隐藏"""
-        pass  # 飞书不显示警告
+        """配额限制 - 最简提示"""
+        self._emit("on_quota_limit", f"⚠️ 达到配额限制（{limit_type}）", "content")
 
     def on_wait_input(self) -> None:
-        """等待用户输入 - 隐藏"""
-        pass  # 飞书不显示等待提示
+        """等待用户输入 - 最简提示"""
+        self._emit("on_wait_input", "⏸️ 等待你的下一条输入", "content")
 
     def flush(self) -> list[str]:
         """
