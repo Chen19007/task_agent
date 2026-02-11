@@ -389,6 +389,58 @@ Add <feature-description>
 - Additional context if needed
 ```
 
+### Phase 6: 推送到远程（可选）
+
+**Step 13: 检查远程仓库状态**
+```powershell
+git remote -v
+```
+
+**Step 14: 检测推送方式**
+
+根据情况提供推送选项：
+
+**选项 A: 使用 gh 命令（推荐已安装 gh CLI）**
+检查是否已配置 GitHub CLI：
+```powershell
+gh repo view --json url -q .url 2>/dev/null || echo "gh not available"
+```
+
+如果 gh 可用且远程已配置：
+```powershell
+git push origin HEAD
+```
+或使用 gh 命令：
+```powershell
+gh repo set-default --prompt 2>/dev/null || true
+gh repo sync --force 2>/dev/null || git push origin HEAD
+```
+
+**选项 B: 使用原生 git 命令**
+```powershell
+git push origin HEAD
+```
+
+**Step 15: 推送失败处理**
+
+如果推送失败（权限错误、网络问题等）：
+
+| 错误类型 | 检测 | 操作 |
+|----------|------|------|
+| 权限 denied | permission denied | 提示用户检查 SSH key / token 权限 |
+| 远程不存在 | Could not read from remote | 询问是否添加远程仓库 |
+| 网络错误 | Connection timed out | 提示稍后重试 |
+| 分支分歧 | hint: pull before pushing | 提示先 pull 或使用 `--force`（谨慎） |
+
+**推送成功输出：**
+```
+## 推送完成
+
+远程仓库: <url>
+分支: master
+状态: Successfully pushed to origin/master
+```
+
 ## 输出格式
 
 ### 成功输出
