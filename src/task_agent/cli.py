@@ -9,6 +9,7 @@ import time
 import atexit
 import uuid
 import shlex
+import threading
 import subprocess
 import tempfile
 from pathlib import Path
@@ -68,6 +69,42 @@ def _clear_input_buffer():
         return
     while msvcrt.kbhit():
         msvcrt.getch()
+
+
+def _start_esc_skip_listener(executor: Executor, console: Console):
+    """仅在执行阶段监听 Esc，触发跳过下一次解析。"""
+    if not msvcrt:
+        return None
+
+    stop_event = threading.Event()
+
+    def _run():
+        while not stop_event.is_set():
+            try:
+                if executor.is_waiting_for_input():
+                    time.sleep(0.05)
+                    continue
+                if not msvcrt.kbhit():
+                    time.sleep(0.05)
+                    continue
+                key = msvcrt.getch()
+                if key == b"\x1b":
+                    executor.arm_skip_next_parse("cli_esc")
+                    console.print("[info]stop已生效：将跳过下一次解析[/info]")
+            except Exception:
+                time.sleep(0.05)
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    return (stop_event, thread)
+
+
+def _stop_esc_skip_listener(listener) -> None:
+    if not listener:
+        return
+    stop_event, thread = listener
+    stop_event.set()
+    thread.join(timeout=0.2)
 
 
 def _resolve_file_references(text: str) -> tuple[str, list[str]]:
@@ -850,24 +887,28 @@ def _run_single_task(config: Config, task: str, executor: 'Executor' = None, ses
         session_manager.current_session_id = new_id
 
     # 执行任务
-    for outputs, result in executor.run(task):
-        # 显示输出
-        for output in outputs:
-            console.print(output, end="", soft_wrap=True)
+    esc_listener = _start_esc_skip_listener(executor, console)
+    try:
+        for outputs, result in executor.run(task):
+            # 显示输出
+            for output in outputs:
+                console.print(output, end="", soft_wrap=True)
 
-        if result:
-            command_batch_id, processed_count = _handle_pending_commands(
-                executor,
-                console,
-                result,
-                command_batch_id,
-                processed_count
-            )
+            if result:
+                command_batch_id, processed_count = _handle_pending_commands(
+                    executor,
+                    console,
+                    result,
+                    command_batch_id,
+                    processed_count
+                )
 
-        # 检查是否需要等待用户输入
-        if any("[等待用户输入]" in output for output in outputs):
-            waiting_for_user_input = True
-            # 会话快照已保存完整状态，无需额外保存
+            # 检查是否需要等待用户输入
+            if any("[等待用户输入]" in output for output in outputs):
+                waiting_for_user_input = True
+                # 会话快照已保存完整状态，无需额外保存
+    finally:
+        _stop_esc_skip_listener(esc_listener)
 
     # 如果等待用户输入，继续循环
     while waiting_for_user_input and executor.current_agent:
@@ -980,23 +1021,27 @@ def _run_single_task(config: Config, task: str, executor: 'Executor' = None, ses
 
         # 继续执行
         waiting_for_user_input = False
-        for outputs, result in executor.resume(user_input):
-            # 显示输出（命令框已通过回调处理）
-            for output in outputs:
-                console.print(output, end="", soft_wrap=True)
+        esc_listener = _start_esc_skip_listener(executor, console)
+        try:
+            for outputs, result in executor.resume(user_input):
+                # 显示输出（命令框已通过回调处理）
+                for output in outputs:
+                    console.print(output, end="", soft_wrap=True)
 
-            if result:
-                command_batch_id, processed_count = _handle_pending_commands(
-                    executor,
-                    console,
-                    result,
-                    command_batch_id,
-                    processed_count
-                )
+                if result:
+                    command_batch_id, processed_count = _handle_pending_commands(
+                        executor,
+                        console,
+                        result,
+                        command_batch_id,
+                        processed_count
+                    )
 
-            # 检查是否需要等待用户输入
-            if any("[等待用户输入]" in output for output in outputs):
-                waiting_for_user_input = True
+                # 检查是否需要等待用户输入
+                if any("[等待用户输入]" in output for output in outputs):
+                    waiting_for_user_input = True
+        finally:
+            _stop_esc_skip_listener(esc_listener)
 
     # 会话快照已自动保存所有状态，无需额外保存
 

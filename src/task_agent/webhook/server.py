@@ -136,6 +136,16 @@ def _is_change_workspace_command(text: str) -> bool:
     return re.fullmatch(r"/(?:change_workspace|cw|ws)", text_norm) is not None
 
 
+def _is_stop_command(text: str) -> bool:
+    """判断是否为 /stop 命令。"""
+    import re
+
+    if not text:
+        return False
+    text_norm = text.strip().lower()
+    return re.fullmatch(r"/stop", text_norm) is not None
+
+
 def _query_zlocation_options(limit: int = 10) -> list[dict]:
     """
     获取 ZLocation 候选目录并转换为卡片 select_static options。
@@ -822,6 +832,29 @@ def handle_message(data):
                         f"[内建命令] /clear 执行完成: cleared={cleared}, new_session_id={new_session_id}, "
                         f"session_key={_build_session_key(chat_type, chat_id)}"
                     )
+                    return
+
+                # 内建命令：跳过下一次解析
+                if _is_stop_command(text):
+                    adapter = _get_or_create_adapter(chat_type, chat_id)
+                    adapter.executor.arm_skip_next_parse("webhook_stop")
+
+                    pending_exists = False
+                    with _pending_auth_lock:
+                        latest_card_id = _pending_latest_card_by_chat.get(chat_id)
+                        if latest_card_id and latest_card_id in _pending_authorizations:
+                            pending_exists = True
+                    logger.info(
+                        f"[内建命令] /stop 已生效: session_key={_build_session_key(chat_type, chat_id)}, "
+                        f"has_pending_auth={pending_exists}"
+                    )
+                    if _platform is not None:
+                        _platform.send_message(
+                            "✅ 已停止下一次解析，请直接发送澄清意图。",
+                            chat_id,
+                            chat_type,
+                            message_id,
+                        )
                     return
 
                 # 内建命令：切换当前进程工作目录（通过卡片选择）

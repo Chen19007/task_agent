@@ -809,7 +809,7 @@ class SimpleAgent:
         self.start_time = time.time()
         self._add_message("user", task)
 
-    def step(self) -> StepResult:
+    def step(self, skip_parse: bool = False) -> StepResult:
         """执行一步
 
         Returns:
@@ -829,9 +829,11 @@ class SimpleAgent:
 
         # 只有 content 参与标签解析
         response = content
-        filtered_response, has_tool_tags = self._filter_action_blocks(response)
-        if has_tool_tags:
-            response = filtered_response
+        has_tool_tags = False
+        if not skip_parse:
+            filtered_response, has_tool_tags = self._filter_action_blocks(response)
+            if has_tool_tags:
+                response = filtered_response
 
         # 添加 assistant 消息到历史
         self._add_message("assistant", response, think=reasoning)
@@ -853,6 +855,17 @@ class SimpleAgent:
             outputs.append(f"{'━'*50}\n\n")
         if response and response.strip():
             outputs.append(response)
+
+        if skip_parse:
+            self._output_handler.on_wait_input()
+            outputs.append("\n[已跳过本轮解析] 本条回复未解析工具调用，请输入澄清意图。\n")
+            outputs.append("[等待用户输入]\n")
+            return StepResult(
+                outputs=self._add_depth_prefix(outputs),
+                action=Action.WAIT,
+                pending_commands=[],
+                command_blocks=[],
+            )
 
         # 解析并执行标签，收集输出和命令（使用带回调的版本）
         tool_outputs, pending_commands, command_blocks = self._parse_tools_with_callbacks(response)
@@ -1423,6 +1436,14 @@ class Executor:
         # 命令确认回调（用于 CLI 和 GUI 的不同确认逻辑）
         self._command_confirm_callback = command_confirm_callback
 
+        # 跳过下一次解析（one-shot）状态
+        self._skip_parse_lock = threading.Lock()
+        self._skip_parse_armed = False
+        self._skip_target_step_seq = 0
+        self._current_step_seq = 0
+        self._skip_source = ""
+        self._waiting_for_user_input = False
+
     @property
     def auto_approve(self) -> bool:
         """获取 auto_approve 状态（线程安全）"""
@@ -1444,6 +1465,37 @@ class Executor:
                 输出: result_message (str) 格式: '<shell_call_result id="executed">...</shell_call_result>'
         """
         self._command_confirm_callback = callback
+
+    def arm_skip_next_parse(self, source: str = "") -> None:
+        """设置跳过下一次解析（仅一次）。"""
+        with self._skip_parse_lock:
+            self._skip_parse_armed = True
+            self._skip_target_step_seq = self._current_step_seq + 1
+            self._skip_source = source or "unknown"
+
+    def clear_skip_parse(self, reason: str = "") -> None:
+        """清理跳过解析标记，防止残留。"""
+        with self._skip_parse_lock:
+            self._skip_parse_armed = False
+            self._skip_target_step_seq = 0
+            if reason:
+                self._skip_source = reason
+
+    def _consume_skip_for_step(self, step_seq: int) -> bool:
+        """仅在命中目标 step 时消费一次 skip 标记。"""
+        with self._skip_parse_lock:
+            if not self._skip_parse_armed:
+                return False
+            if self._skip_target_step_seq != step_seq:
+                return False
+            self._skip_parse_armed = False
+            self._skip_target_step_seq = 0
+            return True
+
+    def is_waiting_for_input(self) -> bool:
+        """当前是否处于等待用户输入阶段。"""
+        with self._skip_parse_lock:
+            return self._waiting_for_user_input
 
     def _maybe_auto_compact(self) -> Optional[str]:
         """根据阈值自动压缩上下文，返回提示信息。"""
@@ -1548,6 +1600,9 @@ class Executor:
             # 复用现有 agent，添加新任务到历史
             self.current_agent.start(task)
 
+        self.clear_skip_parse("run_start")
+        with self._skip_parse_lock:
+            self._waiting_for_user_input = False
         self._is_running = True
         yield from self._execute_loop()
 
@@ -1563,6 +1618,9 @@ class Executor:
         if not self.current_agent:
             return
 
+        self.clear_skip_parse("before_resume")
+        with self._skip_parse_lock:
+            self._waiting_for_user_input = False
         self.current_agent._add_message("user", user_input)
         self._is_running = True
         yield from self._execute_loop()
@@ -1578,7 +1636,13 @@ class Executor:
             if auto_notice:
                 yield ([auto_notice], StepResult(outputs=[auto_notice], action=Action.CONTINUE))
 
-            result = self.current_agent.step()
+            with self._skip_parse_lock:
+                self._current_step_seq += 1
+                step_seq = self._current_step_seq
+                self._waiting_for_user_input = False
+            skip_parse = self._consume_skip_for_step(step_seq)
+
+            result = self.current_agent.step(skip_parse=skip_parse)
 
             # 保存 StepResult 供 cli.py 访问
             self.last_step_result = result
@@ -1640,6 +1704,9 @@ class Executor:
                     # 不 break，保留 current_agent 供下一个任务使用
 
             elif result.action == Action.WAIT:
+                with self._skip_parse_lock:
+                    self._waiting_for_user_input = True
+                self.clear_skip_parse("enter_wait")
                 self._is_running = False
                 break
 
