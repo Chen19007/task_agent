@@ -531,7 +531,7 @@ def main():
 
     # 交互模式
     session_manager = SessionManager()
-    executor = Executor(config, session_manager=session_manager)  # 保持 Executor 实例，保留上下文
+    executor = Executor(config, session_manager=session_manager, runtime_scene="cli")  # 保持 Executor 实例，保留上下文
     paste_mode = False
     paste_lines: list[str] = []
     paste_prompt_shown = False
@@ -665,7 +665,7 @@ def main():
                 if len(parts) == 2 and parts[0].lower() == "/resume":
                     try:
                         session_id = int(parts[1])
-                        new_executor = session_manager.load_session(session_id, config)
+                        new_executor = session_manager.load_session(session_id, config, runtime_scene="cli")
                         if new_executor:
                             executor = new_executor
                             console.print(f"\n[success]会话已恢复: {session_id}[/success]\n")
@@ -745,7 +745,7 @@ def main():
                         confirm_callback=confirm
                     )
                     if ok:
-                        new_executor = session_manager.load_session(session_id, config)
+                        new_executor = session_manager.load_session(session_id, config, runtime_scene="cli")
                         if new_executor:
                             executor = new_executor
                             console.print("\n[success]回滚完成，已切换到该会话[/success]\n")
@@ -812,7 +812,12 @@ def _run_single_task(config: Config, task: str, executor: 'Executor' = None, ses
 
     # 创建或复用执行器
     if executor is None:
-        executor = Executor(config, session_manager=session_manager, output_handler=cli_output)
+        executor = Executor(
+            config,
+            session_manager=session_manager,
+            output_handler=cli_output,
+            runtime_scene="cli",
+        )
     else:
         # 更新现有 executor 的 output_handler
         executor._output_handler = cli_output

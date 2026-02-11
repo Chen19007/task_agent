@@ -31,7 +31,8 @@ class ExecutorAdapter:
         self.executor = Executor(
             self.config,
             session_manager=self.session_manager,
-            output_handler=output_handler
+            output_handler=output_handler,
+            runtime_scene="gui",
         )
 
     def execute_task(self, task: str) -> Generator[tuple[list[str], StepResult], None, None]:
@@ -69,6 +70,7 @@ class ExecutorAdapter:
         new_executor = self.session_manager.load_session(
             session_id,
             self.config,
+            runtime_scene="gui",
             output_handler=self.output_handler
         )
         if new_executor:

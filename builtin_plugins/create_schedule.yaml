@@ -1,0 +1,8 @@
+name: create_schedule
+tool: builtin.create_schedule
+required_scene: webhook
+required_config:
+  - webhook_app_id
+  - webhook_app_secret
+  - webhook_calendar_id
+disable: false

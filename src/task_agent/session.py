@@ -90,6 +90,7 @@ class SessionManager:
         return {
             "agent_id": agent.agent_id,
             "depth": agent.depth,
+            "runtime_scene": getattr(agent, "runtime_scene", "cli"),
             "last_think": agent.last_think,
             "history": [
                 {
@@ -141,6 +142,7 @@ class SessionManager:
                 "context_stack": stack_data,
                 "current_agent": current_data,
                 "auto_approve": getattr(executor, 'auto_approve', False),
+                "runtime_scene": getattr(executor, "runtime_scene", "cli"),
                 "workspace_root": str(self._get_workspace_root(session_id)),
                 "fs_snapshot_status": fs_snapshot_status,
             }
@@ -172,6 +174,7 @@ class SessionManager:
                 "context_stack": stack_data,
                 "current_agent": current_data,
                 "auto_approve": getattr(executor, 'auto_approve', False),
+                "runtime_scene": getattr(executor, "runtime_scene", "cli"),
                 "workspace_root": str(self._get_workspace_root(session_id)),
             }
             with open(snapshot_path, "w", encoding="utf-8") as f:
@@ -184,11 +187,13 @@ class SessionManager:
             return False
 
     def _deserialize_agent(self, agent_data: dict, config: Config, global_count: int,
+                           runtime_scene: str = "cli",
                            output_handler: Optional['OutputHandler'] = None) -> SimpleAgent:
         agent = SimpleAgent(
             config=config,
             depth=agent_data["depth"],
             global_subagent_count=global_count,
+            runtime_scene=agent_data.get("runtime_scene", runtime_scene),
             output_handler=output_handler,
             init_system_prompt=False
         )
@@ -205,7 +210,7 @@ class SessionManager:
         return agent
 
 
-    def load_session(self, session_id: int, config: Config,
+    def load_session(self, session_id: int, config: Config, runtime_scene: str = "cli",
                      output_handler: Optional['OutputHandler'] = None) -> Optional[Executor]:
         try:
             # 查找该会话的最大快照索引
@@ -221,7 +226,13 @@ class SessionManager:
             if workspace_root and not self._ensure_workspace_match(workspace_root):
                 print(f"[error]当前目录与会话工作目录不一致，禁止恢复: {workspace_root}[/error]")
                 return None
-            executor = Executor(config, session_manager=self, output_handler=output_handler)
+            snapshot_scene = data.get("runtime_scene", runtime_scene)
+            executor = Executor(
+                config,
+                session_manager=self,
+                output_handler=output_handler,
+                runtime_scene=snapshot_scene,
+            )
             executor._global_subagent_count = data.get("global_subagent_count", 0)
             executor.auto_approve = data.get("auto_approve", False)
             executor._snapshot_index = data.get("snapshot_index", max_index) + 1  # 下一个快照索引
@@ -231,6 +242,7 @@ class SessionManager:
                     agent_data,
                     config,
                     executor._global_subagent_count,
+                    runtime_scene=executor.runtime_scene,
                     output_handler=output_handler
                 )
                 # 恢复双回调
@@ -242,6 +254,7 @@ class SessionManager:
                     data["current_agent"],
                     config,
                     executor._global_subagent_count,
+                    runtime_scene=executor.runtime_scene,
                     output_handler=output_handler
                 )
                 # 恢复双回调
@@ -344,7 +357,12 @@ class SessionManager:
 
         # 创建新 executor（传递 session_manager 以支持快照保存）
         config = executor.config
-        new_executor = Executor(config, session_manager=self, output_handler=executor._output_handler)
+        new_executor = Executor(
+            config,
+            session_manager=self,
+            output_handler=executor._output_handler,
+            runtime_scene=getattr(executor, "runtime_scene", "cli"),
+        )
 
         if temp:
             # 临时会话：不分配 ID，等用户执行任务后再分配

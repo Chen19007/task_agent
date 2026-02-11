@@ -86,6 +86,7 @@ class SimpleAgent:
                  agent_name: Optional[str] = None,
                  output_handler: Optional[OutputHandler] = None,
                  workspace_dir: Optional[str] = None,
+                 runtime_scene: str = "cli",
                  init_system_prompt: bool = True):
         """初始化 Agent
 
@@ -108,6 +109,7 @@ class SimpleAgent:
         self.max_depth = max_depth
         self.agent_name = agent_name  # 当前 agent 名称
         self.workspace_dir = workspace_dir
+        self.runtime_scene = (runtime_scene or "cli").strip().lower()
 
         # 统计
         self.total_sub_agents_created = 0
@@ -193,15 +195,14 @@ class SimpleAgent:
         hint_metadata = self._load_hint_metadata()
         if hint_metadata:
             hint_metadata = f"\n{hint_metadata}"
-        plugin_metadata = self._load_plugin_metadata()
-        if plugin_metadata:
-            plugin_metadata = f"\n{plugin_metadata}"
+        builtin_tools_section = self._build_builtin_tools_section()
 
         base_system_prompt = template.format(
             tree_info=tree_info,
             predefined_section=predefined_section,
+            builtin_tools_section=builtin_tools_section,
             hint_metadata=hint_metadata,
-            plugin_metadata=plugin_metadata,
+            plugin_metadata="",
         )
 
         self.history.append(Message(role="system", content=base_system_prompt))
@@ -258,22 +259,211 @@ class SimpleAgent:
             lines.append("")
         return "\n".join(lines).strip()
 
-    def _load_plugin_metadata(self) -> str:
-        """按配置动态注入 plugin 能力说明（内部概念）。"""
-        if not (
-            self.config.webhook_app_id
-            and self.config.webhook_app_secret
-            and self.config.webhook_calendar_id
-        ):
-            return ""
+    def _get_builtin_plugins_dir(self) -> str:
+        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        plugins_dir = os.path.join(project_root, "builtin_plugins")
+        return plugins_dir if os.path.isdir(plugins_dir) else ""
 
-        return (
-            "**当前可用外部能力（plugin）：**\n"
-            "1. 创建飞书日程（内部工具：builtin.create_schedule）\n"
-            "   使用时机：用户明确要求创建日程/会议安排。\n"
-            "   参数要求：summary、start_time 必填；end_time 可选（默认 +30 分钟）；\n"
-            "   timezone 默认 Asia/Shanghai；calendar_id 默认使用系统配置。"
+    def _load_builtin_plugins(self) -> list[dict[str, Any]]:
+        plugins_dir = self._get_builtin_plugins_dir()
+        if not plugins_dir:
+            return []
+
+        items: list[dict[str, Any]] = []
+        for filename in sorted(os.listdir(plugins_dir)):
+            if not filename.lower().endswith((".yaml", ".yml")):
+                continue
+            path = os.path.join(plugins_dir, filename)
+            try:
+                with open(path, "r", encoding="utf-8-sig") as handle:
+                    raw = yaml.safe_load(handle)
+            except (OSError, UnicodeDecodeError, yaml.YAMLError):
+                continue
+            if not isinstance(raw, dict):
+                continue
+            if self._metadata_disabled(raw.get("disable")):
+                continue
+            items.append(raw)
+        return items
+
+    def _is_builtin_plugin_available(self, plugin: dict[str, Any]) -> bool:
+        required_scene = str(plugin.get("required_scene", "")).strip().lower()
+        if required_scene and required_scene != self.runtime_scene:
+            return False
+
+        required_config = plugin.get("required_config", [])
+        keys: list[str] = []
+        if isinstance(required_config, list):
+            keys = [str(x).strip() for x in required_config if str(x).strip()]
+        elif isinstance(required_config, str):
+            text = required_config.strip()
+            keys = [text] if text else []
+
+        for key in keys:
+            value = getattr(self.config, key, "")
+            if not str(value or "").strip():
+                return False
+        return True
+
+    def _load_available_builtin_plugin_names(self) -> set[str]:
+        names: set[str] = set()
+        for plugin in self._load_builtin_plugins():
+            if not self._is_builtin_plugin_available(plugin):
+                continue
+            name = str(plugin.get("name", "")).strip().lower()
+            if name:
+                names.add(name)
+        return names
+
+    def _build_builtin_tools_section(self) -> str:
+        available_plugins = self._load_available_builtin_plugin_names()
+        shell_tool = get_shell_tool_name()
+        shell_result_tag = f"{shell_tool}_result"
+        sections: list[tuple[str, list[str]]] = [
+            (
+                "read_file（builtin.read_file）",
+                [
+                    "用于读取大文件时的分块读取，避免一次性输出过长。",
+                    "",
+                    "语法（简化参数）：",
+                    "<builtin>",
+                    "read_file",
+                    "path: 文件路径",
+                    "start_line: 1",
+                    "max_lines: 200",
+                    "</builtin>",
+                    "",
+                    "说明：",
+                    "- `start_line` 从 1 开始计数",
+                    "- `max_lines` 默认 200，过大时会自动截断",
+                    "- 返回结果会提示是否还有剩余内容，以及下一次读取的起始行号",
+                ],
+            ),
+            (
+                "后台任务日志（builtin.get_job_log）：",
+                [
+                    "语法：",
+                    "<builtin>",
+                    "get_job_log",
+                    "job_id: <id>",
+                    "start_line: 1",
+                    "max_lines: 200",
+                    "</builtin>",
+                ],
+            ),
+            (
+                "内置文件编辑（builtin.smart_edit）",
+                [
+                    "用于安全编辑文件，自动处理 BOM 与换行符。",
+                    "",
+                    "语法（字面量块）：",
+                    "<builtin>",
+                    "smart_edit",
+                    "path: 文件路径",
+                    "mode: Patch",
+                    "old_text:",
+                    "<<<",
+                    "旧内容（保持物理换行）",
+                    ">>>",
+                    "new_text:",
+                    "<<<",
+                    "新内容（保持物理换行）",
+                    ">>>",
+                    "</builtin>",
+                    "",
+                    "说明：",
+                    "- `mode` 可选：Patch/Create/Append/Prepend（默认 Patch）",
+                    "- Patch 模式要求 `old_text` 与 `new_text`，仅允许唯一匹配",
+                    "- Create/Append/Prepend 只需要 `new_text`",
+                    "- path 使用原始路径，不要加引号",
+                    f"- **创建/编辑文件必须使用 `smart_edit`**，不要用 `<{shell_tool}>` 直接写文件内容（如 `echo`/`Out-File`/`Set-Content`）",
+                    "- Windows 上大内容命令容易触发命令行长度限制导致失败",
+                ],
+            ),
+            (
+                "记忆查询（builtin.memory_query）",
+                [
+                    "用于从 sessions 快照中检索记忆，并生成与当前上下文相关的摘要。",
+                    "",
+                    "语法（简化参数）：",
+                    "<builtin>",
+                    "memory_query",
+                    "query: 关键词或问题",
+                    "limit: 5",
+                    "window: 10",
+                    "candidate: 50",
+                    "batch: 6",
+                    "topn: 8",
+                    "context_tail: 8",
+                    "</builtin>",
+                    "",
+                    "说明：",
+                    "- 默认跨所有快照检索",
+                    "- 只使用 user/assistant 的 content，忽略 think",
+                    f"- 含 <{shell_result_tag}> 的消息会被跳过",
+                    "- 返回结果为综合摘要，不包含会话ID",
+                ],
+            ),
+        ]
+
+        if "create_schedule" in available_plugins:
+            sections.append(
+                (
+                    "创建日程（builtin.create_schedule）",
+                    [
+                        "用于创建飞书日程（依赖外部 API，仅在系统注入该能力时可用）。",
+                        "",
+                        "语法：",
+                        "<builtin>",
+                        "create_schedule",
+                        "summary: 日程标题",
+                        "start_time: 2026-02-12 10:00",
+                        "end_time: 2026-02-12 10:30",
+                        "timezone: Asia/Shanghai",
+                        "description: 日程描述",
+                        "</builtin>",
+                        "",
+                        "说明：",
+                        "- 必填：summary、start_time",
+                        "- end_time 可选，缺省时默认开始时间 + 30 分钟",
+                        "- timezone 缺省为 Asia/Shanghai",
+                        "- 当用户明确要求“创建日程/安排会议”时优先使用该工具",
+                    ],
+                )
+            )
+
+        sections.append(
+            (
+                "Hint 内置工具（适合子任务/预定义 Agent）",
+                [
+                    "加载/卸载 hint的语法：",
+                    "<builtin>",
+                    "hint",
+                    "action: load",
+                    "name: xxx",
+                    "</builtin>",
+                    "",
+                    "<builtin>",
+                    "hint",
+                    "action: unload",
+                    "</builtin>",
+                    "",
+                    "读取当前hint资源的语法：",
+                    "<builtin>",
+                    "get_resource",
+                    "path: 资源相对路径",
+                    "encoding: utf-8",
+                    "</builtin>",
+                ],
+            )
         )
+
+        lines: list[str] = []
+        for idx, (title, body_lines) in enumerate(sections, start=1):
+            lines.append(f"**2.{idx} {title}**")
+            lines.extend(body_lines)
+            lines.append("")
+        return "\n".join(lines).strip()
 
     @staticmethod
     def _metadata_disabled(value: object) -> bool:
@@ -1087,7 +1277,7 @@ class Executor:
 
     def __init__(self, config: Optional[Config] = None, max_depth: int = 4, session_manager: Optional['SessionManager'] = None,
                  output_handler: Optional[OutputHandler] = None, command_confirm_callback: Optional[Callable[[str], str]] = None,
-                 workspace_dir: Optional[str] = None):
+                 workspace_dir: Optional[str] = None, runtime_scene: str = "cli"):
         """初始化执行器
 
         Args:
@@ -1105,6 +1295,7 @@ class Executor:
         self.current_agent: Optional[SimpleAgent] = None
         self._is_running = False
         self.workspace_dir = workspace_dir
+        self.runtime_scene = (runtime_scene or "cli").strip().lower()
 
         # 全局子Agent配额（防止层级间循环）- 累加计数
         self._global_subagent_total = max_depth ** 2 * 2  # 总配额
@@ -1184,6 +1375,7 @@ class Executor:
             global_subagent_count=global_subagent_count,
             agent_name=agent_name,
             workspace_dir=self.workspace_dir,
+            runtime_scene=self.runtime_scene,
             output_handler=self._output_handler  # 传递 output_handler
         )
         # 设置双回调（前快照 + 后快照）

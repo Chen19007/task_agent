@@ -55,6 +55,7 @@ class WebhookAdapter:
             max_depth=2,  # webhook 场景限制深度，便于在移动端控制
             session_manager=self.session_manager,
             output_handler=self.output_handler,
+            runtime_scene="webhook",
         )
 
     def execute_task(self, task: str) -> Generator[tuple[list[str], StepResult], None, None]:
@@ -107,7 +108,7 @@ class WebhookAdapter:
     def load_session(self, session_id: int) -> bool:
         """加载会话"""
         new_executor = self.session_manager.load_session(
-            session_id, self.config, output_handler=self.output_handler
+            session_id, self.config, runtime_scene="webhook", output_handler=self.output_handler
         )
         if new_executor:
             self.executor = new_executor
