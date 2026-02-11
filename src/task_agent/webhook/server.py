@@ -15,15 +15,11 @@ from datetime import datetime
 from typing import Optional, Set, Dict, Any
 
 from ..agent import Action
-from ..command_runtime import (
-    ExecutionContext,
-    can_auto_execute_command,
-    execute_command_spec,
-    format_shell_result,
-    normalize_command_spec,
-)
+from ..command_approval_flow import CommandApprovalFlow
+from ..command_runtime import normalize_command_spec
 from ..config import Config
 from .adapter import WebhookAdapter
+from .message_delivery_pipeline import MessageDeliveryPipeline
 from .platforms import FeishuPlatform
 
 # 配置日志
@@ -56,6 +52,25 @@ _pending_workspace_latest_by_chat: Dict[str, str] = {}
 _pending_workspace_lock = threading.Lock()
 _session_workspaces: Dict[str, str] = {}
 _session_workspace_lock = threading.Lock()
+_delivery_pipeline = MessageDeliveryPipeline(max_chars=2800, max_attempts=2, retry_delay=0.3)
+_approval_flow: Optional[CommandApprovalFlow] = None
+
+
+def _get_approval_flow() -> CommandApprovalFlow:
+    global _approval_flow
+    if _approval_flow is None:
+        from ..cli import _execute_command
+
+        _approval_flow = CommandApprovalFlow(_execute_command)
+    return _approval_flow
+
+
+def _send_text(platform: FeishuPlatform, content: str, chat_id: str, chat_type: str, message_id: str) -> None:
+    """统一发送文本，包含分片与重试。"""
+    _delivery_pipeline.send_text(
+        lambda text: platform.send_message(text, chat_id, chat_type, message_id),
+        content,
+    )
 
 
 def _format_event_create_time(create_time_ms: str) -> str:
@@ -413,12 +428,12 @@ def _continue_executor_after_auth(adapter: WebhookAdapter, platform: FeishuPlatf
             contents = adapter.output_handler.flush()
             if contents:
                 total_outputs += len(contents)
-                platform.send_message("\n".join(contents), chat_id, chat_type, source_message_id)
+                _send_text(platform, "\n".join(contents), chat_id, chat_type, source_message_id)
             elif output_list and step_result.action != Action.COMPLETE:
                 fallback = [item for item in output_list if isinstance(item, str) and item.strip()]
                 if fallback:
                     total_outputs += len(fallback)
-                    platform.send_message("\n".join(fallback), chat_id, chat_type, source_message_id)
+                    _send_text(platform, "\n".join(fallback), chat_id, chat_type, source_message_id)
 
         if step_result.pending_commands:
             if _try_auto_execute_pending_commands(adapter, step_result.pending_commands):
@@ -470,42 +485,21 @@ def _try_auto_execute_pending_commands(adapter: WebhookAdapter, pending_commands
         return False
 
     try:
-        from ..cli import _execute_command
-
         workspace_dir = getattr(adapter.executor, "workspace_dir", None) or os.getcwd()
-
-        # 先全量判断安全性，任一不安全则回退到卡片授权
-        normalized_commands = [normalize_command_spec(item) for item in pending_commands]
-        for command_spec in normalized_commands:
-            if not can_auto_execute_command(command_spec, True, workspace_dir):
-                logger.info(f"[自动授权] 检测到非自动执行命令，回退卡片授权: {command_spec.command}")
-                return False
-
-        context = ExecutionContext(
-            config=adapter.executor.config,
+        flow = _get_approval_flow()
+        ok = flow.auto_execute_if_all_safe(
+            executor=adapter.executor,
+            pending_commands=pending_commands,
             workspace_dir=workspace_dir,
-            context_messages=(adapter.executor.current_agent.history if adapter.executor.current_agent else None),
+            output_result=(
+                (lambda msg, status: adapter.output_handler.on_ps_call_result(msg, status))
+                if adapter.output_handler
+                else None
+            ),
         )
-        for command_spec in normalized_commands:
-            exec_result = execute_command_spec(
-                command_spec=command_spec,
-                context=context,
-                execute_command=_execute_command,
-            )
-
-            result_msg = exec_result.human_message()
-            status = "executed" if exec_result.returncode == 0 else "rejected"
-
-            if adapter.output_handler:
-                adapter.output_handler.on_ps_call_result(result_msg, status)
-
-            if adapter.executor.current_agent:
-                adapter.executor.current_agent._add_message(
-                    "user", format_shell_result("executed", result_msg)
-                )
-
-        logger.info(f"[自动授权] 已自动执行 {len(normalized_commands)} 条命令")
-        return True
+        if ok:
+            logger.info(f"[自动授权] 已自动执行 {len(pending_commands)} 条命令")
+        return ok
     except Exception as e:
         logger.error(f"[自动授权] 自动执行失败，回退卡片授权: {e}")
         return False
@@ -558,40 +552,28 @@ def _process_card_action_async(card_message_id: str, action: str, auto: bool,
         logger.info("[卡片交互] 已开启 auto_approve")
 
     try:
-        from ..cli import _execute_command
+        flow = _get_approval_flow()
+        output_result = (
+            (lambda msg, status: adapter.output_handler.on_ps_call_result(msg, status))
+            if adapter.output_handler
+            else None
+        )
 
         if action == "approve":
             workspace_dir = getattr(adapter.executor, "workspace_dir", None) or _get_session_workspace(chat_type, chat_id)
-            context = ExecutionContext(
-                config=adapter.executor.config,
+            flow.execute_commands(
+                executor=adapter.executor,
+                commands=[normalize_command_spec(item) for item in pending_commands],
                 workspace_dir=workspace_dir,
-                context_messages=(adapter.executor.current_agent.history if adapter.executor.current_agent else None),
+                output_result=output_result,
             )
-            for command_spec in [normalize_command_spec(item) for item in pending_commands]:
-                exec_result = execute_command_spec(
-                    command_spec=command_spec,
-                    context=context,
-                    execute_command=_execute_command,
-                )
-
-                result_msg = exec_result.human_message()
-                status = "executed" if exec_result.returncode == 0 else "rejected"
-
-                if adapter.output_handler:
-                    adapter.output_handler.on_ps_call_result(result_msg, status)
-
-                if adapter.executor.current_agent:
-                    adapter.executor.current_agent._add_message(
-                        "user", format_shell_result("executed", result_msg)
-                    )
         else:
             reject_reason = reject_reason or str(action_value.get("reason") or "用户取消了命令执行")
-            if adapter.output_handler:
-                adapter.output_handler.on_ps_call_result(str(reject_reason), "rejected")
-            if adapter.executor.current_agent:
-                adapter.executor.current_agent._add_message(
-                    "user", format_shell_result("rejected", str(reject_reason))
-                )
+            flow.reject_commands(
+                executor=adapter.executor,
+                reason=str(reject_reason),
+                output_result=output_result,
+            )
 
         adapter.executor._is_running = True
         _continue_executor_after_auth(
@@ -602,7 +584,7 @@ def _process_card_action_async(card_message_id: str, action: str, auto: bool,
         logger.error(f"[卡片交互] 授权处理失败: {e}")
         import traceback
         traceback.print_exc()
-        platform.send_message(f"❌ 授权处理失败: {str(e)}", chat_id, chat_type, source_message_id)
+        _send_text(platform, f"❌ 授权处理失败: {str(e)}", chat_id, chat_type, source_message_id)
 
 
 def handle_card_action_trigger(data):
@@ -1025,13 +1007,13 @@ def execute_task_async(task: str, chat_id: str, chat_type: str, message_id: str,
                 if contents:
                     total_outputs += len(contents)
                     combined = "\n".join(contents)
-                    platform.send_message(combined, chat_id, chat_type, message_id)
+                    _send_text(platform, combined, chat_id, chat_type, message_id)
                 elif output_list and step_result.action != Action.COMPLETE:
                     # 仅在非完成态启用兜底，避免 COMPLETE 阶段重复发送“任务完成”内容
                     fallback = [item for item in output_list if isinstance(item, str) and item.strip()]
                     if fallback:
                         total_outputs += len(fallback)
-                        platform.send_message("\n".join(fallback), chat_id, chat_type, message_id)
+                        _send_text(platform, "\n".join(fallback), chat_id, chat_type, message_id)
 
             # 检查是否需要等待用户输入
             if step_result.action == Action.WAIT:

@@ -24,10 +24,8 @@ from rich.text import Text
 from rich.theme import Theme
 
 from .agent import Executor, CommandSpec
+from .command_approval_flow import CommandApprovalFlow
 from .command_runtime import (
-    ExecutionContext,
-    can_auto_execute_command,
-    execute_command_spec,
     format_shell_result as runtime_format_shell_result,
     normalize_command_spec,
 )
@@ -321,6 +319,16 @@ def _print_run_stats(console: Console) -> None:
 
 def _format_shell_result(status: str, message: str) -> str:
     return runtime_format_shell_result(status, message)
+
+
+_CLI_APPROVAL_FLOW: Optional[CommandApprovalFlow] = None
+
+
+def _get_cli_approval_flow() -> CommandApprovalFlow:
+    global _CLI_APPROVAL_FLOW
+    if _CLI_APPROVAL_FLOW is None:
+        _CLI_APPROVAL_FLOW = CommandApprovalFlow(_execute_command)
+    return _CLI_APPROVAL_FLOW
 
 
 def _contains_shell_result_tag(content: str) -> bool:
@@ -1068,26 +1076,22 @@ def _create_cli_command_confirm_callback(executor: 'Executor', console: Console)
         Returns:
             命令结果消息，格式: '<shell_call_result id="executed">...</shell_call_result>'
         """
-        # 检查是否自动执行
+        flow = _get_cli_approval_flow()
         command_spec = normalize_command_spec(CommandSpec(command=command))
         current_dir = _get_effective_workspace_dir(executor.workspace_dir)
-        auto_execute = can_auto_execute_command(command_spec, executor.auto_approve, current_dir)
+        auto_commands, manual_commands = flow.split_auto_executable(
+            [command_spec], executor.auto_approve, current_dir
+        )
 
-        if auto_execute:
+        if auto_commands and not manual_commands:
             # 自动执行安全命令
             console.print("[dim](自动执行)[/dim]\n", end="")
-            exec_result = execute_command_spec(
-                command_spec=command_spec,
-                context=ExecutionContext(
-                    config=executor.config,
-                    workspace_dir=current_dir,
-                    context_messages=(executor.current_agent.history if executor.current_agent else None),
-                ),
-                execute_command=_execute_command,
+            executed = flow.execute_commands(
+                executor=executor,
+                commands=auto_commands,
+                workspace_dir=current_dir,
             )
-
-            # 构建结果消息
-            result_msg = exec_result.human_message()
+            result_msg = executed[0].message if executed else "命令执行成功（无输出）"
 
             console.print(f"[dim]{result_msg}[/dim]\n")
             _update_smart_edit_stats(command, "executed", result_msg)
@@ -1107,18 +1111,12 @@ def _create_cli_command_confirm_callback(executor: 'Executor', console: Console)
 
         if confirm_lower == "y":
             # 用户确认，执行命令
-            exec_result = execute_command_spec(
-                command_spec=command_spec,
-                context=ExecutionContext(
-                    config=executor.config,
-                    workspace_dir=current_dir,
-                    context_messages=(executor.current_agent.history if executor.current_agent else None),
-                ),
-                execute_command=_execute_command,
+            executed = flow.execute_commands(
+                executor=executor,
+                commands=[command_spec],
+                workspace_dir=current_dir,
             )
-
-            # 构建明确的结果消息
-            result_msg = exec_result.human_message()
+            result_msg = executed[0].message if executed else "命令执行成功（无输出）"
 
             console.print(f"\n[info]{result_msg}[/info]\n")
             _update_smart_edit_stats(command, "executed", result_msg)
@@ -1127,12 +1125,14 @@ def _create_cli_command_confirm_callback(executor: 'Executor', console: Console)
         elif confirm_lower == "c":
             console.print("[info]命令已取消[/info]\n")
             _update_smart_edit_stats(command, "rejected")
+            flow.reject_commands(executor, "用户取消了命令执行")
             return _format_shell_result("rejected", "用户取消了命令执行")
 
         else:
             # 用户输入修改建议
             console.print("[info]已将您的建议发送给 Agent[/info]\n")
             _update_smart_edit_stats(command, "rejected")
+            flow.reject_commands(executor, f"用户建议：{confirm}")
             return _format_shell_result("rejected", f"用户建议：{confirm}")
 
     return confirm_callback
@@ -1143,6 +1143,7 @@ def _handle_pending_commands(executor: 'Executor', console: Console, result: 'St
     """处理待确认命令，返回更新后的批次ID和处理计数"""
     if not result.pending_commands:
         return command_batch_id, processed_count
+    flow = _get_cli_approval_flow()
 
     # 新的命令批次
     if id(result.command_blocks) != command_batch_id:
@@ -1157,30 +1158,22 @@ def _handle_pending_commands(executor: 'Executor', console: Console, result: 'St
         command_spec = normalize_command_spec(result.pending_commands[processed_count])
         command = command_spec.command
 
-        # 检查是否自动执行
         current_dir = _get_effective_workspace_dir(executor.workspace_dir)
-        auto_execute = can_auto_execute_command(command_spec, executor.auto_approve, current_dir)
+        auto_commands, manual_commands = flow.split_auto_executable(
+            [command_spec], executor.auto_approve, current_dir
+        )
 
-        if auto_execute:
+        if auto_commands and not manual_commands:
             # 自动执行安全命令
             console.print("[dim](自动执行)[/dim]\n", end="")
-            exec_result = execute_command_spec(
-                command_spec=command_spec,
-                context=ExecutionContext(
-                    config=executor.config,
-                    workspace_dir=current_dir,
-                    context_messages=(executor.current_agent.history if executor.current_agent else None),
-                ),
-                execute_command=_execute_command,
+            executed = flow.execute_commands(
+                executor=executor,
+                commands=auto_commands,
+                workspace_dir=current_dir,
             )
-
-            # 构建结果消息
-            result_msg = exec_result.human_message()
+            result_msg = executed[0].message if executed else "命令执行成功（无输出）"
 
             console.print(f"[dim]{result_msg}[/dim]\n")
-
-            if executor.current_agent:
-                executor.current_agent._add_message("user", _format_shell_result("executed", result_msg))
             _update_smart_edit_stats(command, "executed", result_msg)
         else:
             # 等待用户确认
@@ -1197,37 +1190,25 @@ def _handle_pending_commands(executor: 'Executor', console: Console, result: 'St
 
             if confirm_lower == "y":
                 # 用户确认，执行命令
-                exec_result = execute_command_spec(
-                    command_spec=command_spec,
-                    context=ExecutionContext(
-                        config=executor.config,
-                        workspace_dir=current_dir,
-                        context_messages=(executor.current_agent.history if executor.current_agent else None),
-                    ),
-                    execute_command=_execute_command,
+                executed = flow.execute_commands(
+                    executor=executor,
+                    commands=[command_spec],
+                    workspace_dir=current_dir,
                 )
-
-                # 构建明确的结果消息
-                result_msg = exec_result.human_message()
+                result_msg = executed[0].message if executed else "命令执行成功（无输出）"
 
                 console.print(f"\n[info]{result_msg}[/info]\n")
-
-                if executor.current_agent:
-                    executor.current_agent._add_message("user", _format_shell_result("executed", result_msg))
                 _update_smart_edit_stats(command, "executed", result_msg)
 
             elif confirm_lower == "c":
                 console.print("[info]命令已取消[/info]\n")
                 _update_smart_edit_stats(command, "rejected")
-                # 发送取消消息给当前Agent
-                if executor.current_agent:
-                    executor.current_agent._add_message("user", _format_shell_result("rejected", "用户取消了命令执行"))
+                flow.reject_commands(executor, "用户取消了命令执行")
             else:
                 # 用户输入修改建议
                 console.print("[info]已将您的建议发送给 Agent[/info]\n")
                 _update_smart_edit_stats(command, "rejected")
-                if executor.current_agent:
-                    executor.current_agent._add_message("user", _format_shell_result("rejected", f"用户建议：{confirm}"))
+                flow.reject_commands(executor, f"用户建议：{confirm}")
 
         processed_count += 1
 

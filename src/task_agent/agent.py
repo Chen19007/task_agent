@@ -15,6 +15,8 @@ from enum import Enum
 
 from .config import Config
 from .llm import create_client, ChatMessage
+from .execution_event_bus import ExecutionEventBus
+from .output_event_bridge import EventBusOutputHandler
 from .output_handler import OutputHandler, NullOutputHandler
 from .platform_utils import get_hint_platform_suffix, get_shell_tool_name
 from .hint_utils import select_hint_file
@@ -1395,7 +1397,8 @@ class Executor:
 
     def __init__(self, config: Optional[Config] = None, max_depth: int = 4, session_manager: Optional['SessionManager'] = None,
                  output_handler: Optional[OutputHandler] = None, command_confirm_callback: Optional[Callable[[str], str]] = None,
-                 workspace_dir: Optional[str] = None, runtime_scene: str = "cli"):
+                 workspace_dir: Optional[str] = None, runtime_scene: str = "cli",
+                 event_bus: Optional[ExecutionEventBus] = None):
         """初始化执行器
 
         Args:
@@ -1431,7 +1434,12 @@ class Executor:
         self._snapshot_index = 0  # 当前快照索引
 
         # 输出处理器（使用 NullOutputHandler 避免 None 判断）
-        self._output_handler = output_handler or NullOutputHandler()
+        base_output_handler = output_handler or NullOutputHandler()
+        self.event_bus = event_bus
+        if self.event_bus is not None:
+            self._output_handler = EventBusOutputHandler(base_output_handler, self.event_bus)
+        else:
+            self._output_handler = base_output_handler
 
         # 命令确认回调（用于 CLI 和 GUI 的不同确认逻辑）
         self._command_confirm_callback = command_confirm_callback
