@@ -1,17 +1,20 @@
-"""builtin 工具 schema 与路径策略。"""
+"""builtin schema and shared parsing helpers."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 import json
 import re
 
 
+ValueNormalizer = Callable[[str], str]
+
+
 @dataclass(frozen=True)
 class BuiltinPathPolicy:
-    """路径字段策略。"""
+    """Path field policy."""
 
     relative_to_workspace: bool = True
     allow_absolute: bool = True
@@ -19,21 +22,36 @@ class BuiltinPathPolicy:
 
 @dataclass(frozen=True)
 class BuiltinFieldSpec:
-    """builtin 参数定义。"""
+    """builtin argument definition."""
 
     name: str
     required: bool = False
     default: Optional[str] = None
     is_path: bool = False
     path_policy: Optional[BuiltinPathPolicy] = None
+    aliases: tuple[str, ...] = ()
+    normalizer: Optional[ValueNormalizer] = None
 
 
 @dataclass(frozen=True)
 class BuiltinToolSpec:
-    """builtin 工具定义。"""
+    """builtin tool definition."""
 
     tool_name: str
     fields: tuple[BuiltinFieldSpec, ...]
+    allow_unknown_fields: bool = False
+
+
+@dataclass(frozen=True)
+class BuiltinParseError:
+    """Normalized parse error for builtin commands."""
+
+    kind: str
+    detail: str = ""
+
+
+def _lower_bool(value: str) -> str:
+    return str(value).strip().lower()
 
 
 READ_FILE_SPEC = BuiltinToolSpec(
@@ -44,9 +62,11 @@ READ_FILE_SPEC = BuiltinToolSpec(
             required=True,
             is_path=True,
             path_policy=BuiltinPathPolicy(relative_to_workspace=True, allow_absolute=True),
+            aliases=("file", "filepath"),
         ),
-        BuiltinFieldSpec(name="start_line", required=False, default="1"),
-        BuiltinFieldSpec(name="max_lines", required=False, default="200"),
+        BuiltinFieldSpec(name="start_line", default="1"),
+        BuiltinFieldSpec(name="max_lines", default="200"),
+        BuiltinFieldSpec(name="encoding"),
     ),
 )
 
@@ -58,24 +78,84 @@ SMART_EDIT_SPEC = BuiltinToolSpec(
             required=True,
             is_path=True,
             path_policy=BuiltinPathPolicy(relative_to_workspace=True, allow_absolute=True),
+            aliases=("file", "filepath"),
         ),
-        BuiltinFieldSpec(name="mode", required=False, default="Patch"),
+        BuiltinFieldSpec(name="mode", default="Patch"),
     ),
 )
+
+GET_JOB_LOG_SPEC = BuiltinToolSpec(
+    tool_name="get_job_log",
+    fields=(
+        BuiltinFieldSpec(name="job_id", required=True, aliases=("id",)),
+        BuiltinFieldSpec(name="start_line", default="1"),
+        BuiltinFieldSpec(name="max_lines", default="200"),
+        BuiltinFieldSpec(name="encoding"),
+    ),
+)
+
+GET_RESOURCE_SPEC = BuiltinToolSpec(
+    tool_name="get_resource",
+    fields=(
+        BuiltinFieldSpec(name="path", required=True),
+        BuiltinFieldSpec(name="encoding"),
+    ),
+)
+
+MEMORY_QUERY_SPEC = BuiltinToolSpec(
+    tool_name="memory_query",
+    fields=(
+        BuiltinFieldSpec(name="query", required=True),
+        BuiltinFieldSpec(name="limit", default="5"),
+        BuiltinFieldSpec(name="window", default="10"),
+        BuiltinFieldSpec(name="candidate", default="50"),
+        BuiltinFieldSpec(name="batch", default="6"),
+        BuiltinFieldSpec(name="topn", default="8"),
+        BuiltinFieldSpec(name="context_tail", default="8"),
+    ),
+)
+
+CREATE_SCHEDULE_SPEC = BuiltinToolSpec(
+    tool_name="create_schedule",
+    fields=(
+        BuiltinFieldSpec(name="summary", required=True),
+        BuiltinFieldSpec(name="start_time", required=True),
+        BuiltinFieldSpec(name="end_time"),
+        BuiltinFieldSpec(name="timezone"),
+        BuiltinFieldSpec(name="description"),
+        BuiltinFieldSpec(name="calendar_id"),
+        BuiltinFieldSpec(name="need_notification", normalizer=_lower_bool),
+        BuiltinFieldSpec(name="user_id_type"),
+        BuiltinFieldSpec(name="attendee_open_ids"),
+        BuiltinFieldSpec(name="attendee_need_notification", normalizer=_lower_bool),
+    ),
+)
+
+HINT_SPEC = BuiltinToolSpec(
+    tool_name="hint",
+    fields=(
+        BuiltinFieldSpec(name="action", required=True, normalizer=_lower_bool),
+        BuiltinFieldSpec(name="name"),
+    ),
+)
+
 
 BUILTIN_TOOL_SCHEMAS: dict[str, BuiltinToolSpec] = {
     READ_FILE_SPEC.tool_name: READ_FILE_SPEC,
     SMART_EDIT_SPEC.tool_name: SMART_EDIT_SPEC,
+    GET_JOB_LOG_SPEC.tool_name: GET_JOB_LOG_SPEC,
+    GET_RESOURCE_SPEC.tool_name: GET_RESOURCE_SPEC,
+    MEMORY_QUERY_SPEC.tool_name: MEMORY_QUERY_SPEC,
+    CREATE_SCHEDULE_SPEC.tool_name: CREATE_SCHEDULE_SPEC,
+    HINT_SPEC.tool_name: HINT_SPEC,
 }
 
 
 def get_builtin_tool_schema(tool_name: str) -> Optional[BuiltinToolSpec]:
-    """按工具名获取 schema。"""
     return BUILTIN_TOOL_SCHEMAS.get((tool_name or "").strip().lower())
 
 
 def parse_builtin_tool_name(command_text: str) -> str:
-    """从 builtin 命令文本中提取工具名。"""
     lines = (command_text or "").splitlines()
     if not lines:
         return ""
@@ -87,7 +167,7 @@ def parse_builtin_tool_name(command_text: str) -> str:
 
 
 def parse_builtin_simple_kv_args(command_text: str) -> dict[str, str]:
-    """解析简化 key:value 参数（忽略 <<< >>> 块内容）。"""
+    """Parse simplified key:value args and ignore block payload."""
     args: dict[str, str] = {}
     inline_match = re.match(r"^\s*builtin\.(\w+)\s*(\{[\s\S]*\})\s*$", (command_text or "").strip())
     if inline_match:
@@ -129,6 +209,108 @@ def parse_builtin_simple_kv_args(command_text: str) -> dict[str, str]:
     return args
 
 
+def _find_invalid_kv_line(command_text: str) -> Optional[str]:
+    lines = (command_text or "").splitlines()
+    if len(lines) <= 1:
+        return None
+    in_block = False
+    for raw_line in lines[1:]:
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line == "<<<":
+            in_block = True
+            continue
+        if line == ">>>":
+            in_block = False
+            continue
+        if in_block:
+            continue
+        if ":" not in line:
+            return raw_line
+    return None
+
+
+def normalize_builtin_args_with_schema(
+    tool_name: str,
+    raw_args: dict[str, str],
+    *,
+    reject_unknown_fields: bool = True,
+    enforce_required: bool = True,
+) -> tuple[dict[str, str], Optional[BuiltinParseError]]:
+    schema = get_builtin_tool_schema(tool_name)
+    if not schema:
+        return dict(raw_args), None
+
+    fields = {field.name: field for field in schema.fields}
+    alias_map = {
+        alias.strip().lower(): field.name
+        for field in schema.fields
+        for alias in field.aliases
+        if alias.strip()
+    }
+
+    args: dict[str, str] = {}
+    for key, value in raw_args.items():
+        raw_key = str(key).strip().lower()
+        canonical = alias_map.get(raw_key, raw_key)
+        field_spec = fields.get(canonical)
+        if field_spec is None:
+            if reject_unknown_fields and not schema.allow_unknown_fields:
+                return {}, BuiltinParseError(kind="unknown", detail=raw_key)
+            continue
+
+        text = str(value).strip()
+        if text == "":
+            return {}, BuiltinParseError(kind="empty_value", detail=field_spec.name)
+        if field_spec.normalizer is not None:
+            text = field_spec.normalizer(text)
+        args[field_spec.name] = text
+
+    for field in schema.fields:
+        if field.name not in args and field.default is not None:
+            args[field.name] = str(field.default)
+
+    if enforce_required:
+        for field in schema.fields:
+            if not field.required:
+                continue
+            value = str(args.get(field.name, "")).strip()
+            if not value:
+                return {}, BuiltinParseError(kind="required", detail=field.name)
+
+    return args, None
+
+
+def parse_builtin_args_by_schema(
+    command_text: str,
+    tool_name: str,
+    *,
+    allow_invalid_kv_lines: bool = False,
+    reject_unknown_fields: bool = True,
+) -> tuple[dict[str, str], Optional[BuiltinParseError]]:
+    text = (command_text or "").strip()
+    if not text:
+        return {}, BuiltinParseError(kind="empty_command")
+
+    first_line = text.splitlines()[0].strip().lower()
+    expected = f"builtin.{tool_name}"
+    if not first_line.startswith(expected):
+        return {}, BuiltinParseError(kind="invalid_format")
+
+    if not allow_invalid_kv_lines:
+        invalid_line = _find_invalid_kv_line(text)
+        if invalid_line is not None:
+            return {}, BuiltinParseError(kind="invalid_line", detail=invalid_line)
+
+    raw_args = parse_builtin_simple_kv_args(text)
+    return normalize_builtin_args_with_schema(
+        tool_name,
+        raw_args,
+        reject_unknown_fields=reject_unknown_fields,
+    )
+
+
 def _is_subpath(path: Path, root: Path) -> bool:
     try:
         path.relative_to(root)
@@ -138,7 +320,6 @@ def _is_subpath(path: Path, root: Path) -> bool:
 
 
 def resolve_path_against_workspace(path_text: str, workspace_dir: str) -> tuple[Optional[Path], Optional[str]]:
-    """解析路径（相对路径强依赖 workspace_dir，不允许 cwd 兜底）。"""
     raw = (path_text or "").strip()
     if not raw:
         return None, "路径参数不能为空"
@@ -161,15 +342,19 @@ def resolve_path_against_workspace(path_text: str, workspace_dir: str) -> tuple[
 
 
 def builtin_requires_authorization(command_text: str, workspace_dir: str) -> bool:
-    """判断 builtin 命令是否需要授权（workspace 外绝对路径）。"""
     tool_name = parse_builtin_tool_name(command_text)
     schema = get_builtin_tool_schema(tool_name)
     if not schema:
         return False
 
-    args = parse_builtin_simple_kv_args(command_text)
-    if not args:
-        return False
+    args, parse_error = parse_builtin_args_by_schema(
+        command_text,
+        tool_name,
+        allow_invalid_kv_lines=(tool_name == "smart_edit"),
+        reject_unknown_fields=(tool_name != "smart_edit"),
+    )
+    if parse_error:
+        return True
 
     workspace = (workspace_dir or "").strip()
     if not workspace:
@@ -196,7 +381,6 @@ def builtin_requires_authorization(command_text: str, workspace_dir: str) -> boo
 
 
 def build_builtin_read_file_example_lines() -> list[str]:
-    """生成 read_file 示例片段。"""
     spec = READ_FILE_SPEC
     defaults = {field.name: field.default for field in spec.fields}
     return [
@@ -210,7 +394,6 @@ def build_builtin_read_file_example_lines() -> list[str]:
 
 
 def build_builtin_smart_edit_example_lines() -> list[str]:
-    """生成 smart_edit 示例片段。"""
     spec = SMART_EDIT_SPEC
     defaults = {field.name: field.default for field in spec.fields}
     return [

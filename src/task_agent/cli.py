@@ -35,7 +35,13 @@ from .output_handler import NullOutputHandler
 from .session import SessionManager
 from .platform_utils import is_windows
 from .hint_utils import select_hint_file
-from .builtin_schema import resolve_path_against_workspace
+from .builtin_schema import (
+    BuiltinParseError,
+    normalize_builtin_args_with_schema,
+    parse_builtin_args_by_schema,
+    parse_builtin_simple_kv_args,
+    resolve_path_against_workspace,
+)
 from .webhook.calendar_service import create_feishu_calendar_event
 
 # 自定义主题
@@ -1243,6 +1249,40 @@ def _prefix_builtin_result(tool_name: str, result: _ExecResult) -> _ExecResult:
     return result
 
 
+def _format_builtin_parse_error(tool_name: str, error: BuiltinParseError) -> str:
+    if error.kind == "empty_command":
+        return f"{tool_name} 命令为空"
+    if error.kind == "invalid_format":
+        return f"{tool_name} 命令格式错误"
+    if error.kind == "invalid_line":
+        return f"无法解析 {tool_name} 行: {error.detail}"
+    if error.kind == "unknown":
+        if tool_name == "create_schedule":
+            return f"不支持的 create_schedule 参数: {error.detail}"
+        return f"不支持的 {tool_name} 参数: {error.detail}"
+    if error.kind == "required":
+        return f"{tool_name} 需要参数: {error.detail}"
+    if error.kind == "empty_value":
+        return f"{error.detail} 不能为空"
+    return f"{tool_name} 参数解析失败"
+
+
+def _parse_builtin_kv_command(
+    command: str,
+    tool_name: str,
+    *,
+    allow_invalid_kv_lines: bool = False,
+) -> tuple[dict, Optional[str]]:
+    args, error = parse_builtin_args_by_schema(
+        command,
+        tool_name,
+        allow_invalid_kv_lines=allow_invalid_kv_lines,
+    )
+    if error is None:
+        return args, None
+    return {}, _format_builtin_parse_error(tool_name, error)
+
+
 def _execute_builtin_tool(
     command: str,
     config: Optional[Config] = None,
@@ -1445,52 +1485,12 @@ def _execute_builtin_job_log(args: dict) -> _ExecResult:
 
 
 def _parse_hint_command(command: str) -> tuple[dict, Optional[str]]:
-    if not command.strip():
-        return {}, "hint 命令为空"
-
-    match = _BUILTIN_TOOL_PATTERN.match(command)
-    if match:
-        tool = match.group(1).lower()
-        if tool != "hint":
-            return {}, "hint 命令格式错误"
-        raw = match.group(2)
-        if raw:
-            try:
-                payload = json.loads(raw)
-            except json.JSONDecodeError:
-                return {}, "hint 参数 JSON 解析失败"
-            if not isinstance(payload, dict):
-                return {}, "hint 参数必须是 JSON 对象"
-            return payload, None
-
-    lines = command.splitlines()
-    if not lines:
-        return {}, "hint 命令为空"
-    if not lines[0].strip().lower().startswith("builtin.hint"):
-        return {}, "hint 命令格式错误"
-
-    args: dict[str, str] = {}
-    index = 1
-    while index < len(lines):
-        line = lines[index]
-        if not line.strip():
-            index += 1
-            continue
-        if ":" not in line:
-            return {}, f"无法解析 hint 行: {line}"
-        key, value = line.split(":", 1)
-        key = key.strip().lower()
-        value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
-            value = value[1:-1]
-        if not value:
-            return {}, f"{key} 不能为空"
-        args[key] = value
-        index += 1
-
-    if "action" not in args:
-        return {}, "hint 需要参数: action"
-
+    args, error = _parse_builtin_kv_command(command, "hint")
+    if error:
+        return {}, error
+    action = str(args.get("action", "")).strip().lower()
+    if action == "load" and not str(args.get("name", "")).strip():
+        return {}, "hint load 需要参数: name"
     return args, None
 
 
@@ -1560,7 +1560,7 @@ def _parse_smart_edit_command(command: str) -> tuple[dict, Optional[str]]:
             continue
 
         lower = line.lower()
-        if lower.startswith("path:"):
+        if lower.startswith("path:") or lower.startswith("file:") or lower.startswith("filepath:"):
             value = line.split(":", 1)[1].strip()
             if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
                 value = value[1:-1]
@@ -1593,92 +1593,24 @@ def _parse_smart_edit_command(command: str) -> tuple[dict, Optional[str]]:
 
         return {}, f"无法解析 smart_edit 行: {line}"
 
+    raw_args = parse_builtin_simple_kv_args(command)
+    base_raw = {}
+    for key in ("path", "file", "filepath", "mode"):
+        if key in raw_args and str(raw_args.get(key, "")).strip():
+            base_raw[key] = str(raw_args[key]).strip()
+    base_args, schema_error = normalize_builtin_args_with_schema("smart_edit", base_raw)
+    if schema_error:
+        return {}, _format_builtin_parse_error("smart_edit", schema_error)
+    args.update(base_args)
     return args, None
 
 
 def _parse_read_file_command(command: str) -> tuple[dict, Optional[str]]:
-    lines = command.splitlines()
-    if not lines:
-        return {}, "read_file 命令为空"
-
-    if not lines[0].strip().lower().startswith("builtin.read_file"):
-        return {}, "read_file 命令格式错误"
-
-    args: dict[str, str] = {}
-    index = 1
-    while index < len(lines):
-        line = lines[index]
-        if not line.strip():
-            index += 1
-            continue
-
-        lower = line.lower()
-        if lower.startswith("path:"):
-            value = line.split(":", 1)[1].strip()
-            if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
-                value = value[1:-1]
-            if not value:
-                return {}, "path 不能为空"
-            args["path"] = value
-            index += 1
-            continue
-        if lower.startswith("start_line:"):
-            value = line.split(":", 1)[1].strip()
-            if value:
-                args["start_line"] = value
-            index += 1
-            continue
-        if lower.startswith("max_lines:"):
-            value = line.split(":", 1)[1].strip()
-            if value:
-                args["max_lines"] = value
-            index += 1
-            continue
-
-        return {}, f"无法解析 read_file 行: {line}"
-
-    return args, None
+    return _parse_builtin_kv_command(command, "read_file")
 
 
 def _parse_get_resource_command(command: str) -> tuple[dict, Optional[str]]:
-    lines = command.splitlines()
-    if not lines:
-        return {}, "get_resource 命令为空"
-
-    if not lines[0].strip().lower().startswith("builtin.get_resource"):
-        return {}, "get_resource 命令格式错误"
-
-    args: dict[str, str] = {}
-    index = 1
-    while index < len(lines):
-        line = lines[index]
-        if not line.strip():
-            index += 1
-            continue
-
-        lower = line.lower()
-        if lower.startswith("path:"):
-            value = line.split(":", 1)[1].strip()
-            if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
-                value = value[1:-1]
-            if not value:
-                return {}, "path 不能为空"
-            args["path"] = value
-            index += 1
-            continue
-        if lower.startswith("encoding:"):
-            value = line.split(":", 1)[1].strip()
-            if value:
-                args["encoding"] = value
-            index += 1
-            continue
-
-        return {}, f"无法解析 get_resource 行: {line}"
-
-    if "path" not in args:
-        return {}, "get_resource 需要参数: path"
-
-    return args, None
+    return _parse_builtin_kv_command(command, "get_resource")
 
 
 def _is_safe_relative_path(path: str) -> bool:
@@ -1743,133 +1675,15 @@ def _execute_builtin_get_resource(args: dict) -> _ExecResult:
     return _ExecResult(content, "", 0)
 
 def _parse_job_log_command(command: str) -> tuple[dict, Optional[str]]:
-    lines = command.splitlines()
-    if not lines:
-        return {}, "get_job_log 命令为空"
-
-    if not lines[0].strip().lower().startswith("builtin.get_job_log"):
-        return {}, "get_job_log 命令格式错误"
-
-    args: dict[str, str] = {}
-    index = 1
-    while index < len(lines):
-        line = lines[index]
-        if not line.strip():
-            index += 1
-            continue
-
-        lower = line.lower()
-        if lower.startswith("job_id:") or lower.startswith("id:"):
-            value = line.split(":", 1)[1].strip()
-            if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
-                value = value[1:-1]
-            if not value:
-                return {}, "job_id 不能为空"
-            args["job_id"] = value
-            index += 1
-            continue
-        if lower.startswith("start_line:"):
-            value = line.split(":", 1)[1].strip()
-            if value:
-                args["start_line"] = value
-            index += 1
-            continue
-        if lower.startswith("max_lines:"):
-            value = line.split(":", 1)[1].strip()
-            if value:
-                args["max_lines"] = value
-            index += 1
-            continue
-
-        return {}, f"无法解析 get_job_log 行: {line}"
-
-    if "job_id" not in args:
-        return {}, "get_job_log 需要参数: job_id"
-
-    return args, None
+    return _parse_builtin_kv_command(command, "get_job_log")
 
 
 def _parse_memory_query_command(command: str) -> tuple[dict, Optional[str]]:
-    lines = command.splitlines()
-    if not lines:
-        return {}, "memory_query 命令为空"
-
-    if not lines[0].strip().lower().startswith("builtin.memory_query"):
-        return {}, "memory_query 命令格式错误"
-
-    args: dict[str, str] = {}
-    index = 1
-    while index < len(lines):
-        line = lines[index]
-        if not line.strip():
-            index += 1
-            continue
-
-        if ":" not in line:
-            return {}, f"无法解析 memory_query 行: {line}"
-
-        key, value = line.split(":", 1)
-        key = key.strip().lower()
-        value = value.strip()
-        if not value:
-            return {}, f"{key} 不能为空"
-        args[key] = value
-        index += 1
-
-    if "query" not in args:
-        return {}, "memory_query 需要参数: query"
-
-    return args, None
+    return _parse_builtin_kv_command(command, "memory_query")
 
 
 def _parse_create_schedule_command(command: str) -> tuple[dict, Optional[str]]:
-    lines = command.splitlines()
-    if not lines:
-        return {}, "create_schedule 命令为空"
-
-    if not lines[0].strip().lower().startswith("builtin.create_schedule"):
-        return {}, "create_schedule 命令格式错误"
-
-    args: dict[str, str] = {}
-    index = 1
-    while index < len(lines):
-        line = lines[index]
-        if not line.strip():
-            index += 1
-            continue
-
-        if ":" not in line:
-            return {}, f"无法解析 create_schedule 行: {line}"
-
-        key, value = line.split(":", 1)
-        key = key.strip().lower()
-        value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
-            value = value[1:-1]
-
-        if key in {
-            "summary",
-            "start_time",
-            "end_time",
-            "timezone",
-            "description",
-            "calendar_id",
-            "user_id_type",
-            "attendee_open_ids",
-        }:
-            args[key] = value
-        elif key in {"need_notification", "attendee_need_notification"}:
-            args[key] = value.lower()
-        else:
-            return {}, f"不支持的 create_schedule 参数: {key}"
-        index += 1
-
-    if not args.get("summary", "").strip():
-        return {}, "create_schedule 需要参数: summary"
-    if not args.get("start_time", "").strip():
-        return {}, "create_schedule 需要参数: start_time"
-
-    return args, None
+    return _parse_builtin_kv_command(command, "create_schedule")
 
 
 def _tz_for_name(tz_name: str):
