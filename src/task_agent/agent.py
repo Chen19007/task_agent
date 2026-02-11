@@ -193,11 +193,15 @@ class SimpleAgent:
         hint_metadata = self._load_hint_metadata()
         if hint_metadata:
             hint_metadata = f"\n{hint_metadata}"
+        plugin_metadata = self._load_plugin_metadata()
+        if plugin_metadata:
+            plugin_metadata = f"\n{plugin_metadata}"
 
         base_system_prompt = template.format(
             tree_info=tree_info,
             predefined_section=predefined_section,
-            hint_metadata=hint_metadata
+            hint_metadata=hint_metadata,
+            plugin_metadata=plugin_metadata,
         )
 
         self.history.append(Message(role="system", content=base_system_prompt))
@@ -253,6 +257,23 @@ class SimpleAgent:
                 lines.append(injection)
             lines.append("")
         return "\n".join(lines).strip()
+
+    def _load_plugin_metadata(self) -> str:
+        """按配置动态注入 plugin 能力说明（内部概念）。"""
+        if not (
+            self.config.webhook_app_id
+            and self.config.webhook_app_secret
+            and self.config.webhook_calendar_id
+        ):
+            return ""
+
+        return (
+            "**当前可用外部能力（plugin）：**\n"
+            "1. 创建飞书日程（内部工具：builtin.create_schedule）\n"
+            "   使用时机：用户明确要求创建日程/会议安排。\n"
+            "   参数要求：summary、start_time 必填；end_time 可选（默认 +30 分钟）；\n"
+            "   timezone 默认 Asia/Shanghai；calendar_id 默认使用系统配置。"
+        )
 
     @staticmethod
     def _metadata_disabled(value: object) -> bool:

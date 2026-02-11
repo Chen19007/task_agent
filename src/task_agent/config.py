@@ -66,6 +66,8 @@ class Config:
     webhook_app_secret: str = ""
     webhook_host: str = "0.0.0.0"
     webhook_port: int = 8080
+    webhook_calendar_id: str = ""
+    webhook_default_attendee_open_id: str = ""
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -112,6 +114,8 @@ class Config:
             webhook_app_secret=os.environ.get("WEBHOOK_APP_SECRET", ""),
             webhook_host=os.environ.get("WEBHOOK_HOST", "0.0.0.0"),
             webhook_port=int(os.environ.get("WEBHOOK_PORT", "8080")),
+            webhook_calendar_id=os.environ.get("WEBHOOK_CALENDAR_ID", ""),
+            webhook_default_attendee_open_id=os.environ.get("WEBHOOK_DEFAULT_ATTENDEE_OPEN_ID", ""),
         )
 
     def to_dict(self) -> dict:

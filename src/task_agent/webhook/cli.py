@@ -30,6 +30,7 @@ def parse_args():
 环境变量:
   WEBHOOK_APP_ID      - 飞书应用 ID (必需)
   WEBHOOK_APP_SECRET  - 飞书应用密钥 (必需)
+  WEBHOOK_CALENDAR_ID - 默认日历 ID（创建日程能力需要）
         """,
     )
 
@@ -139,6 +140,10 @@ def main():
             timeout=args.timeout,
             max_output_tokens=max_tokens,
             num_ctx=num_ctx,
+            webhook_app_id=app_id,
+            webhook_app_secret=app_secret,
+            webhook_calendar_id=os.environ.get("WEBHOOK_CALENDAR_ID", ""),
+            webhook_default_attendee_open_id=os.environ.get("WEBHOOK_DEFAULT_ATTENDEE_OPEN_ID", ""),
         )
         client = create_client(config)
 

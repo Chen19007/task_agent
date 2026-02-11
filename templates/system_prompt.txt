@@ -97,7 +97,26 @@ context_tail: 8
 - 含 <ps_call_result> 的消息会被跳过
 - 返回结果为综合摘要，不包含会话ID
 
-**1.4 Hint 内置工具（适合子任务/预定义 Agent）**
+**1.4 创建日程（builtin.create_schedule）**
+用于创建飞书日程（依赖外部 API，仅在系统注入该能力时可用）。
+
+语法：
+<builtin>
+create_schedule
+summary: 日程标题
+start_time: 2026-02-12 10:00
+end_time: 2026-02-12 10:30
+timezone: Asia/Shanghai
+description: 日程描述
+</builtin>
+
+说明：
+- 必填：summary、start_time
+- end_time 可选，缺省时默认开始时间 + 30 分钟
+- timezone 缺省为 Asia/Shanghai
+- 当用户明确要求“创建日程/安排会议”时优先使用该工具
+
+**1.5 Hint 内置工具（适合子任务/预定义 Agent）**
 
 加载/卸载 hint的语法：
 <builtin>
@@ -119,6 +138,7 @@ encoding: utf-8
 </builtin>
 
 {hint_metadata}
+{plugin_metadata}
 
 
 **重要约束：只使用非交互式命令**

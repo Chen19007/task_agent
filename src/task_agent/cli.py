@@ -12,6 +12,7 @@ import shlex
 import subprocess
 import tempfile
 from pathlib import Path
+from datetime import datetime, timezone, timedelta
 
 from typing import Optional
 
@@ -22,13 +23,20 @@ from rich.text import Text
 from rich.theme import Theme
 
 from .agent import Executor, CommandSpec
+from .command_runtime import (
+    ExecutionContext,
+    can_auto_execute_command,
+    execute_command_spec,
+    format_shell_result as runtime_format_shell_result,
+    normalize_command_spec,
+)
 from .config import Config
 from .llm import create_client, ChatMessage
 from .output_handler import NullOutputHandler
 from .session import SessionManager
-from .safety import is_safe_command
-from .platform_utils import get_shell_result_tag, is_windows
+from .platform_utils import is_windows
 from .hint_utils import select_hint_file
+from .webhook.calendar_service import create_feishu_calendar_event
 
 # 自定义主题
 custom_theme = Theme(
@@ -269,8 +277,7 @@ def _print_run_stats(console: Console) -> None:
 
 
 def _format_shell_result(status: str, message: str) -> str:
-    tag = get_shell_result_tag()
-    return f'<{tag} id="{status}">\n{message}\n</{tag}>'
+    return runtime_format_shell_result(status, message)
 
 
 def _contains_shell_result_tag(content: str) -> bool:
@@ -454,7 +461,7 @@ def print_help():
   - 深度优先执行，自动聚合结果
   - 最大支持4层深度（最多16个子Agent）
   - Windows 使用 <ps_call> 执行命令，Linux 使用 <bash_call>
-  - 使用 <builtin> 调用内置工具（read_file/smart_edit）
+  - 使用 <builtin> 调用内置工具（read_file/smart_edit/create_schedule）
   - 使用 <create_agent> 创建子Agent
   - 使用 <return> 标记任务完成
 
@@ -1000,27 +1007,25 @@ def _create_cli_command_confirm_callback(executor: 'Executor', console: Console)
             命令结果消息，格式: '<shell_call_result id="executed">...</shell_call_result>'
         """
         # 检查是否自动执行
+        command_spec = normalize_command_spec(CommandSpec(command=command))
         current_dir = os.getcwd()
-        auto_execute = executor.auto_approve and is_safe_command(command, current_dir)
+        auto_execute = can_auto_execute_command(command_spec, executor.auto_approve, current_dir)
 
         if auto_execute:
             # 自动执行安全命令
             console.print("[dim](自动执行)[/dim]\n", end="")
-            cmd_result = _execute_command(
-                command,
-                executor.config.timeout,
-                config=executor.config,
-                context_messages=(executor.current_agent.history if executor.current_agent else None),
+            exec_result = execute_command_spec(
+                command_spec=command_spec,
+                context=ExecutionContext(
+                    config=executor.config,
+                    workspace_dir=current_dir,
+                    context_messages=(executor.current_agent.history if executor.current_agent else None),
+                ),
+                execute_command=_execute_command,
             )
 
             # 构建结果消息
-            if cmd_result.returncode == 0:
-                if cmd_result.stdout:
-                    result_msg = f"命令执行成功，输出：\n{cmd_result.stdout}"
-                else:
-                    result_msg = "命令执行成功（无输出）"
-            else:
-                result_msg = f"命令执行失败（退出码: {cmd_result.returncode}）：\n{cmd_result.stderr}"
+            result_msg = exec_result.human_message()
 
             console.print(f"[dim]{result_msg}[/dim]\n")
             _update_smart_edit_stats(command, "executed", result_msg)
@@ -1040,21 +1045,18 @@ def _create_cli_command_confirm_callback(executor: 'Executor', console: Console)
 
         if confirm_lower == "y":
             # 用户确认，执行命令
-            cmd_result = _execute_command(
-                command,
-                executor.config.timeout,
-                config=executor.config,
-                context_messages=(executor.current_agent.history if executor.current_agent else None),
+            exec_result = execute_command_spec(
+                command_spec=command_spec,
+                context=ExecutionContext(
+                    config=executor.config,
+                    workspace_dir=current_dir,
+                    context_messages=(executor.current_agent.history if executor.current_agent else None),
+                ),
+                execute_command=_execute_command,
             )
 
             # 构建明确的结果消息
-            if cmd_result.returncode == 0:
-                if cmd_result.stdout:
-                    result_msg = f"命令执行成功，输出：\n{cmd_result.stdout}"
-                else:
-                    result_msg = "命令执行成功（无输出）"
-            else:
-                result_msg = f"命令执行失败（退出码: {cmd_result.returncode}）：\n{cmd_result.stderr}"
+            result_msg = exec_result.human_message()
 
             console.print(f"\n[info]{result_msg}[/info]\n")
             _update_smart_edit_stats(command, "executed", result_msg)
@@ -1090,35 +1092,28 @@ def _handle_pending_commands(executor: 'Executor', console: Console, result: 'St
         console.print(result.command_blocks[processed_count], end="")
 
         # 获取对应的命令
-        command_spec = result.pending_commands[processed_count]
-        if not isinstance(command_spec, CommandSpec):
-            command_spec = CommandSpec(command=str(command_spec))
+        command_spec = normalize_command_spec(result.pending_commands[processed_count])
         command = command_spec.command
-        command_timeout = command_spec.timeout if command_spec.timeout is not None else executor.config.timeout
 
         # 检查是否自动执行
         current_dir = os.getcwd()
-        auto_execute = executor.auto_approve and is_safe_command(command, current_dir)
+        auto_execute = can_auto_execute_command(command_spec, executor.auto_approve, current_dir)
 
         if auto_execute:
             # 自动执行安全命令
             console.print("[dim](自动执行)[/dim]\n", end="")
-            cmd_result = _execute_command(
-                command,
-                command_timeout,
-                config=executor.config,
-                context_messages=(executor.current_agent.history if executor.current_agent else None),
-                background=command_spec.background,
+            exec_result = execute_command_spec(
+                command_spec=command_spec,
+                context=ExecutionContext(
+                    config=executor.config,
+                    workspace_dir=current_dir,
+                    context_messages=(executor.current_agent.history if executor.current_agent else None),
+                ),
+                execute_command=_execute_command,
             )
 
             # 构建结果消息
-            if cmd_result.returncode == 0:
-                if cmd_result.stdout:
-                    result_msg = f"命令执行成功，输出：\n{cmd_result.stdout}"
-                else:
-                    result_msg = "命令执行成功（无输出）"
-            else:
-                result_msg = f"命令执行失败（退出码: {cmd_result.returncode}）：\n{cmd_result.stderr}"
+            result_msg = exec_result.human_message()
 
             console.print(f"[dim]{result_msg}[/dim]\n")
 
@@ -1140,22 +1135,18 @@ def _handle_pending_commands(executor: 'Executor', console: Console, result: 'St
 
             if confirm_lower == "y":
                 # 用户确认，执行命令
-                cmd_result = _execute_command(
-                    command,
-                    command_timeout,
-                    config=executor.config,
-                    context_messages=(executor.current_agent.history if executor.current_agent else None),
-                    background=command_spec.background,
+                exec_result = execute_command_spec(
+                    command_spec=command_spec,
+                    context=ExecutionContext(
+                        config=executor.config,
+                        workspace_dir=current_dir,
+                        context_messages=(executor.current_agent.history if executor.current_agent else None),
+                    ),
+                    execute_command=_execute_command,
                 )
 
                 # 构建明确的结果消息
-                if cmd_result.returncode == 0:
-                    if cmd_result.stdout:
-                        result_msg = f"命令执行成功，输出：\n{cmd_result.stdout}"
-                    else:
-                        result_msg = "命令执行成功（无输出）"
-                else:
-                    result_msg = f"命令执行失败（退出码: {cmd_result.returncode}）：\n{cmd_result.stderr}"
+                result_msg = exec_result.human_message()
 
                 console.print(f"\n[info]{result_msg}[/info]\n")
 
@@ -1241,6 +1232,16 @@ def _execute_builtin_tool(command: str, config: Optional[Config] = None,
         return _prefix_builtin_result(
             "memory_query",
             _execute_builtin_memory_query(parsed_args, config, context_messages or []),
+        )
+    if stripped.lower().startswith("builtin.create_schedule"):
+        parsed_args, error = _parse_create_schedule_command(stripped)
+        if error:
+            return _prefix_builtin_result("create_schedule", _ExecResult("", error, 1))
+        if not config:
+            return _prefix_builtin_result("create_schedule", _ExecResult("", "create_schedule 缺少配置", 1))
+        return _prefix_builtin_result(
+            "create_schedule",
+            _execute_builtin_create_schedule(parsed_args, config),
         )
     if stripped.lower().startswith("builtin.hint"):
         parsed_args, error = _parse_hint_command(stripped)
@@ -1760,6 +1761,101 @@ def _parse_memory_query_command(command: str) -> tuple[dict, Optional[str]]:
     return args, None
 
 
+def _parse_create_schedule_command(command: str) -> tuple[dict, Optional[str]]:
+    lines = command.splitlines()
+    if not lines:
+        return {}, "create_schedule 命令为空"
+
+    if not lines[0].strip().lower().startswith("builtin.create_schedule"):
+        return {}, "create_schedule 命令格式错误"
+
+    args: dict[str, str] = {}
+    index = 1
+    while index < len(lines):
+        line = lines[index]
+        if not line.strip():
+            index += 1
+            continue
+
+        if ":" not in line:
+            return {}, f"无法解析 create_schedule 行: {line}"
+
+        key, value = line.split(":", 1)
+        key = key.strip().lower()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+            value = value[1:-1]
+
+        if key in {
+            "summary",
+            "start_time",
+            "end_time",
+            "timezone",
+            "description",
+            "calendar_id",
+            "user_id_type",
+            "attendee_open_ids",
+        }:
+            args[key] = value
+        elif key in {"need_notification", "attendee_need_notification"}:
+            args[key] = value.lower()
+        else:
+            return {}, f"不支持的 create_schedule 参数: {key}"
+        index += 1
+
+    if not args.get("summary", "").strip():
+        return {}, "create_schedule 需要参数: summary"
+    if not args.get("start_time", "").strip():
+        return {}, "create_schedule 需要参数: start_time"
+
+    return args, None
+
+
+def _tz_for_name(tz_name: str):
+    if tz_name == "Asia/Shanghai":
+        return timezone(timedelta(hours=8))
+    if tz_name in {"UTC", "Etc/UTC"}:
+        return timezone.utc
+    return None
+
+
+def _parse_time_to_epoch(raw: str, tz_name: str) -> tuple[Optional[int], Optional[str]]:
+    value = (raw or "").strip()
+    if not value:
+        return None, "时间不能为空"
+
+    if re.fullmatch(r"\d{10}", value):
+        return int(value), None
+
+    if re.fullmatch(r"\d{13}", value):
+        return int(value) // 1000, None
+
+    normalized = value.replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(normalized)
+        if dt.tzinfo is None:
+            tzinfo = _tz_for_name(tz_name)
+            if tzinfo is None:
+                return None, f"不支持的时区: {tz_name}（请改用秒级时间戳）"
+            dt = dt.replace(tzinfo=tzinfo)
+        return int(dt.timestamp()), None
+    except ValueError:
+        pass
+
+    tzinfo = _tz_for_name(tz_name)
+    if tzinfo is None:
+        return None, f"不支持的时区: {tz_name}（请改用秒级时间戳）"
+
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S"):
+        try:
+            dt = datetime.strptime(value, fmt).replace(tzinfo=tzinfo)
+            return int(dt.timestamp()), None
+        except ValueError:
+            continue
+
+    return None, f"无法解析时间: {value}"
+
+
 def _load_snapshot_json(path: str) -> Optional[dict]:
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as handle:
@@ -2055,6 +2151,84 @@ def _execute_builtin_memory_query(args: dict, config: Config, context_messages: 
 
     result_text = f"memory_query: 成功\n命中: {len(relevant)}\n---\n{summary}"
     return _ExecResult(result_text, "", 0)
+
+
+def _execute_builtin_create_schedule(args: dict, config: Config) -> _ExecResult:
+    summary = (args.get("summary") or "").strip()
+    start_time_raw = (args.get("start_time") or "").strip()
+    end_time_raw = (args.get("end_time") or "").strip()
+    timezone_name = (args.get("timezone") or "Asia/Shanghai").strip() or "Asia/Shanghai"
+    description = (args.get("description") or "").strip()
+    calendar_id = (args.get("calendar_id") or config.webhook_calendar_id or "").strip()
+    need_notification = str(args.get("need_notification", "false")).strip().lower() in {"1", "true", "yes", "y", "on"}
+    user_id_type = (args.get("user_id_type") or "open_id").strip() or "open_id"
+    attendee_need_notification = str(args.get("attendee_need_notification", "true")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
+    attendee_open_ids_raw = str(args.get("attendee_open_ids") or "").strip()
+    attendee_open_ids = []
+    if attendee_open_ids_raw:
+        attendee_open_ids = [x.strip() for x in attendee_open_ids_raw.split(",") if x.strip()]
+    default_attendee_open_id = (config.webhook_default_attendee_open_id or "").strip()
+    if not attendee_open_ids and default_attendee_open_id:
+        attendee_open_ids = [default_attendee_open_id]
+
+    if not summary:
+        return _ExecResult("", "create_schedule 需要参数: summary", 1)
+    if not start_time_raw:
+        return _ExecResult("", "create_schedule 需要参数: start_time", 1)
+    if not calendar_id:
+        return _ExecResult("", "缺少默认日历配置：WEBHOOK_CALENDAR_ID", 1)
+
+    start_ts, start_err = _parse_time_to_epoch(start_time_raw, timezone_name)
+    if start_err:
+        return _ExecResult("", f"start_time 无效: {start_err}", 1)
+
+    if end_time_raw:
+        end_ts, end_err = _parse_time_to_epoch(end_time_raw, timezone_name)
+        if end_err:
+            return _ExecResult("", f"end_time 无效: {end_err}", 1)
+    else:
+        end_ts = start_ts + 30 * 60
+
+    if end_ts <= start_ts:
+        return _ExecResult("", "end_time 必须晚于 start_time", 1)
+
+    result = create_feishu_calendar_event(
+        app_id=config.webhook_app_id,
+        app_secret=config.webhook_app_secret,
+        calendar_id=calendar_id,
+        summary=summary,
+        start_timestamp=start_ts,
+        end_timestamp=end_ts,
+        timezone=timezone_name,
+        description=description,
+        need_notification=need_notification,
+        user_id_type=user_id_type,
+        attendee_open_ids=attendee_open_ids,
+        attendee_need_notification=attendee_need_notification,
+    )
+    if not result.ok:
+        return _ExecResult("", result.message, 1)
+
+    lines = [
+        "创建日程成功",
+        f"calendar_id: {calendar_id}",
+        f"event_id: {result.event_id or '(未返回)'}",
+        f"summary: {summary}",
+        f"start_time: {start_ts}",
+        f"end_time: {end_ts}",
+        f"timezone: {timezone_name}",
+    ]
+    if attendee_open_ids:
+        lines.append(f"attendee_count: {len(attendee_open_ids)}")
+    if result.warning:
+        lines.append(f"warning: {result.warning}")
+    return _ExecResult("\n".join(lines), "", 0)
 
 
 def _execute_builtin_smart_edit(args: dict) -> _ExecResult:

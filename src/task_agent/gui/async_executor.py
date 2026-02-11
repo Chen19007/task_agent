@@ -9,8 +9,13 @@ import threading
 from typing import Callable, Optional
 
 from ..agent import StepResult, CommandSpec
-from ..safety import is_safe_command
-from ..platform_utils import get_shell_result_tag
+from ..command_runtime import (
+    ExecutionContext,
+    can_auto_execute_command,
+    execute_command_spec,
+    format_shell_result,
+    normalize_command_spec,
+)
 from .adapter import ExecutorAdapter
 
 
@@ -37,9 +42,7 @@ class AsyncExecutor:
         self._waiting_for_confirmation = False
 
     def _normalize_command_spec(self, command: object) -> CommandSpec:
-        if isinstance(command, CommandSpec):
-            return command
-        return CommandSpec(command=str(command))
+        return normalize_command_spec(command)
 
 
     def execute_task_async(self, task: str):
@@ -80,7 +83,7 @@ class AsyncExecutor:
                             unsafe_commands = []
                             for cmd in result.pending_commands:
                                 cmd_spec = self._normalize_command_spec(cmd)
-                                if is_safe_command(cmd_spec.command, current_dir):
+                                if can_auto_execute_command(cmd_spec, True, current_dir):
                                     safe_commands.append(cmd_spec)
                                 else:
                                     unsafe_commands.append(cmd_spec)
@@ -146,30 +149,27 @@ class AsyncExecutor:
         def execute():
             try:
                 from ..cli import _execute_command
-                command_timeout = command_spec.timeout if command_spec.timeout is not None else self.adapter.executor.config.timeout
-                cmd_result = _execute_command(
-                    command_spec.command,
-                    command_timeout,
-                    background=command_spec.background,
+                current_dir = os.getcwd()
+                exec_result = execute_command_spec(
+                    command_spec=command_spec,
+                    context=ExecutionContext(
+                        config=self.adapter.executor.config,
+                        workspace_dir=current_dir,
+                        context_messages=(self.adapter.executor.current_agent.history if self.adapter.executor.current_agent else None),
+                    ),
+                    execute_command=_execute_command,
                 )
 
                 # 构建结果消息
-                result_tag = get_shell_result_tag()
                 if action == "executed":
-                    if cmd_result.returncode == 0:
-                        if cmd_result.stdout:
-                            message = f"命令执行成功，输出：\n{cmd_result.stdout}"
-                        else:
-                            message = "命令执行成功（无输出）"
-                    else:
-                        message = f"命令执行失败（退出码: {cmd_result.returncode}）：\n{cmd_result.stderr}"
-                    result_msg = f'<{result_tag} id="executed">\n{message}\n</{result_tag}>'
+                    message = exec_result.human_message()
+                    result_msg = format_shell_result("executed", message)
                 else:  # rejected
                     if user_input:
                         message = f"用户建议：{user_input}"
                     else:
                         message = "用户取消了命令执行"
-                    result_msg = f'<{result_tag} id="rejected">\n{message}\n</{result_tag}>'
+                    result_msg = format_shell_result("rejected", message)
 
                 self._emit_command_result(message, action)
 
@@ -183,8 +183,7 @@ class AsyncExecutor:
             except Exception as e:
                 error_msg = f"命令执行异常：{str(e)}"
                 if self.adapter.executor.current_agent:
-                    result_tag = get_shell_result_tag()
-                    self.adapter.executor.current_agent._add_message("user", f'<{result_tag} id="executed">\n{error_msg}\n</{result_tag}>')
+                    self.adapter.executor.current_agent._add_message("user", format_shell_result("executed", error_msg))
                 self._continue_execution()
 
         thread = threading.Thread(target=execute, daemon=True)
@@ -215,7 +214,7 @@ class AsyncExecutor:
                             unsafe_commands = []
                             for cmd in result.pending_commands:
                                 cmd_spec = self._normalize_command_spec(cmd)
-                                if is_safe_command(cmd_spec.command, current_dir):
+                                if can_auto_execute_command(cmd_spec, True, current_dir):
                                     safe_commands.append(cmd_spec)
                                 else:
                                     unsafe_commands.append(cmd_spec)
@@ -284,7 +283,7 @@ class AsyncExecutor:
                             unsafe_commands = []
                             for cmd in result.pending_commands:
                                 cmd_spec = self._normalize_command_spec(cmd)
-                                if is_safe_command(cmd_spec.command, current_dir):
+                                if can_auto_execute_command(cmd_spec, True, current_dir):
                                     safe_commands.append(cmd_spec)
                                 else:
                                     unsafe_commands.append(cmd_spec)
@@ -326,23 +325,18 @@ class AsyncExecutor:
         """\u81ea\u52a8\u6267\u884c\u5b89\u5168\u547d\u4ee4"""
         try:
             from ..cli import _execute_command
-            command_timeout = command_spec.timeout if command_spec.timeout is not None else self.adapter.executor.config.timeout
-            cmd_result = _execute_command(
-                command_spec.command,
-                command_timeout,
-                background=command_spec.background,
+            current_dir = os.getcwd()
+            exec_result = execute_command_spec(
+                command_spec=command_spec,
+                context=ExecutionContext(
+                    config=self.adapter.executor.config,
+                    workspace_dir=current_dir,
+                    context_messages=(self.adapter.executor.current_agent.history if self.adapter.executor.current_agent else None),
+                ),
+                execute_command=_execute_command,
             )
-
-            if cmd_result.returncode == 0:
-                if cmd_result.stdout:
-                    message = "\u547d\u4ee4\u6267\u884c\u6210\u529f\uff08\u81ea\u52a8\u6267\u884c\uff09\uff0c\u8f93\u51fa\uff1a\n" + cmd_result.stdout
-                else:
-                    message = "\u547d\u4ee4\u6267\u884c\u6210\u529f\uff08\u81ea\u52a8\u6267\u884c\uff0c\u65e0\u8f93\u51fa\uff09"
-            else:
-                message = f"\u547d\u4ee4\u6267\u884c\u5931\u8d25\uff08\u9000\u51fa\u7801: {cmd_result.returncode}\uff09\uff1a\n{cmd_result.stderr}"
-
-            result_tag = get_shell_result_tag()
-            result_msg = f'<{result_tag} id="executed">\n{message}\n</{result_tag}>'
+            message = exec_result.human_message()
+            result_msg = format_shell_result("executed", message)
 
             self._emit_command_result(message, "executed")
 
@@ -352,8 +346,7 @@ class AsyncExecutor:
         except Exception as e:
             error_msg = f"\u547d\u4ee4\u6267\u884c\u5f02\u5e38\uff1a{e}"
             if self.adapter.executor.current_agent:
-                result_tag = get_shell_result_tag()
-                self.adapter.executor.current_agent._add_message("user", f'<{result_tag} id="executed">\n{error_msg}\n</{result_tag}>')
+                self.adapter.executor.current_agent._add_message("user", format_shell_result("executed", error_msg))
 
     def _emit_command_result(self, message: str, status: str):
         """直接向 GUI 输出命令结果"""

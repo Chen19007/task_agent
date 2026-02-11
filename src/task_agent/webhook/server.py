@@ -15,8 +15,14 @@ from datetime import datetime
 from typing import Optional, Set, Dict, Any
 
 from ..agent import Action
+from ..command_runtime import (
+    ExecutionContext,
+    can_auto_execute_command,
+    execute_command_spec,
+    format_shell_result,
+    normalize_command_spec,
+)
 from ..config import Config
-from ..safety import is_safe_command
 from .adapter import WebhookAdapter
 from .platforms import FeishuPlatform
 
@@ -262,12 +268,6 @@ def _set_session_workspace(chat_type: str, chat_id: str, workspace_dir: str) -> 
         _session_workspaces[session_key] = workspace_dir
 
 
-def _wrap_command_with_workspace(command: str, workspace_dir: str) -> str:
-    """在命令前注入切换目录（PowerShell）。"""
-    escaped = workspace_dir.replace("'", "''")
-    return f"Set-Location -LiteralPath '{escaped}'; {command}"
-
-
 def _get_or_create_adapter(chat_type: str, chat_id: str) -> WebhookAdapter:
     """按会话键获取独立适配器，避免私聊/群聊共享同一会话。"""
     global _config, _platform, _adapters
@@ -448,49 +448,37 @@ def _try_auto_execute_pending_commands(adapter: WebhookAdapter, pending_commands
         return False
 
     try:
-        from ..cli import _execute_command, _format_shell_result
+        from ..cli import _execute_command
 
         workspace_dir = getattr(adapter.executor, "workspace_dir", None) or os.getcwd()
 
         # 先全量判断安全性，任一不安全则回退到卡片授权
-        for command_spec in pending_commands:
-            command = command_spec.command if hasattr(command_spec, "command") else str(command_spec)
-            if not is_safe_command(command, workspace_dir):
-                logger.info(f"[自动授权] 检测到非安全命令，回退卡片授权: {command}")
+        normalized_commands = [normalize_command_spec(item) for item in pending_commands]
+        for command_spec in normalized_commands:
+            if not can_auto_execute_command(command_spec, True, workspace_dir):
+                logger.info(f"[自动授权] 检测到非自动执行命令，回退卡片授权: {command_spec.command}")
                 return False
 
-        for command_spec in pending_commands:
-            command = command_spec.command if hasattr(command_spec, "command") else str(command_spec)
-            wrapped_command = _wrap_command_with_workspace(command, workspace_dir)
-            command_timeout = (
-                command_spec.timeout
-                if hasattr(command_spec, "timeout") and command_spec.timeout is not None
-                else adapter.executor.config.timeout
-            )
-            background = bool(getattr(command_spec, "background", False))
-
-            cmd_result = _execute_command(
-                wrapped_command,
-                command_timeout,
-                config=adapter.executor.config,
-                context_messages=(adapter.executor.current_agent.history if adapter.executor.current_agent else None),
-                background=background,
+        context = ExecutionContext(
+            config=adapter.executor.config,
+            workspace_dir=workspace_dir,
+            context_messages=(adapter.executor.current_agent.history if adapter.executor.current_agent else None),
+        )
+        for command_spec in normalized_commands:
+            exec_result = execute_command_spec(
+                command_spec=command_spec,
+                context=context,
+                execute_command=_execute_command,
             )
 
-            if cmd_result.returncode == 0:
-                if cmd_result.stdout:
-                    result_msg = f"命令执行成功，输出：\n{cmd_result.stdout}"
-                else:
-                    result_msg = "命令执行成功（无输出）"
-            else:
-                result_msg = f"命令执行失败（退出码: {cmd_result.returncode}）：\n{cmd_result.stderr}"
+            result_msg = exec_result.human_message()
 
             if adapter.executor.current_agent:
                 adapter.executor.current_agent._add_message(
-                    "user", _format_shell_result("executed", result_msg)
+                    "user", format_shell_result("executed", result_msg)
                 )
 
-        logger.info(f"[自动授权] 已自动执行 {len(pending_commands)} 条命令")
+        logger.info(f"[自动授权] 已自动执行 {len(normalized_commands)} 条命令")
         return True
     except Exception as e:
         logger.error(f"[自动授权] 自动执行失败，回退卡片授权: {e}")
@@ -544,45 +532,33 @@ def _process_card_action_async(card_message_id: str, action: str, auto: bool,
         logger.info("[卡片交互] 已开启 auto_approve")
 
     try:
-        from ..cli import _execute_command, _format_shell_result
+        from ..cli import _execute_command
 
         if action == "approve":
             workspace_dir = getattr(adapter.executor, "workspace_dir", None) or _get_session_workspace(chat_type, chat_id)
-            for command_spec in pending_commands:
-                command = command_spec.command if hasattr(command_spec, "command") else str(command_spec)
-                wrapped_command = _wrap_command_with_workspace(command, workspace_dir)
-                command_timeout = (
-                    command_spec.timeout
-                    if hasattr(command_spec, "timeout") and command_spec.timeout is not None
-                    else adapter.executor.config.timeout
-                )
-                background = bool(getattr(command_spec, "background", False))
-
-                cmd_result = _execute_command(
-                    wrapped_command,
-                    command_timeout,
-                    config=adapter.executor.config,
-                    context_messages=(adapter.executor.current_agent.history if adapter.executor.current_agent else None),
-                    background=background,
+            context = ExecutionContext(
+                config=adapter.executor.config,
+                workspace_dir=workspace_dir,
+                context_messages=(adapter.executor.current_agent.history if adapter.executor.current_agent else None),
+            )
+            for command_spec in [normalize_command_spec(item) for item in pending_commands]:
+                exec_result = execute_command_spec(
+                    command_spec=command_spec,
+                    context=context,
+                    execute_command=_execute_command,
                 )
 
-                if cmd_result.returncode == 0:
-                    if cmd_result.stdout:
-                        result_msg = f"命令执行成功，输出：\n{cmd_result.stdout}"
-                    else:
-                        result_msg = "命令执行成功（无输出）"
-                else:
-                    result_msg = f"命令执行失败（退出码: {cmd_result.returncode}）：\n{cmd_result.stderr}"
+                result_msg = exec_result.human_message()
 
                 if adapter.executor.current_agent:
                     adapter.executor.current_agent._add_message(
-                        "user", _format_shell_result("executed", result_msg)
+                        "user", format_shell_result("executed", result_msg)
                     )
         else:
             reject_reason = reject_reason or str(action_value.get("reason") or "用户取消了命令执行")
             if adapter.executor.current_agent:
                 adapter.executor.current_agent._add_message(
-                    "user", _format_shell_result("rejected", str(reject_reason))
+                    "user", format_shell_result("rejected", str(reject_reason))
                 )
 
         adapter.executor._is_running = True
