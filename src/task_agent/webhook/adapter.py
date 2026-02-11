@@ -59,6 +59,12 @@ class WebhookAdapter:
             runtime_scene="webhook",
             workspace_dir=os.getcwd(),
         )
+        self._ensure_session_id()
+
+    def _ensure_session_id(self) -> None:
+        """确保会话管理器已有 session_id，避免快照丢失。"""
+        if self.session_manager.current_session_id is None:
+            self.session_manager.current_session_id = self.session_manager.get_next_session_id()
 
     def execute_task(self, task: str) -> Generator[tuple[list[str], StepResult], None, None]:
         """
@@ -70,6 +76,7 @@ class WebhookAdapter:
         Yields:
             (输出列表, StepResult)
         """
+        self._ensure_session_id()
         yield from self.executor.run(task)
 
     def set_output_handler(self, output_handler: Optional[OutputHandler]) -> None:
@@ -97,6 +104,7 @@ class WebhookAdapter:
         Yields:
             (输出列表, StepResult)
         """
+        self._ensure_session_id()
         yield from self.executor.resume(user_input)
 
     def get_current_session_id(self) -> Optional[int]:
