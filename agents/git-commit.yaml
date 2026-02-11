@@ -1,5 +1,5 @@
 name: "git-commit"
-description: "自动化 Git 提交流程，包含智能文件过滤、.gitignore 生成、隐私安全检查"
+description: "自动化 Git 提交流程，包含智能文件过滤、.gitignore 生成、隐私安全检查、gh 推送"
 forbidden_agents:
   - "git-commit"
 system_prompt_injection: |
@@ -16,3 +16,8 @@ system_prompt_injection: |
     <ps_call> git diff </ps_call>
     <ps_call> git show HEAD </ps_call>
     <ps_call> git branch </ps_call>
+    <ps_call> git remote -v </ps_call>
+
+    **推送命令（推荐使用 gh 命令）：**
+    <ps_call> gh repo view --json url -q .url 2>/dev/null || echo "gh not available" </ps_call>
+    <ps_call> git push origin HEAD </ps_call>
