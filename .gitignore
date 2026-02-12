@@ -133,6 +133,7 @@ nul
 
 # Session data and AI assistant configuration (user-specific)
 .claude/
+codex_app_trace.jsonl
 
 # ========================================
 # Additional Language Patterns (from Agent Update)

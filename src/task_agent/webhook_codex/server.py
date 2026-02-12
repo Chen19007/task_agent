@@ -314,6 +314,188 @@ def _build_approval_preview(method: str, params: dict[str, Any]) -> str:
     return method
 
 
+def _extract_tool_preview_from_notification(method: str, params: dict[str, Any]) -> tuple[str, bool, str]:
+    def _short(s: str, max_len: int = 160) -> str:
+        t = str(s or "").strip().replace("\r", " ").replace("\n", " ")
+        if len(t) > max_len:
+            return t[: max_len - 3] + "..."
+        return t
+
+    if method == "item/commandExecution/requestApproval":
+        command = _short(str(params.get("command", "")))
+        key = str(params.get("itemId", "")).strip() or command
+        if command:
+            return (f"命令等待授权：{command}", True, f"approval:{key}")
+
+    if method == "codex/event/exec_approval_request":
+        msg = params.get("msg")
+        if isinstance(msg, dict):
+            cmd = msg.get("command")
+            command = ""
+            if isinstance(cmd, list):
+                command = _short(" ".join(str(x) for x in cmd if str(x).strip()))
+            else:
+                command = _short(str(cmd or ""))
+            call_id = str(msg.get("call_id", "")).strip() or command
+            if command:
+                return (f"命令等待授权：{command}", True, f"approval:{call_id}")
+
+    if method == "codex/event/exec_command_begin":
+        msg = params.get("msg")
+        if isinstance(msg, dict):
+            cmd = msg.get("command")
+            command = ""
+            if isinstance(cmd, list):
+                command = _short(" ".join(str(x) for x in cmd if str(x).strip()))
+            else:
+                command = _short(str(cmd or ""))
+            call_id = str(msg.get("call_id", "")).strip() or command
+            if command:
+                return (f"开始执行命令：{command}", True, f"begin:{call_id}")
+
+    if method == "codex/event/exec_command_end":
+        msg = params.get("msg")
+        if isinstance(msg, dict):
+            cmd = msg.get("command")
+            command = ""
+            if isinstance(cmd, list):
+                command = _short(" ".join(str(x) for x in cmd if str(x).strip()))
+            else:
+                command = _short(str(cmd or ""))
+            call_id = str(msg.get("call_id", "")).strip() or command
+            exit_code = str(msg.get("exit_code", "")).strip()
+            if command:
+                exit_part = f"（exit={exit_code}）" if exit_code else ""
+                return (f"命令执行完成{exit_part}：{command}", True, f"end:{call_id}")
+
+    if "mcp_tool_call" in method and method.endswith("_begin"):
+        tool_name = ""
+        args_obj: Any = None
+        item = params.get("item")
+        if isinstance(item, dict):
+            for key in ("tool", "tool_name", "name", "server_tool_name"):
+                value = item.get(key)
+                if isinstance(value, str) and value.strip():
+                    tool_name = value.strip()
+                    break
+            for key in ("arguments", "args", "input"):
+                if key in item:
+                    args_obj = item.get(key)
+                    break
+        if not tool_name:
+            for key in ("tool", "tool_name", "name", "server_tool_name"):
+                value = params.get(key)
+                if isinstance(value, str) and value.strip():
+                    tool_name = value.strip()
+                    break
+        if args_obj is None:
+            for key in ("arguments", "args", "input"):
+                if key in params:
+                    args_obj = params.get(key)
+                    break
+
+        preview = f"正在执行工具：{tool_name or 'unknown'}"
+        if isinstance(args_obj, dict):
+            command = _short(str(args_obj.get("command", "")))
+            if command:
+                preview += f"\n命令：{command}"
+        return (preview, True, f"mcp_begin:{tool_name or 'unknown'}")
+
+    if "mcp_tool_call" in method and method.endswith("_end"):
+        tool_name = ""
+        item = params.get("item")
+        if isinstance(item, dict):
+            for key in ("tool", "tool_name", "name", "server_tool_name"):
+                value = item.get(key)
+                if isinstance(value, str) and value.strip():
+                    tool_name = value.strip()
+                    break
+        if not tool_name:
+            for key in ("tool", "tool_name", "name", "server_tool_name"):
+                value = params.get(key)
+                if isinstance(value, str) and value.strip():
+                    tool_name = value.strip()
+                    break
+        preview = f"工具执行完成：{tool_name or 'unknown'}"
+        return (preview, True, f"mcp_end:{tool_name or 'unknown'}")
+
+    return ("", False, "")
+
+
+def _extract_reasoning_delta(method: str, params: dict[str, Any]) -> str:
+    # 只使用一类 delta 事件，避免同一 token 在不同事件通道重复累加。
+    if method == "item/reasoning/summaryTextDelta":
+        return str(params.get("delta", ""))
+    return ""
+
+
+def _build_think_summary(reasoning_buffer: str, max_lines: int = 3, max_chars: int = 280) -> str:
+    normalized = str(reasoning_buffer or "").replace("\r\n", "\n").replace("\r", "\n")
+    lines = [line.strip() for line in normalized.split("\n") if line.strip()]
+    if not lines:
+        return ""
+    summary = "\n".join(lines[:max_lines]).strip()
+    if len(summary) > max_chars:
+        summary = summary[: max_chars - 3] + "..."
+    return summary
+
+
+def _extract_command_event(method: str, params: dict[str, Any]) -> Optional[dict[str, str]]:
+    def _short_text(raw: str, max_chars: int = 240) -> str:
+        text = str(raw or "").replace("\r", " ").replace("\n", " ").strip()
+        if len(text) > max_chars:
+            return text[: max_chars - 3] + "..."
+        return text
+
+    if method == "item/commandExecution/requestApproval":
+        command = _short_text(str(params.get("command", "")))
+        call_id = str(params.get("itemId", "")).strip() or command
+        if command:
+            return {"phase": "approval", "call_id": call_id, "command": command}
+
+    if method == "codex/event/exec_approval_request":
+        msg = params.get("msg")
+        if isinstance(msg, dict):
+            cmd = msg.get("command")
+            command = " ".join(str(x) for x in cmd) if isinstance(cmd, list) else str(cmd or "")
+            command = _short_text(command)
+            call_id = str(msg.get("call_id", "")).strip() or command
+            if command:
+                return {"phase": "approval", "call_id": call_id, "command": command}
+
+    if method == "codex/event/exec_command_begin":
+        msg = params.get("msg")
+        if isinstance(msg, dict):
+            cmd = msg.get("command")
+            command = " ".join(str(x) for x in cmd) if isinstance(cmd, list) else str(cmd or "")
+            command = _short_text(command)
+            call_id = str(msg.get("call_id", "")).strip() or command
+            if command:
+                return {"phase": "begin", "call_id": call_id, "command": command}
+
+    if method == "codex/event/exec_command_end":
+        msg = params.get("msg")
+        if isinstance(msg, dict):
+            cmd = msg.get("command")
+            command = " ".join(str(x) for x in cmd) if isinstance(cmd, list) else str(cmd or "")
+            command = _short_text(command)
+            call_id = str(msg.get("call_id", "")).strip() or command
+            exit_code = str(msg.get("exit_code", "")).strip()
+            raw_out = str(msg.get("formatted_output") or msg.get("aggregated_output") or msg.get("stdout") or "")
+            out_lines = [line.strip() for line in raw_out.replace("\r\n", "\n").replace("\r", "\n").split("\n") if line.strip()]
+            out_preview = "\n".join(out_lines[:3]) if out_lines else ""
+            out_preview = _short_text(out_preview, 300)
+            return {
+                "phase": "end",
+                "call_id": call_id,
+                "command": command,
+                "exit_code": exit_code,
+                "output_preview": out_preview,
+            }
+
+    return None
+
+
 def _wait_human_approval(session_key: str, method: str, params: dict[str, Any]) -> dict[str, Any]:
     session = _resolve_session(session_key)
     if session is None or _platform is None:
@@ -357,16 +539,16 @@ def _wait_human_approval(session_key: str, method: str, params: dict[str, Any]) 
             _pending_approval_latest_by_chat.pop(chat_id, None)
 
     if not pending.event.is_set():
-        _platform.update_authorization_card_result(card_message_id, preview, "⛔ 授权超时，已自动拒绝")
-        _platform.send_message("⛔ 授权超时，已自动拒绝。", chat_id, chat_type, source_message_id)
+        _platform.update_authorization_card_result(card_message_id, preview, "授权超时，已自动拒绝")
+        _platform.send_message("授权超时，已自动拒绝。", chat_id, chat_type, source_message_id)
         return {"decision": "decline"}
 
     if pending.decision == "accept":
-        _platform.update_authorization_card_result(card_message_id, preview, "✅ 已授权执行")
+        _platform.update_authorization_card_result(card_message_id, preview, "已授权执行")
         return {"decision": "accept"}
 
     reason = pending.reject_reason or "用户拒绝"
-    _platform.update_authorization_card_result(card_message_id, preview, f"⛔ 已拒绝授权\n原因: {reason}")
+    _platform.update_authorization_card_result(card_message_id, preview, f"已拒绝授权\n原因: {reason}")
     return {"decision": "decline"}
 
 
@@ -669,6 +851,86 @@ def _execute_turn_async(task: str, chat_type: str, chat_id: str, message_id: str
     session = _get_or_create_session(chat_type, chat_id)
     collector = TurnCollector()
     handler_id = session.client.add_notification_handler(collector.on_notification)
+    progress_state: dict[str, Any] = {
+        "pushed_keys": set(),
+        "business_round": 1,
+        "round_reasoning_buffer": "",
+        "round_think_sent": set(),
+        "last_event_ts": time.time(),
+    }
+
+    def _progress_handler(method: str, params: dict[str, Any]) -> None:
+        progress_state["last_event_ts"] = time.time()
+        delta = _extract_reasoning_delta(method, params)
+        if delta:
+            buf = str(progress_state.get("round_reasoning_buffer", "")) + delta
+            if len(buf) > 3000:
+                buf = buf[-3000:]
+            progress_state["round_reasoning_buffer"] = buf
+
+        pushed_keys = progress_state.get("pushed_keys")
+        if not isinstance(pushed_keys, set):
+            pushed_keys = set()
+            progress_state["pushed_keys"] = pushed_keys
+
+        round_no = int(progress_state.get("business_round", 1) or 1)
+        think_sent_rounds = progress_state.get("round_think_sent")
+        if not isinstance(think_sent_rounds, set):
+            think_sent_rounds = set()
+            progress_state["round_think_sent"] = think_sent_rounds
+
+        def _push_round_think_summary() -> None:
+            if round_no in think_sent_rounds:
+                return
+            summary = _build_think_summary(str(progress_state.get("round_reasoning_buffer", "")))
+            if not summary:
+                return
+            think_sent_rounds.add(round_no)
+            platform.send_message(f"[轮次 {round_no}] 思考摘要（前3行）:\n{summary}", chat_id, chat_type, message_id)
+
+        def _advance_round() -> None:
+            progress_state["business_round"] = round_no + 1
+            progress_state["round_reasoning_buffer"] = ""
+
+        command_event = _extract_command_event(method, params)
+        if command_event is not None:
+            call_id = str(command_event.get("call_id", "")).strip() or "unknown"
+            phase = str(command_event.get("phase", "")).strip() or "event"
+            event_key = f"cmd:{phase}:{call_id}"
+            if event_key in pushed_keys:
+                return
+            pushed_keys.add(event_key)
+
+            if phase == "approval":
+                return
+            if phase == "begin":
+                return
+            if phase == "end":
+                _push_round_think_summary()
+                command = str(command_event.get("command", "")).strip()
+                exit_code = str(command_event.get("exit_code", "")).strip()
+                output_preview = str(command_event.get("output_preview", "")).strip()
+                head = f"[轮次 {round_no}] 命令执行完成（exit={exit_code or '-' }）：{command}"
+                if output_preview:
+                    platform.send_message(f"{head}\n输出摘要:\n{output_preview}", chat_id, chat_type, message_id)
+                else:
+                    platform.send_message(head, chat_id, chat_type, message_id)
+                _advance_round()
+                return
+
+        text, immediate, key = _extract_tool_preview_from_notification(method, params)
+        if text and immediate:
+            tool_key = key or f"tool:{method}"
+            event_key = f"tool:{tool_key}"
+            if event_key in pushed_keys:
+                return
+            _push_round_think_summary()
+            pushed_keys.add(event_key)
+            platform.send_message(f"[轮次 {round_no}] {text}", chat_id, chat_type, message_id)
+            if tool_key.startswith("mcp_end:"):
+                _advance_round()
+
+    progress_handler_id = session.client.add_notification_handler(_progress_handler)
 
     try:
         with session.lock:
@@ -697,9 +959,17 @@ def _execute_turn_async(task: str, chat_type: str, chat_id: str, message_id: str
             session.active_turn_id = turn_id
 
         timeout = int((_config.timeout if _config else 300) or 300)
-        finished = collector.done_event.wait(timeout=timeout)
-        if not finished:
-            raise TimeoutError(f"turn 执行超时（{timeout}s）")
+        while True:
+            if collector.done_event.wait(timeout=1):
+                break
+            last_event_ts_raw = progress_state.get("last_event_ts")
+            try:
+                last_event_ts = float(last_event_ts_raw)
+            except Exception:
+                last_event_ts = time.time()
+            idle_seconds = time.time() - last_event_ts
+            if idle_seconds >= timeout:
+                raise TimeoutError(f"turn 空闲超时（{timeout}s）")
 
         if collector.status == "interrupted":
             platform.send_message("已停止当前执行。", chat_id, chat_type, message_id)
@@ -708,6 +978,21 @@ def _execute_turn_async(task: str, chat_type: str, chat_id: str, message_id: str
             err = collector.error_message or "未知错误"
             platform.send_message(f"执行失败：{err}", chat_id, chat_type, message_id)
             return
+
+        final_round_no = int(progress_state.get("business_round", 1) or 1)
+        final_summary = _build_think_summary(str(progress_state.get("round_reasoning_buffer", "")))
+        think_sent_rounds = progress_state.get("round_think_sent")
+        if not isinstance(think_sent_rounds, set):
+            think_sent_rounds = set()
+            progress_state["round_think_sent"] = think_sent_rounds
+        if final_summary and final_round_no not in think_sent_rounds:
+            think_sent_rounds.add(final_round_no)
+            platform.send_message(
+                f"[轮次 {final_round_no}] 思考摘要（前3行）:\n{final_summary}",
+                chat_id,
+                chat_type,
+                message_id,
+            )
 
         content = collector.render_text()
         if not content:
@@ -718,6 +1003,7 @@ def _execute_turn_async(task: str, chat_type: str, chat_id: str, message_id: str
         platform.send_message(f"执行失败：{exc}", chat_id, chat_type, message_id)
     finally:
         session.client.remove_notification_handler(handler_id)
+        session.client.remove_notification_handler(progress_handler_id)
         with session.lock:
             session.active_turn_id = ""
 
@@ -739,26 +1025,26 @@ def _process_workspace_selection_async(card_message_id: str, selected_path: str)
 
     selected = (selected_path or "").strip()
     if not selected:
-        platform.update_workspace_selection_card_result(card_message_id, "❌ 切换失败：未选择目录。")
-        platform.send_message("❌ 未选择目录，请重新发送 /cw", chat_id, chat_type, source_message_id)
+        platform.update_workspace_selection_card_result(card_message_id, "切换失败：未选择目录。")
+        platform.send_message("未选择目录，请重新发送 /cw", chat_id, chat_type, source_message_id)
         return
     if allowed_paths and selected not in allowed_paths:
-        platform.update_workspace_selection_card_result(card_message_id, f"❌ 切换失败：目录不在候选列表。\n`{selected}`")
-        platform.send_message("❌ 目录不在候选列表，请重新发送 /cw", chat_id, chat_type, source_message_id)
+        platform.update_workspace_selection_card_result(card_message_id, f"切换失败：目录不在候选列表。\n`{selected}`")
+        platform.send_message("目录不在候选列表，请重新发送 /cw", chat_id, chat_type, source_message_id)
         return
     if not os.path.isdir(selected):
-        platform.update_workspace_selection_card_result(card_message_id, f"❌ 切换失败：目录不存在。\n`{selected}`")
-        platform.send_message("❌ 目录不存在，请重新发送 /cw", chat_id, chat_type, source_message_id)
+        platform.update_workspace_selection_card_result(card_message_id, f"切换失败：目录不存在。\n`{selected}`")
+        platform.send_message("目录不存在，请重新发送 /cw", chat_id, chat_type, source_message_id)
         return
 
     try:
         _switch_workspace(chat_type, chat_id, selected)
-        platform.update_workspace_selection_card_result(card_message_id, f"✅ 已切换工作目录\n`{selected}`")
-        platform.send_message(f"✅ 已切换工作目录：{selected}", chat_id, chat_type, source_message_id)
+        platform.update_workspace_selection_card_result(card_message_id, f"已切换工作目录\n`{selected}`")
+        platform.send_message(f"已切换工作目录：{selected}", chat_id, chat_type, source_message_id)
     except Exception as exc:
         logger.exception("[cw] 切换目录失败")
-        platform.update_workspace_selection_card_result(card_message_id, f"❌ 切换失败：{exc}")
-        platform.send_message(f"❌ 切换失败：{exc}", chat_id, chat_type, source_message_id)
+        platform.update_workspace_selection_card_result(card_message_id, f"切换失败：{exc}")
+        platform.send_message(f"切换失败：{exc}", chat_id, chat_type, source_message_id)
 
 
 def _process_approval_action_async(card_message_id: str, decision: str, reject_reason: str) -> None:
@@ -966,7 +1252,7 @@ def handle_message(data):
                     }
                     _pending_workspace_latest_by_chat[chat_id] = card_message_id
             else:
-                platform.send_message("❌ 目录选择卡片发送失败，请稍后重试。", chat_id, chat_type, message_id)
+                platform.send_message("目录选择卡片发送失败，请稍后重试。", chat_id, chat_type, message_id)
             return
 
         session_for_meta = _get_or_create_session(chat_type, chat_id)
@@ -977,23 +1263,24 @@ def handle_message(data):
         if _is_clear_command(text):
             try:
                 new_thread_id = _clear_session_thread(session)
-                platform.send_message(f"✅ 已清空上下文，进入新会话：{new_thread_id}", chat_id, chat_type, message_id)
+                platform.send_message(f"已清空上下文，进入新会话：{new_thread_id}", chat_id, chat_type, message_id)
             except Exception as exc:
-                platform.send_message(f"❌ 清空失败：{exc}", chat_id, chat_type, message_id)
+                platform.send_message(f"清空失败：{exc}", chat_id, chat_type, message_id)
             return
 
         if _is_stop_command(text):
             try:
                 interrupted = _interrupt_active_turn(session)
                 if interrupted:
-                    platform.send_message("✅ 已发送中断请求。", chat_id, chat_type, message_id)
+                    platform.send_message("已发送中断请求。", chat_id, chat_type, message_id)
                 else:
-                    platform.send_message("ℹ️ 当前没有正在执行的任务。", chat_id, chat_type, message_id)
+                    platform.send_message("当前没有正在执行的任务。", chat_id, chat_type, message_id)
             except Exception as exc:
-                platform.send_message(f"❌ 中断失败：{exc}", chat_id, chat_type, message_id)
+                platform.send_message(f"中断失败：{exc}", chat_id, chat_type, message_id)
             return
 
         logger.info("[turn] submit: message_id=%s session=%s", message_id, session_key)
+        platform.send_message("已收到，开始处理任务。可用 /stop 中断。", chat_id, chat_type, message_id)
         _executor.submit(_execute_turn_async, text, chat_type, chat_id, message_id)
     except Exception:
         logger.exception("处理飞书消息失败")
@@ -1040,3 +1327,4 @@ def main(config: Optional[Config] = None) -> None:
             _sessions = {}
         for session in sessions:
             _close_session(session)
+

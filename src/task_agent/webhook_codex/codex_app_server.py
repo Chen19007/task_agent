@@ -15,18 +15,66 @@ from typing import Any, Callable, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-_NOISY_NOTIFICATION_METHODS = {
-    "item/agentMessage/delta",
-    "codex/event/agent_message_content_delta",
-    "codex/event/agent_message_delta",
-    "codex/event/reasoning_content_delta",
-    "codex/event/agent_reasoning_delta",
-    "item/reasoning/summaryTextDelta",
-    "codex/event/token_count",
-    "thread/tokenUsage/updated",
-    "account/rateLimits/updated",
-    "codex/event/mcp_startup_update",
-}
+
+def _short_text(value: Any, limit: int = 300) -> str:
+    try:
+        text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+    except Exception:
+        text = str(value)
+    text = text.replace("\r", " ").replace("\n", " ").strip()
+    if len(text) > limit:
+        return text[: limit - 3] + "..."
+    return text
+
+
+def _extract_command_preview(method: str, params: dict[str, Any]) -> str:
+    command = ""
+    cwd = ""
+    if method == "item/commandExecution/requestApproval":
+        command = str(params.get("command", "")).strip()
+        cwd = str(params.get("cwd", "")).strip()
+        item = params.get("item")
+        if isinstance(item, dict):
+            if not command:
+                command = str(item.get("command", "")).strip()
+            if not cwd:
+                cwd = str(item.get("cwd", "")).strip()
+    if command:
+        return f"command={_short_text(command)} cwd={_short_text(cwd, 120) if cwd else '-'}"
+    return ""
+
+
+def _extract_mcp_tool_call_preview(params: dict[str, Any]) -> tuple[str, str]:
+    tool_name = ""
+    args_obj: Any = None
+    item = params.get("item")
+    if isinstance(item, dict):
+        for key in ("tool", "tool_name", "name", "server_tool_name"):
+            value = item.get(key)
+            if isinstance(value, str) and value.strip():
+                tool_name = value.strip()
+                break
+        for key in ("arguments", "args", "input"):
+            if key in item:
+                args_obj = item.get(key)
+                break
+    if not tool_name:
+        for key in ("tool", "tool_name", "name", "server_tool_name"):
+            value = params.get(key)
+            if isinstance(value, str) and value.strip():
+                tool_name = value.strip()
+                break
+    if args_obj is None:
+        for key in ("arguments", "args", "input"):
+            if key in params:
+                args_obj = params.get(key)
+                break
+
+    if isinstance(args_obj, dict) and "command" in args_obj:
+        return tool_name, f"command={_short_text(args_obj.get('command'))}"
+    if args_obj is not None:
+        return tool_name, _short_text(args_obj)
+    return tool_name, ""
 
 
 class JsonRpcError(RuntimeError):
@@ -57,6 +105,25 @@ class TurnCollector:
         turn_id = str(params.get("turnId", "")).strip()
         if self.turn_id and turn_id and turn_id != self.turn_id:
             return
+
+        if "mcp_tool_call" in method:
+            tool_name, preview = _extract_mcp_tool_call_preview(params)
+            phase = "begin" if method.endswith("_begin") else ("end" if method.endswith("_end") else "event")
+            if preview:
+                logger.info(
+                    "[codex] turn mcp tool: turn=%s phase=%s tool=%s args=%s",
+                    turn_id or "-",
+                    phase,
+                    tool_name or "unknown",
+                    preview,
+                )
+            else:
+                logger.info(
+                    "[codex] turn mcp tool: turn=%s phase=%s tool=%s",
+                    turn_id or "-",
+                    phase,
+                    tool_name or "unknown",
+                )
 
         if method == "item/agentMessage/delta":
             delta = str(params.get("delta", ""))
@@ -113,6 +180,13 @@ class CodexAppServerClient:
         self._notification_handlers: Dict[int, Callable[[str, dict[str, Any]], None]] = {}
         self._next_handler_id = 1
         self._running = False
+        self._trace_lock = threading.Lock()
+        self._trace_file = os.path.join(os.getcwd(), "codex_app_trace.jsonl")
+        try:
+            with open(self._trace_file, "w", encoding="utf-8") as f:
+                f.write("")
+        except Exception:
+            logger.exception("[codex] 初始化 trace 文件失败")
 
     def start(self) -> None:
         if self._running:
@@ -128,6 +202,7 @@ class CodexAppServerClient:
         # 新版 codex 已移除 --listen 参数，直接 app-server 即通过 stdio 通信。
         cmd = [codex_bin, "app-server"]
         logger.info("[codex] 启动 app-server: bin=%s cwd=%s", codex_bin, self.workspace_dir)
+        logger.info("[codex] trace file: %s", self._trace_file)
         try:
             self._proc = subprocess.Popen(
                 cmd,
@@ -263,10 +338,25 @@ class CodexAppServerClient:
         proc = self._proc
         if proc is None or proc.stdin is None:
             raise RuntimeError("Codex App Server 进程不可用")
+        self._trace_append("outgoing", payload)
         line = json.dumps(payload, ensure_ascii=False)
         with self._write_lock:
             proc.stdin.write(line + "\n")
             proc.stdin.flush()
+
+    def _trace_append(self, event_type: str, payload: Any) -> None:
+        record = {
+            "ts": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+            "event": event_type,
+            "payload": payload,
+        }
+        try:
+            line = json.dumps(record, ensure_ascii=False)
+            with self._trace_lock:
+                with open(self._trace_file, "a", encoding="utf-8") as f:
+                    f.write(line + "\n")
+        except Exception:
+            logger.exception("[codex] 写入 trace 失败")
 
     def _reader_loop(self) -> None:
         proc = self._proc
@@ -290,8 +380,10 @@ class CodexAppServerClient:
                 message = json.loads(raw)
             except json.JSONDecodeError:
                 logger.warning("[codex] 非法 JSON: %s", raw[:200])
+                self._trace_append("incoming_invalid_json", raw)
                 continue
 
+            self._trace_append("incoming", message)
             self._dispatch_message(message)
 
     def _stderr_loop(self) -> None:
@@ -308,6 +400,7 @@ class CodexAppServerClient:
             text = line.rstrip()
             if text:
                 logger.warning("[codex][stderr] %s", text)
+                self._trace_append("stderr", text)
 
     def _dispatch_message(self, message: dict[str, Any]) -> None:
         if "id" in message and ("result" in message or "error" in message):
@@ -343,25 +436,15 @@ class CodexAppServerClient:
                 logger.warning("[codex] ignore server request with unsupported id type: %s", type(request_id).__name__)
             return
 
-        if method in {"codex/event/mcp_tool_call_begin", "codex/event/mcp_tool_call_end"}:
-            tool_name = ""
-            item = params.get("item")
-            if isinstance(item, dict):
-                for key in ("tool", "tool_name", "name", "server_tool_name"):
-                    value = item.get(key)
-                    if isinstance(value, str) and value.strip():
-                        tool_name = value.strip()
-                        break
-            if not tool_name:
-                for key in ("tool", "tool_name", "name", "server_tool_name"):
-                    value = params.get(key)
-                    if isinstance(value, str) and value.strip():
-                        tool_name = value.strip()
-                        break
-            logger.info("[codex] mcp tool call: phase=%s tool=%s", "begin" if method.endswith("_begin") else "end", tool_name or "unknown")
+        if "mcp_tool_call" in method:
+            tool_name, preview = _extract_mcp_tool_call_preview(params)
+            phase = "begin" if method.endswith("_begin") else ("end" if method.endswith("_end") else "event")
+            if preview:
+                logger.info("[codex] mcp tool call: phase=%s tool=%s args=%s", phase, tool_name or "unknown", preview)
+            else:
+                logger.info("[codex] mcp tool call: phase=%s tool=%s", phase, tool_name or "unknown")
 
-        if method not in _NOISY_NOTIFICATION_METHODS:
-            logger.info("[codex] notification: method=%s", method)
+        logger.debug("[codex] notification: method=%s", method)
         handlers: list[Callable[[str, dict[str, Any]], None]] = []
         with self._state_lock:
             handlers = list(self._notification_handlers.values())
@@ -374,11 +457,21 @@ class CodexAppServerClient:
     def _handle_server_request(self, request_id: Any, method: str, params: dict[str, Any]) -> None:
         result: dict[str, Any] = {}
         error: Optional[dict[str, Any]] = None
+        preview = _extract_command_preview(method, params)
+        if preview:
+            logger.info("[codex] approval request: id=%s method=%s %s", request_id, method, preview)
         try:
             if self._request_handler is not None:
                 result = self._request_handler(method, params) or {}
             else:
                 result = {"decision": "accept"}
+            if method.endswith("/requestApproval"):
+                logger.info(
+                    "[codex] approval decision: id=%s method=%s decision=%s",
+                    request_id,
+                    method,
+                    _short_text(result.get("decision", ""), 32),
+                )
         except Exception as exc:
             error = {"code": -32000, "message": str(exc)}
 
