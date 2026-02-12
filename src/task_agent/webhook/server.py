@@ -7,6 +7,7 @@
 import logging
 import os
 import json
+import shlex
 import subprocess
 import threading
 import time
@@ -18,6 +19,7 @@ from ..agent import Action
 from ..command_approval_flow import CommandApprovalFlow
 from ..command_runtime import normalize_command_spec
 from ..config import Config
+from ..platform_utils import is_windows
 from .adapter import WebhookAdapter
 from .message_delivery_pipeline import MessageDeliveryPipeline
 from .platforms import FeishuPlatform
@@ -159,6 +161,60 @@ def _is_stop_command(text: str) -> bool:
         return False
     text_norm = text.strip().lower()
     return re.fullmatch(r"/stop", text_norm) is not None
+
+
+def _extract_direct_shell_call(text: str) -> Optional[str]:
+    stripped = text.lstrip()
+    if not stripped.startswith(":"):
+        return None
+    command = stripped[1:].strip()
+    return command or None
+
+
+def _build_scoped_direct_command(command: str, workspace_dir: str) -> str:
+    target_dir = (workspace_dir or "").strip()
+    if not target_dir:
+        return command
+    if is_windows():
+        escaped_dir = target_dir.replace("'", "''")
+        return f"Set-Location -LiteralPath '{escaped_dir}'; {command}"
+    return f"cd {shlex.quote(target_dir)} && {command}"
+
+
+def _execute_direct_shell_call_async(command: str, chat_type: str, chat_id: str, message_id: str) -> None:
+    if _platform is None:
+        return
+    platform = _platform
+    workspace_dir = _get_session_workspace(chat_type, chat_id)
+    timeout = int((_config.timeout if _config else 300) or 300)
+    final_command = _build_scoped_direct_command(command, workspace_dir)
+    try:
+        from ..cli import _execute_command
+
+        cmd_result = _execute_command(
+            final_command,
+            timeout,
+            config=_config,
+            workspace_dir=workspace_dir,
+        )
+    except Exception as exc:
+        _send_text(platform, f"本地命令执行失败：{exc}", chat_id, chat_type, message_id)
+        return
+
+    if cmd_result.returncode == 0:
+        stdout = (cmd_result.stdout or "").strip()
+        if stdout:
+            result_msg = f"命令执行成功，输出：\n{stdout}"
+        else:
+            result_msg = "命令执行成功（无输出）"
+    else:
+        err = (cmd_result.stderr or cmd_result.stdout or "").strip()
+        if err:
+            result_msg = f"命令执行失败（退出码: {cmd_result.returncode}）：\n{err}"
+        else:
+            result_msg = f"命令执行失败（退出码: {cmd_result.returncode}，无错误输出）"
+
+    _send_text(platform, result_msg, chat_id, chat_type, message_id)
 
 
 def _query_zlocation_options(limit: int = 10) -> list[dict]:
@@ -800,6 +856,24 @@ def handle_message(data):
                 text_raw = content.get("text", "") if isinstance(content, dict) else str(content)
                 text = _clean_incoming_text(text_raw)
                 logger.info(f"入站消息解析文本: raw={text_raw!r}, cleaned={text!r}")
+
+                direct_command = _extract_direct_shell_call(text) if chat_type == "p2p" else None
+                if direct_command:
+                    logger.info(
+                        "[local-cmd] run direct shell command: message_id=%s session=%s",
+                        message_id,
+                        _build_session_key(chat_type, chat_id),
+                    )
+                    if _platform is not None:
+                        _platform.send_message("已收到，执行本地命令中。", chat_id, chat_type, message_id)
+                    _executor.submit(
+                        _execute_direct_shell_call_async,
+                        direct_command,
+                        chat_type,
+                        chat_id,
+                        message_id,
+                    )
+                    return
 
                 # 内建命令：清理当前会话上下文
                 if _is_clear_command(text):
