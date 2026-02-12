@@ -182,13 +182,14 @@ class FeishuPlatform(Platform):
 
                 response = None
                 last_error = None
-                for attempt in range(2):
+                max_attempts = 1 if msg_type == MessageType.INTERACTIVE else 2
+                for attempt in range(max_attempts):
                     try:
                         response = self.client.im.v1.message.create(request)
                         break
                     except Exception as e:
                         last_error = e
-                        if attempt == 0:
+                        if attempt < max_attempts - 1:
                             logger.warning(f"[DEBUG] 飞书私聊发送失败，准备重试: {e}")
                             time.sleep(0.3)
                             continue
@@ -225,13 +226,14 @@ class FeishuPlatform(Platform):
 
                 response = None
                 last_error = None
-                for attempt in range(2):
+                max_attempts = 1 if msg_type == MessageType.INTERACTIVE else 2
+                for attempt in range(max_attempts):
                     try:
                         response = self.client.im.v1.message.reply(request)
                         break
                     except Exception as e:
                         last_error = e
-                        if attempt == 0:
+                        if attempt < max_attempts - 1:
                             logger.warning(f"[DEBUG] 飞书群聊回复失败，准备重试: {e}")
                             time.sleep(0.3)
                             continue
