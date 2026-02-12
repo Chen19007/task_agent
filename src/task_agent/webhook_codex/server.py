@@ -80,6 +80,11 @@ class PendingUserInput:
 _pending_user_inputs: Dict[str, PendingUserInput] = {}
 _pending_user_input_lock = threading.Lock()
 
+_file_change_preview_by_item_id: Dict[str, str] = {}
+_file_change_preview_order: list[str] = []
+_file_change_preview_lock = threading.Lock()
+_MAX_FILE_CHANGE_PREVIEW_CACHE = 200
+
 
 @dataclass
 class BridgeSession:
@@ -101,6 +106,124 @@ _sessions_lock = threading.Lock()
 
 def _build_session_key(chat_type: str, chat_id: str) -> str:
     return f"{chat_type}:{chat_id}"
+
+
+def _remember_file_change_preview(item_id: str, preview: str) -> None:
+    key = str(item_id or "").strip()
+    value = str(preview or "").strip()
+    if not key or not value:
+        return
+    with _file_change_preview_lock:
+        _file_change_preview_by_item_id[key] = value
+        _file_change_preview_order.append(key)
+        while len(_file_change_preview_order) > _MAX_FILE_CHANGE_PREVIEW_CACHE:
+            old = _file_change_preview_order.pop(0)
+            if old not in _file_change_preview_order:
+                _file_change_preview_by_item_id.pop(old, None)
+
+
+def _get_file_change_preview(item_id: str) -> str:
+    key = str(item_id or "").strip()
+    if not key:
+        return ""
+    with _file_change_preview_lock:
+        return str(_file_change_preview_by_item_id.get(key, "") or "")
+
+
+def _render_file_change_preview(changes: Any) -> str:
+    lines: list[str] = ["文件变更:"]
+    appended = False
+
+    if isinstance(changes, list):
+        for change in changes:
+            if not isinstance(change, dict):
+                lines.append(f"- {str(change)}")
+                appended = True
+                continue
+            path = str(change.get("path", "")).strip() or "(unknown path)"
+            kind = change.get("kind")
+            kind_text = ""
+            if isinstance(kind, dict):
+                kind_type = str(kind.get("type", "")).strip()
+                move_raw = kind.get("move_path")
+                move_path = str(move_raw).strip() if move_raw is not None else ""
+                if kind_type and move_path:
+                    kind_text = f"{kind_type} -> {move_path}"
+                elif kind_type:
+                    kind_text = kind_type
+            lines.append(f"路径: {path}")
+            if kind_text:
+                lines.append(f"类型: {kind_text}")
+            diff_text = change.get("diff")
+            if diff_text:
+                lines.append("diff:")
+                lines.append(str(diff_text))
+            else:
+                try:
+                    lines.append(json.dumps(change, ensure_ascii=False))
+                except Exception:
+                    lines.append(str(change))
+            lines.append("")
+            appended = True
+
+    elif isinstance(changes, dict):
+        for path, detail in changes.items():
+            lines.append(f"路径: {str(path)}")
+            if isinstance(detail, dict):
+                detail_type = str(detail.get("type", "")).strip()
+                move_raw = detail.get("move_path")
+                move_path = str(move_raw).strip() if move_raw is not None else ""
+                if detail_type and move_path:
+                    lines.append(f"类型: {detail_type} -> {move_path}")
+                elif detail_type:
+                    lines.append(f"类型: {detail_type}")
+                diff_text = detail.get("unified_diff")
+                if not diff_text:
+                    diff_text = detail.get("diff")
+                if diff_text:
+                    lines.append("diff:")
+                    lines.append(str(diff_text))
+                else:
+                    try:
+                        lines.append(json.dumps(detail, ensure_ascii=False))
+                    except Exception:
+                        lines.append(str(detail))
+            else:
+                lines.append(str(detail))
+            lines.append("")
+            appended = True
+
+    if not appended:
+        return ""
+    return "\n".join(lines).strip()
+
+
+def _cache_file_change_preview_from_notification(method: str, params: dict[str, Any]) -> None:
+    item_id = ""
+    changes: Any = None
+
+    if method in {"codex/event/patch_apply_begin", "codex/event/apply_patch_approval_request"}:
+        msg = params.get("msg")
+        if isinstance(msg, dict):
+            item_id = str(msg.get("call_id", "")).strip()
+            changes = msg.get("changes")
+    elif method in {"item/started", "item/completed"}:
+        item = params.get("item")
+        if isinstance(item, dict) and str(item.get("type", "")).strip().lower() == "filechange":
+            item_id = str(item.get("id", "")).strip()
+            changes = item.get("changes")
+    elif method in {"codex/event/item_started", "codex/event/item_completed"}:
+        msg = params.get("msg")
+        item = msg.get("item") if isinstance(msg, dict) else None
+        if isinstance(item, dict) and str(item.get("type", "")).strip().lower() == "filechange":
+            item_id = str(item.get("id", "")).strip()
+            changes = item.get("changes")
+
+    if not item_id:
+        return
+    preview = _render_file_change_preview(changes)
+    if preview:
+        _remember_file_change_preview(item_id, preview)
 
 
 def _resolve_codex_model() -> str:
@@ -320,19 +443,23 @@ def _build_approval_preview(method: str, params: dict[str, Any]) -> str:
         return command or "(empty command)"
 
     if method == "item/fileChange/requestApproval":
+        item_id = str(params.get("itemId", "")).strip()
+        if item_id:
+            cached_preview = _get_file_change_preview(item_id)
+            if cached_preview:
+                return cached_preview
+
         item = params.get("item")
         if isinstance(item, dict):
             changes = item.get("changes")
-            if isinstance(changes, list):
-                paths = []
-                for change in changes:
-                    if isinstance(change, dict):
-                        path = str(change.get("path", "")).strip()
-                        if path:
-                            paths.append(path)
-                if paths:
-                    return "文件变更:\n" + "\n".join(f"- {p}" for p in paths[:20])
-        return "文件变更（详情请在 Codex 输出中查看）"
+            preview = _render_file_change_preview(changes)
+            if preview:
+                if item_id:
+                    _remember_file_change_preview(item_id, preview)
+                return preview
+        if item_id:
+            return f"文件变更:\nitemId: {item_id}\n未命中变更明细缓存"
+        return "文件变更:\n未命中变更明细缓存"
 
     if method.endswith("/requestApproval") and ("tool" in method.lower() or "mcp" in method.lower()):
         tool_name = ""
@@ -923,6 +1050,7 @@ def _execute_turn_async(task: str, chat_type: str, chat_id: str, message_id: str
 
     def _progress_handler(method: str, params: dict[str, Any]) -> None:
         progress_state["last_event_ts"] = time.time()
+        _cache_file_change_preview_from_notification(method, params)
         delta = _extract_reasoning_delta(method, params)
         if delta:
             buf = str(progress_state.get("round_reasoning_buffer", "")) + delta
