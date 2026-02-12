@@ -14,7 +14,7 @@ from .codex_app_server import CodexAppServerClient, TurnCollector
 
 
 def _auto_accept_handler(method: str, params: dict[str, Any]) -> dict[str, Any]:
-    if method in {"item/commandExecution/requestApproval", "item/fileChange/requestApproval"}:
+    if method.endswith("/requestApproval"):
         return {"decision": "accept"}
     if method == "item/tool/requestUserInput":
         return {"answers": {}}
@@ -100,7 +100,7 @@ def main() -> None:
     if not prompt:
         raise SystemExit("消息不能为空。")
 
-    model = str(args.model or cfg.model).strip()
+    model = str(args.model or os.environ.get("CODEX_MODEL", "")).strip()
     timeout = int(args.timeout or cfg.timeout or 300)
     console = Console()
     client = CodexAppServerClient(

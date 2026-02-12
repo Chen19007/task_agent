@@ -25,6 +25,24 @@ def test_request_handler_file_change_decline(monkeypatch):
     assert resp == {"decision": "decline"}
 
 
+def test_request_handler_generic_tool_approval(monkeypatch):
+    called = {}
+
+    def fake_wait(session_key: str, method: str, params: dict):  # noqa: ARG001
+        called["method"] = method
+        called["params"] = params
+        return {"decision": "accept"}
+
+    monkeypatch.setattr(codex_server, "_wait_human_approval", fake_wait)
+    handler = codex_server._build_request_handler("p2p:chat_tool")
+
+    payload = {"tool": "filesystem/read", "arguments": {"path": "README.md"}}
+    resp = handler("item/tool/requestApproval", payload)
+    assert resp == {"decision": "accept"}
+    assert called["method"] == "item/tool/requestApproval"
+    assert called["params"] == payload
+
+
 def test_request_handler_request_user_input_routes_to_correct_method(monkeypatch):
     def fake_wait_input(session_key: str, params: dict):  # noqa: ARG001
         return {"answers": {"q1": {"answers": ["A"]}}}

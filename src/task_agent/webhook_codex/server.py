@@ -101,6 +101,10 @@ def _build_session_key(chat_type: str, chat_id: str) -> str:
     return f"{chat_type}:{chat_id}"
 
 
+def _resolve_codex_model() -> str:
+    return str(os.environ.get("CODEX_MODEL", "")).strip()
+
+
 def _send_text(platform: FeishuPlatform, content: str, chat_id: str, chat_type: str, message_id: str) -> None:
     _delivery_pipeline.send_text(
         lambda text: platform.send_message(text, chat_id, chat_type, message_id),
@@ -268,6 +272,45 @@ def _build_approval_preview(method: str, params: dict[str, Any]) -> str:
                     return "文件变更:\n" + "\n".join(f"- {p}" for p in paths[:20])
         return "文件变更（详情请在 Codex 输出中查看）"
 
+    if method.endswith("/requestApproval") and ("tool" in method.lower() or "mcp" in method.lower()):
+        tool_name = ""
+        args_obj: Any = None
+
+        for key in ("tool", "tool_name", "name", "server_tool_name"):
+            value = params.get(key)
+            if isinstance(value, str) and value.strip():
+                tool_name = value.strip()
+                break
+        for key in ("arguments", "args", "input"):
+            if key in params:
+                args_obj = params.get(key)
+                break
+
+        item = params.get("item")
+        if isinstance(item, dict):
+            if not tool_name:
+                for key in ("tool", "tool_name", "name", "server_tool_name"):
+                    value = item.get(key)
+                    if isinstance(value, str) and value.strip():
+                        tool_name = value.strip()
+                        break
+            if args_obj is None:
+                for key in ("arguments", "args", "input"):
+                    if key in item:
+                        args_obj = item.get(key)
+                        break
+
+        tool_title = tool_name or "unknown_tool"
+        if args_obj is None:
+            return f"工具调用授权: {tool_title}\n[method] {method}"
+        try:
+            args_text = json.dumps(args_obj, ensure_ascii=False)
+        except Exception:
+            args_text = str(args_obj)
+        if len(args_text) > 1000:
+            args_text = args_text[:1000] + "..."
+        return f"工具调用授权: {tool_title}\n[method] {method}\n[args] {args_text}"
+
     return method
 
 
@@ -354,6 +397,23 @@ def _format_request_user_input_prompt(questions: list[dict[str, Any]]) -> str:
     return "\n".join(lines).strip()
 
 
+def _is_approval_like_user_input(questions: list[dict[str, Any]]) -> bool:
+    labels: set[str] = set()
+    for q in questions:
+        options = q.get("options")
+        if not isinstance(options, list):
+            continue
+        for opt in options:
+            if not isinstance(opt, dict):
+                continue
+            label = str(opt.get("label", "")).strip().lower()
+            if label:
+                labels.add(label)
+    if not labels:
+        return False
+    return bool(labels & {"accept", "decline", "cancel"})
+
+
 def _parse_request_user_input_answers(raw_text: str, questions: list[dict[str, Any]]) -> dict[str, dict[str, list[str]]]:
     text = (raw_text or "").strip()
     by_id: dict[str, dict[str, Any]] = {}
@@ -431,6 +491,14 @@ def _wait_request_user_input(session_key: str, params: dict[str, Any]) -> dict[s
     if not questions:
         return {"answers": {}}
 
+    approval_like = _is_approval_like_user_input(questions)
+    if approval_like:
+        logger.info(
+            "[approval] MCP tool approval via requestUserInput: session=%s question_count=%s",
+            session_key,
+            len(questions),
+        )
+
     prompt = _format_request_user_input_prompt(questions)
     pending = PendingUserInput(
         session_key=session_key,
@@ -461,14 +529,15 @@ def _wait_request_user_input(session_key: str, params: dict[str, Any]) -> dict[s
 def _build_request_handler(session_key: str) -> Any:
     def _handler(method: str, params: dict[str, Any]) -> dict[str, Any]:
         logger.info("[codex] 收到 server request: method=%s session=%s", method, session_key)
-        if method == "item/commandExecution/requestApproval":
+        if method.endswith("/requestApproval"):
             decision = _wait_human_approval(session_key, method, params)
             if decision.get("decision") == "accept":
                 return {"decision": "accept"}
             return {"decision": "decline"}
-        if method == "item/fileChange/requestApproval":
-            return _wait_human_approval(session_key, method, params)
         if method == "item/tool/requestUserInput":
+            q = params.get("questions")
+            q_count = len(q) if isinstance(q, list) else 0
+            logger.info("[codex] route requestUserInput: session=%s question_count=%s", session_key, q_count)
             return _wait_request_user_input(session_key, params)
         return {"decision": "accept"}
 
@@ -476,7 +545,7 @@ def _build_request_handler(session_key: str) -> Any:
 
 
 def _create_client_for_session(session_key: str, workspace_dir: str) -> CodexAppServerClient:
-    model = ((_config.model if _config else "") or "").strip()
+    model = _resolve_codex_model()
     timeout = int((_config.timeout if _config else 300) or 300)
     client = CodexAppServerClient(
         workspace_dir=workspace_dir,
@@ -490,7 +559,7 @@ def _create_client_for_session(session_key: str, workspace_dir: str) -> CodexApp
 
 def _start_new_thread(session: BridgeSession) -> str:
     params: dict[str, Any] = {"cwd": session.workspace_dir}
-    model = ((_config.model if _config else "") or "").strip()
+    model = _resolve_codex_model()
     if model:
         params["model"] = model
     result = session.client.request("thread/start", params=params, timeout=30)
@@ -614,7 +683,7 @@ def _execute_turn_async(task: str, chat_type: str, chat_id: str, message_id: str
                 "input": [{"type": "text", "text": task}],
                 "cwd": session.workspace_dir,
             }
-            model = ((_config.model if _config else "") or "").strip()
+            model = _resolve_codex_model()
             if model:
                 params["model"] = model
             result = session.client.request("turn/start", params=params)

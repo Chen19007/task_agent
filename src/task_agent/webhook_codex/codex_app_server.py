@@ -15,6 +15,19 @@ from typing import Any, Callable, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
+_NOISY_NOTIFICATION_METHODS = {
+    "item/agentMessage/delta",
+    "codex/event/agent_message_content_delta",
+    "codex/event/agent_message_delta",
+    "codex/event/reasoning_content_delta",
+    "codex/event/agent_reasoning_delta",
+    "item/reasoning/summaryTextDelta",
+    "codex/event/token_count",
+    "thread/tokenUsage/updated",
+    "account/rateLimits/updated",
+    "codex/event/mcp_startup_update",
+}
+
 
 class JsonRpcError(RuntimeError):
     """JSON-RPC 调用错误。"""
@@ -298,9 +311,15 @@ class CodexAppServerClient:
 
     def _dispatch_message(self, message: dict[str, Any]) -> None:
         if "id" in message and ("result" in message or "error" in message):
-            response_id = message.get("id")
-            if isinstance(response_id, int):
-                logger.info("[codex] response: id=%s has_error=%s", response_id, "error" in message)
+            raw_response_id = message.get("id")
+            response_id: Optional[int] = None
+            if isinstance(raw_response_id, int):
+                response_id = raw_response_id
+            elif isinstance(raw_response_id, str) and raw_response_id.isdigit():
+                response_id = int(raw_response_id)
+
+            if response_id is not None:
+                logger.info("[codex] response: id=%s has_error=%s", raw_response_id, "error" in message)
                 wait_q: Optional["queue.Queue[dict[str, Any]]"] = None
                 with self._state_lock:
                     wait_q = self._pending_responses.pop(response_id, None)
@@ -317,12 +336,31 @@ class CodexAppServerClient:
 
         if "id" in message:
             request_id = message.get("id")
-            if isinstance(request_id, int):
+            if isinstance(request_id, (int, str)):
                 logger.info("[codex] server request: id=%s method=%s", request_id, method)
                 self._handle_server_request(request_id, method, params)
+            else:
+                logger.warning("[codex] ignore server request with unsupported id type: %s", type(request_id).__name__)
             return
 
-        if method != "item/agentMessage/delta":
+        if method in {"codex/event/mcp_tool_call_begin", "codex/event/mcp_tool_call_end"}:
+            tool_name = ""
+            item = params.get("item")
+            if isinstance(item, dict):
+                for key in ("tool", "tool_name", "name", "server_tool_name"):
+                    value = item.get(key)
+                    if isinstance(value, str) and value.strip():
+                        tool_name = value.strip()
+                        break
+            if not tool_name:
+                for key in ("tool", "tool_name", "name", "server_tool_name"):
+                    value = params.get(key)
+                    if isinstance(value, str) and value.strip():
+                        tool_name = value.strip()
+                        break
+            logger.info("[codex] mcp tool call: phase=%s tool=%s", "begin" if method.endswith("_begin") else "end", tool_name or "unknown")
+
+        if method not in _NOISY_NOTIFICATION_METHODS:
             logger.info("[codex] notification: method=%s", method)
         handlers: list[Callable[[str, dict[str, Any]], None]] = []
         with self._state_lock:
@@ -333,7 +371,7 @@ class CodexAppServerClient:
             except Exception:
                 logger.exception("[codex] 通知处理异常: method=%s", method)
 
-    def _handle_server_request(self, request_id: int, method: str, params: dict[str, Any]) -> None:
+    def _handle_server_request(self, request_id: Any, method: str, params: dict[str, Any]) -> None:
         result: dict[str, Any] = {}
         error: Optional[dict[str, Any]] = None
         try:
