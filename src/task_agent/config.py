@@ -10,7 +10,8 @@ def load_local_env(env_file: str = ".env", overwrite: bool = False) -> None:
 
     env_path = Path(env_file)
     if not env_path.is_absolute():
-        env_path = Path.cwd() / env_path
+        project_root = Path(__file__).resolve().parents[2]
+        env_path = project_root / env_path
     if not env_path.exists() or not env_path.is_file():
         return
 
@@ -47,7 +48,7 @@ class Config:
     ollama_host: str = "http://localhost:11434"
 
     # OpenAI 配置
-    openai_api_key: str = "sk-1qTPR2NfODm9Y8YwQTXtGVONXF0g2bxWWreaZaMvPK4ErKOV"
+    openai_api_key: str = ""
     openai_base_url: str = "http://localhost:3000/v1"
 
     # 通用配置
@@ -64,6 +65,8 @@ class Config:
     webhook_platform: str = "feishu"
     webhook_app_id: str = ""
     webhook_app_secret: str = ""
+    webhook_codex_app_id: str = ""
+    webhook_codex_app_secret: str = ""
     webhook_host: str = "0.0.0.0"
     webhook_port: int = 8080
     webhook_calendar_id: str = ""
@@ -99,7 +102,7 @@ class Config:
         return cls(
             api_type=os.environ.get("LLM_API_TYPE", "openai"),
             ollama_host=os.environ.get("OLLAMA_HOST", "http://localhost:11434"),
-            openai_api_key=os.environ.get("OPENAI_API_KEY", "sk-1qTPR2NfODm9Y8YwQTXtGVONXF0g2bxWWreaZaMvPK4ErKOV"),
+            openai_api_key=os.environ.get("OPENAI_API_KEY", ""),
             openai_base_url=os.environ.get("OPENAI_BASE_URL", "http://localhost:3000/v1"),
             model=os.environ.get("OLLAMA_MODEL", "minimax-m2"),
             timeout=int(os.environ.get("OLLAMA_TIMEOUT", "300")),
@@ -112,11 +115,25 @@ class Config:
             webhook_platform=os.environ.get("WEBHOOK_PLATFORM", "feishu"),
             webhook_app_id=os.environ.get("WEBHOOK_APP_ID", ""),
             webhook_app_secret=os.environ.get("WEBHOOK_APP_SECRET", ""),
+            webhook_codex_app_id=os.environ.get("WEBHOOK_CODEX_APP_ID", ""),
+            webhook_codex_app_secret=os.environ.get("WEBHOOK_CODEX_APP_SECRET", ""),
             webhook_host=os.environ.get("WEBHOOK_HOST", "0.0.0.0"),
             webhook_port=int(os.environ.get("WEBHOOK_PORT", "8080")),
             webhook_calendar_id=os.environ.get("WEBHOOK_CALENDAR_ID", ""),
             webhook_default_attendee_open_id=os.environ.get("WEBHOOK_DEFAULT_ATTENDEE_OPEN_ID", ""),
         )
+
+    def resolve_webhook_credentials(self, runtime_scene: str = "webhook"):
+        """解析 webhook 凭据。codex 场景仅使用 WEBHOOK_CODEX_*。"""
+        scene = (runtime_scene or "").strip().lower()
+        if scene in {"webhook_codex", "codex"}:
+            app_id = (self.webhook_codex_app_id or "").strip()
+            app_secret = (self.webhook_codex_app_secret or "").strip()
+            return app_id, app_secret
+
+        app_id = (self.webhook_app_id or "").strip()
+        app_secret = (self.webhook_app_secret or "").strip()
+        return app_id, app_secret
 
     def to_dict(self) -> dict:
         """转换为字典"""

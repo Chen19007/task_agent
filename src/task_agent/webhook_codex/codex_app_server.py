@@ -181,7 +181,8 @@ class CodexAppServerClient:
         self._next_handler_id = 1
         self._running = False
         self._trace_lock = threading.Lock()
-        self._trace_file = os.path.join(os.getcwd(), "codex_app_trace.jsonl")
+        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+        self._trace_file = os.path.join(project_root, "codex_app_trace.jsonl")
         try:
             with open(self._trace_file, "w", encoding="utf-8") as f:
                 f.write("")

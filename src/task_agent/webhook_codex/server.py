@@ -1360,10 +1360,9 @@ def main(config: Optional[Config] = None) -> None:
         config = Config.from_env()
     _config = config
 
-    app_id = getattr(config, "webhook_app_id", None) or os.environ.get("WEBHOOK_APP_ID", "")
-    app_secret = getattr(config, "webhook_app_secret", None) or os.environ.get("WEBHOOK_APP_SECRET", "")
+    app_id, app_secret = config.resolve_webhook_credentials("webhook_codex")
     if not app_id or not app_secret:
-        logger.error("WEBHOOK_APP_ID 或 WEBHOOK_APP_SECRET 未设置")
+        logger.error("WEBHOOK_CODEX_APP_ID 或 WEBHOOK_CODEX_APP_SECRET 未设置")
         return
 
     _platform = FeishuPlatform(app_id=app_id, app_secret=app_secret)

@@ -18,16 +18,15 @@ def main() -> None:
     load_local_env(".env", overwrite=False)
 
     c = console.Console()
-    app_id = os.environ.get("WEBHOOK_APP_ID", "")
-    app_secret = os.environ.get("WEBHOOK_APP_SECRET", "")
+    config = Config.from_env()
+    app_id, app_secret = config.resolve_webhook_credentials("webhook_codex")
     if not app_id or not app_secret:
-        c.print("[error]错误: WEBHOOK_APP_ID 或 WEBHOOK_APP_SECRET 未设置[/error]")
-        c.print("请先设置飞书应用凭据后再启动。")
+        c.print("[error]错误: 未设置 webhook codex 的飞书凭据[/error]")
+        c.print("请设置 WEBHOOK_CODEX_APP_ID / WEBHOOK_CODEX_APP_SECRET。")
         sys.exit(1)
 
-    config = Config.from_env()
-    config.webhook_app_id = app_id
-    config.webhook_app_secret = app_secret
+    config.webhook_codex_app_id = app_id
+    config.webhook_codex_app_secret = app_secret
 
     c.print("[bold green]启动 Codex 飞书桥接服务...[/bold green]")
     c.print("[dim]本服务仅保留 /cw 本地处理，/clear 与 /stop 映射 Codex 语义。[/dim]")
