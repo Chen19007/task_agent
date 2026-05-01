@@ -1,6 +1,7 @@
 ﻿"""OpenAI API 客户端"""
 
 import json
+import time
 
 import requests
 
@@ -44,28 +45,45 @@ class OpenAIClient(LLMClient):
             "max_tokens": max_tokens,  # 使用 max_tokens 兼容更多 API
         }
 
-        try:
-            response = requests.post(url, json=payload, headers=headers, timeout=self.config.timeout)
-            if response.status_code != 200:
-                # 打印详细错误信息
-                error_detail = response.text if response.text else str(response.status_code)
-                raise RuntimeError(f"OpenAI API 请求失败: {response.status_code} {response.reason}\n响应内容: {error_detail}")
-            data = response.json()
+        retryable_codes = {429, 502, 503}
+        for attempt in range(3):
+            try:
+                response = requests.post(url, json=payload, headers=headers, timeout=self.config.timeout)
+                if response.status_code == 200:
+                    data = response.json()
+                    choices = data.get("choices", [])
+                    if not choices:
+                        return ChatResponse(content="")
+                    message = choices[0].get("message", {})
+                    content = message.get("content", "")
+                    reasoning = message.get("reasoning_content", "")
+                    return ChatResponse(content=content, reasoning=reasoning)
 
-            choices = data.get("choices", [])
-            if not choices:
-                return ChatResponse(content="")
+                # 可重试的状态码：429/502/503/5xx
+                if response.status_code in retryable_codes or (500 <= response.status_code < 600):
+                    if attempt < 2:
+                        delay = 2 ** attempt
+                        time.sleep(delay)
+                        continue
+                    error_detail = response.text[:500] if response.text else str(response.status_code)
+                    raise RuntimeError(
+                        f"OpenAI API 请求失败 (已重试3次): {response.status_code}\n响应内容: {error_detail}"
+                    )
 
-            message = choices[0].get("message", {})
-            content = message.get("content", "")
-            reasoning = message.get("reasoning_content", "")
+                # 不可重试的错误：400/401/404 等
+                error_detail = response.text[:500] if response.text else str(response.status_code)
+                raise RuntimeError(f"OpenAI API 请求失败: {response.status_code}\n响应内容: {error_detail}")
 
-            return ChatResponse(content=content, reasoning=reasoning)
-
-        except requests.HTTPError as e:
-            raise RuntimeError(f"OpenAI API 请求失败: {e}")
-        except Exception as e:
-            raise RuntimeError(f"OpenAI API 调用失败: {e}")
+            except (requests.ConnectionError, requests.Timeout) as e:
+                if attempt < 2:
+                    delay = 2 ** attempt
+                    time.sleep(delay)
+                    continue
+                raise RuntimeError(f"OpenAI API 连接失败 (已重试3次): {e}")
+            except requests.HTTPError as e:
+                raise RuntimeError(f"OpenAI API 请求失败: {e}")
+            except Exception as e:
+                raise RuntimeError(f"OpenAI API 调用失败: {e}")
 
     def check_connection(self) -> bool:
         """检查 OpenAI 服务是否可用

@@ -1,6 +1,7 @@
 """Ollama API 客户端"""
 
 import json
+import time
 
 import requests
 
@@ -42,19 +43,40 @@ class OllamaClient(LLMClient):
             },
         }
 
-        try:
-            response = requests.post(url, json=payload, timeout=self.config.timeout)
-            response.raise_for_status()
-            data = response.json()
+        retryable_codes = {429, 502, 503}
+        for attempt in range(3):
+            try:
+                response = requests.post(url, json=payload, timeout=self.config.timeout)
+                if response.status_code == 200:
+                    data = response.json()
+                    message = data.get("message", {})
+                    content = message.get("content", "")
+                    reasoning = message.get("thinking", "")
+                    return ChatResponse(content=content, reasoning=reasoning)
 
-            message = data.get("message", {})
-            content = message.get("content", "")
-            reasoning = message.get("thinking", "")
+                # 可重试的状态码：429/502/503/5xx
+                if response.status_code in retryable_codes or (500 <= response.status_code < 600):
+                    if attempt < 2:
+                        delay = 2 ** attempt
+                        time.sleep(delay)
+                        continue
+                    error_detail = response.text[:500] if response.text else str(response.status_code)
+                    raise RuntimeError(
+                        f"Ollama API 请求失败 (已重试3次): {response.status_code}\n响应内容: {error_detail}"
+                    )
 
-            return ChatResponse(content=content, reasoning=reasoning)
+                # 不可重试的错误
+                error_detail = response.text[:500] if response.text else str(response.status_code)
+                raise RuntimeError(f"Ollama API 请求失败: {response.status_code}\n响应内容: {error_detail}")
 
-        except Exception as e:
-            raise RuntimeError(f"Ollama API 调用失败: {e}")
+            except (requests.ConnectionError, requests.Timeout) as e:
+                if attempt < 2:
+                    delay = 2 ** attempt
+                    time.sleep(delay)
+                    continue
+                raise RuntimeError(f"Ollama API 连接失败 (已重试3次): {e}")
+            except Exception as e:
+                raise RuntimeError(f"Ollama API 调用失败: {e}")
 
     def check_connection(self) -> bool:
         """检查 Ollama 服务是否可用
