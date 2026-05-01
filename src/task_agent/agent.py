@@ -1478,6 +1478,10 @@ class Executor:
         self._auto_approve_lock = threading.Lock()
         self._auto_approve: bool = False
 
+        # 对话模式：跳过文件快照，所有命令强制手动授权
+        self._chat_mode: bool = False
+        self._saved_auto_approve: bool = False
+
         # 会话管理（用于快照保存）
         self.session_manager = session_manager
         self._snapshot_index = 0  # 当前快照索引
@@ -1512,6 +1516,31 @@ class Executor:
         """设置 auto_approve 状态（线程安全）"""
         with self._auto_approve_lock:
             self._auto_approve = value
+
+    @property
+    def chat_mode(self) -> bool:
+        """获取 chat_mode 状态（线程安全）"""
+        with self._auto_approve_lock:
+            return self._chat_mode
+
+    @chat_mode.setter
+    def chat_mode(self, value: bool):
+        """设置 chat_mode 状态（线程安全）"""
+        with self._auto_approve_lock:
+            self._chat_mode = value
+
+    def enter_chat_mode(self):
+        """进入对话模式：保存当前 auto_approve 状态并强制禁用"""
+        with self._auto_approve_lock:
+            self._saved_auto_approve = self._auto_approve
+            self._auto_approve = False
+            self._chat_mode = True
+
+    def leave_chat_mode(self):
+        """退出对话模式：恢复之前的 auto_approve 状态"""
+        with self._auto_approve_lock:
+            self._auto_approve = self._saved_auto_approve
+            self._chat_mode = False
 
     def set_command_confirm_callback(self, callback: Callable[[str], str]):
         """设置命令确认回调
@@ -1608,6 +1637,8 @@ class Executor:
         Args:
             agent: 即将调用 LLM 的 Agent
         """
+        if self.chat_mode:
+            return
         if self.session_manager and self.session_manager.current_session_id is not None:
             session_id = self.session_manager.current_session_id
             self.session_manager.save_snapshot(
@@ -1627,6 +1658,8 @@ class Executor:
         Args:
             agent: 已获取 LLM 响应的 Agent
         """
+        if self.chat_mode:
+            return
         if self.session_manager and self.session_manager.current_session_id is not None:
             session_id = self.session_manager.current_session_id
             self.session_manager.save_after_snapshot(

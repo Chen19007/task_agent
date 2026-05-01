@@ -456,7 +456,7 @@ def print_welcome():
     console.print(
         Panel(
             Text(
-                "极简任务执行 Agent\n\n统一逻辑：创建子Agent → 聚合结果 → 继续/结束\n深度优先执行，自动聚合结果\n最大4层深度（最多16个子Agent）\n输入 /exit 退出",
+                "极简任务执行 Agent\n\n统一逻辑：创建子Agent → 聚合结果 → 继续/结束\n深度优先执行，自动聚合结果\n最大4层深度（最多16个子Agent）\n输入 /chat 进入对话模式，/exit 退出",
                 justify="center",
                 style="bold cyan",
             ),
@@ -479,6 +479,7 @@ def print_help():
     - <任务描述>   - 执行任务（使用当前会话上下文）
     - : <命令>     - 直接执行命令（不发给模型，不写入历史）
     - /new        - 创建新会话（自动保存当前会话）
+    - /chat       - 切换对话模式（跳过文件快照，命令强制手动授权）
     - /list       - 列出所有保存的会话
     - /list-snapshot <id> - 列出指定会话的快照点
     - /resume <id>- 恢复指定ID的会话
@@ -612,12 +613,13 @@ def main():
 
             # 显示当前会话状态
             auto_status = " | [success]自动同意: 启[/success]" if executor.auto_approve else ""
+            chat_status = " | [bold magenta]Chat[/bold magenta]" if executor.chat_mode else ""
             hint_status = f" | 当前 hint: {_ACTIVE_HINT}" if _ACTIVE_HINT else ""
             if not paste_mode:
                 if session_manager.current_session_id:
-                    console.print(f"[dim]当前会话 #{session_manager.current_session_id} | 输入任务继续，/edit 外部编辑器，/new 新建，/list 列表，/auto 切换自动同意，/exit 退出{auto_status}{hint_status}[/dim]")
+                    console.print(f"[dim]当前会话 #{session_manager.current_session_id} | 输入任务继续，/edit 外部编辑器，/new 新建，/chat 对话模式，/list 列表，/auto 切换自动同意，/exit 退出{auto_status}{chat_status}{hint_status}[/dim]")
                 else:
-                    console.print(f"[dim]临时会话 | 输入任务创建会话，/edit 外部编辑器，/list 列表，/auto 切换自动同意，/exit 退出{auto_status}{hint_status}[/dim]")
+                    console.print(f"[dim]临时会话 | 输入任务创建会话，/edit 外部编辑器，/chat 对话模式，/list 列表，/auto 切换自动同意，/exit 退出{auto_status}{chat_status}{hint_status}[/dim]")
             elif not paste_prompt_shown:
                 paste_prompt_shown = True
 
@@ -776,7 +778,18 @@ def main():
                         console.print(f"\n[error]无效的会话ID: {parts[1]}[/error]\n")
                     continue
 
+                if task.lower() == "/chat":
+                    if executor.chat_mode:
+                        executor.leave_chat_mode()
+                        console.print("\n[success]已退出对话模式，恢复文件快照[/success]\n")
+                    else:
+                        executor.enter_chat_mode()
+                        console.print("\n[success]已进入对话模式：跳过文件快照，命令强制手动授权[/success]\n")
+                    continue
                 if task.lower() == "/auto":
+                    if executor.chat_mode:
+                        console.print("\n[warning]对话模式下不支持自动同意，请先 /chat 退出对话模式[/warning]\n")
+                        continue
                     executor.auto_approve = not executor.auto_approve
                     status = "启用" if executor.auto_approve else "禁用"
                     console.print(f"\n[success]自动同意已{status}[/success]\n")
@@ -818,7 +831,7 @@ def main():
                         console.print("\n[warning]回滚已取消或失败[/warning]\n")
                     continue
 
-                console.print("[error]未知命令。可用命令: /list, /list-snapshot <id>, /new, /resume <id>, /rollback <id> <snapshot>, /compact, /auto, /exit[/error]\n")
+                console.print("[error]未知命令。可用命令: /list, /list-snapshot <id>, /new, /chat, /resume <id>, /rollback <id> <snapshot>, /compact, /auto, /exit[/error]\n")
                 continue
 
             direct_command = _extract_direct_shell_call(task)
