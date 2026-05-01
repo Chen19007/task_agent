@@ -48,13 +48,15 @@ class EventBusOutputHandler(OutputHandler):
         self._publish("ps_call_result", {"result": result, "status": status})
         self._delegate.on_ps_call_result(result, status)
 
-    def on_create_agent(self, task: str, depth: int, agent_name: str, context_info: dict) -> None:
+    def on_create_agent(self, task: str, depth: int, agent_name: str,
+                       context_info: dict, fork: bool = False) -> None:
         self._publish(
             "create_agent",
-            {"task": task, "depth": depth, "agent_name": agent_name, "context_info": context_info},
+            {"task": task, "depth": depth, "agent_name": agent_name,
+             "fork": fork, "context_info": context_info},
             agent_depth=depth,
         )
-        self._delegate.on_create_agent(task, depth, agent_name, context_info)
+        self._delegate.on_create_agent(task, depth, agent_name, context_info, fork)
 
     def on_agent_complete(self, summary: str, stats: dict) -> None:
         self._publish("agent_complete", {"summary": summary, "stats": stats})

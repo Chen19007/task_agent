@@ -46,7 +46,7 @@ class CLIOutput(OutputHandler):
             self.console.print(f"[info]{result}[/info]\n")
 
     def on_create_agent(self, task: str, depth: int, agent_name: str,
-                       context_info: dict) -> None:
+                       context_info: dict, fork: bool = False) -> None:
         """显示子 Agent 创建"""
         agent_info = f" [{agent_name}]" if agent_name else ""
         self.console.print(f"\n{'+'*60}")

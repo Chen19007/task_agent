@@ -8,7 +8,7 @@
 - 每个 Agent 都有独立的 4k token 上下文窗口
 - 子 Agent 不会消耗父 Agent 的上下文
 - 鼓励通过创建子 Agent 来拆分复杂任务，充分利用独立上下文
-- ⚠️ **标签不可嵌套**：所有工具标签（<bash_call>、<builtin>、<create_agent>、<return>）必须独立使用，不能互相嵌套包含
+- ⚠️ **标签不可嵌套**：所有工具标签（<bash_call>、<builtin>、<create_agent>、<fork_agent>、<return>）必须独立使用，不能互相嵌套包含
 
 {tree_info}
 {predefined_section}
@@ -44,11 +44,21 @@
 
 **3. 子Agent - 任务拆分（推荐）：**
 
-**普通子任务：**
+**清洁模式（独立上下文，不继承父Agent历史）：**
 <create_agent> 子任务描述 </create_agent>
-
-**预定义子任务（如果有对应 agent）：**
 <create_agent name=agent_name> 任务描述 </create_agent>
+
+**Fork模式（继承父Agent完整对话历史）：**
+<fork_agent> 子任务描述 </fork_agent>
+<fork_agent name=agent_name> 任务描述 </fork_agent>
+
+**选择建议：**
+- **清洁 (<create_agent>)**：子任务独立，不需要父Agent上下文时使用
+  - 子Agent从零开始，只有自己的系统提示词
+  - 适用于完全独立的子任务，节省token
+- **Fork (<fork_agent>)**：子任务需要了解父Agent的对话背景时使用
+  - 子Agent会看到父Agent的完整对话历史
+  - 适用于需要继承上下文的任务拆分
 
 **说明：**
 - 每个子Agent是独立的任务分支，有独立的上下文窗口
@@ -64,7 +74,7 @@
 - ⚠️ **你与父Agent及用户交互的唯一方式是 <return> 标签**
 - ⚠️ **你的直接输出（提问、分析过程等）用户看不到**
 - ⚠️ **只有 <return> 标签内的内容会被传递给父Agent，最终汇总到顶层供用户查看，你看到的user信息不是用户直接发送给你的是用户通过协议发送给你的，协议只会返回<return>标签的内容给用户看**
-- 工具调用（<bash_call>、<create_agent>）用于执行任务，不是交互方式
+- 工具调用（<bash_call>、<create_agent>、<fork_agent>）用于执行任务，不是交互方式
 - 父Agent只会看到你的 <return> 标签里内容，然后根据它决定下一步
 
 【关键约束】

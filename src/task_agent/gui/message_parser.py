@@ -13,7 +13,7 @@ class MessageBlock:
     """消息块
 
     Attributes:
-        block_type: 块类型 ('text', 'ps_call', 'bash_call', 'create_agent', 'think', 'ps_call_result', 'bash_call_result', 'return')
+        block_type: 块类型 ('text', 'ps_call', 'bash_call', 'create_agent', 'fork_agent', 'think', 'ps_call_result', 'bash_call_result', 'return')
         content: 块内容
         collapsible: 是否可折叠（tool tags=True, text=False）
     """
@@ -38,6 +38,7 @@ class MessageParser:
         "bash_call": (r"<bash_call\b[^>]*>\s*([\s\S]*?)\s*</bash_call>", True),
         "builtin": (r"<builtin\b[^>]*>\s*([\s\S]*?)\s*</builtin>", True),
         "create_agent": (r"<create_agent(?:\s+name=(\S+?))?\s*([\s\S]*?)</create_agent>", True),
+        "fork_agent": (r"<fork_agent(?:\s+name=(\S+?))?\s*([\s\S]*?)</fork_agent>", True),
         "ps_call_result": (r"<ps_call_result[^>]*>\s*([\s\S]*?)\s*</ps_call_result>", True),
         "bash_call_result": (r"<bash_call_result[^>]*>\s*([\s\S]*?)\s*</bash_call_result>", True),
     }
@@ -87,9 +88,9 @@ class MessageParser:
                     ))
 
             # 添加标签内容
-            # 对于有 name 属性的标签（如 create_agent），需要特殊处理
+            # 对于有 name 属性的标签（如 create_agent, fork_agent），需要特殊处理
             groups = match.groups()
-            if tag_name == "create_agent" and len(groups) >= 2:
+            if tag_name in ("create_agent", "fork_agent") and len(groups) >= 2:
                 # groups[0] 是 name，groups[1] 是任务内容
                 agent_name = groups[0] or "unnamed"
                 task_content = groups[1]

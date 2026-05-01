@@ -519,7 +519,8 @@ def print_help():
   - 最大支持4层深度（最多16个子Agent）
   - Windows 使用 <ps_call> 执行命令，Linux 使用 <bash_call>
   - 使用 <builtin> 调用内置工具（read_file/smart_edit/create_schedule）
-  - 使用 <create_agent> 创建子Agent
+  - 使用 <create_agent> 创建子Agent（清洁模式）
+  - 使用 <fork_agent> 创建子Agent（fork模式，继承上下文）
   - 使用 <return> 标记任务完成
 
 [bold yellow]会话管理：[/bold yellow]

@@ -67,7 +67,7 @@ class WebhookOutput(OutputHandler):
         if "<return>" in content and "</return>" in content:
             return
         # 工具标签（ps_call/bash_call/builtin/create_agent）由专门流程处理，避免与授权卡片重复
-        if re.search(r"<(ps_call|bash_call|builtin|create_agent)\b", content, re.IGNORECASE):
+        if re.search(r"<(ps_call|bash_call|builtin|create_agent|fork_agent)\b", content, re.IGNORECASE):
             return
         self._emit("on_content", content, "content")
 
@@ -83,11 +83,14 @@ class WebhookOutput(OutputHandler):
         self._emit("on_ps_call_result", f"status={status}\n{summary}", "ps_call_result")
 
     def on_create_agent(
-        self, task: str, depth: int, agent_name: str, context_info: dict
+        self, task: str, depth: int, agent_name: str,
+        context_info: dict = None, fork: bool = False,
     ) -> None:
         """创建子 Agent - 完整显示"""
+        context_info = context_info or {}
         agent_info = f" [{agent_name}]" if agent_name else ""
-        text = f"depth={depth}{agent_info}\n{task}"
+        mode_tag = " [fork]" if fork else ""
+        text = f"depth={depth}{agent_info}{mode_tag}\n{task}"
         self._emit("on_create_agent", text, "create_agent")
 
     def on_agent_complete(self, summary: str, stats: dict) -> None:

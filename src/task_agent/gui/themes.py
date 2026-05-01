@@ -51,6 +51,7 @@ class ThemeColors:
             "bash_call": cls.BASH_CALL_TEXT,
             "builtin": cls.BUILTIN_TEXT,
             "create_agent": cls.CREATE_AGENT_TEXT,
+            "fork_agent": cls.CREATE_AGENT_TEXT,
             "think": cls.THINK_TEXT,
             "ps_call_result": cls.PS_CALL_RESULT_TEXT,
             "bash_call_result": cls.BASH_CALL_RESULT_TEXT,

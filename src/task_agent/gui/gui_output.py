@@ -40,9 +40,9 @@ class GUIOutput(OutputHandler):
         self._queue.put(("ps_call_result", (result, status)))
 
     def on_create_agent(self, task: str, depth: int, agent_name: str,
-                       context_info: dict) -> None:
+                       context_info: dict, fork: bool = False) -> None:
         """显示子 Agent 创建"""
-        self._queue.put(("create_agent", (task, depth, agent_name, context_info)))
+        self._queue.put(("create_agent", (task, depth, agent_name, fork, context_info)))
 
     def on_agent_complete(self, summary: str, stats: dict) -> None:
         """显示完成信息"""
@@ -83,7 +83,7 @@ class GUIOutput(OutputHandler):
                             self.chat_panel.add_text(block.content)
                             rendered += 1
                         continue
-                    if block.block_type in {"ps_call", "bash_call", "builtin", "create_agent"}:
+                    if block.block_type in {"ps_call", "bash_call", "builtin", "create_agent", "fork_agent"}:
                         continue
                     if block.block_type == "return":
                         self.chat_panel.add_collapsible_block("[返回]", block.content, collapsed=True)
@@ -113,7 +113,7 @@ class GUIOutput(OutputHandler):
                     icon = "[CANCEL]"
                 self.chat_panel.add_collapsible_block(f"{icon} 结果", result, collapsed=True)
             elif event_type == "create_agent":
-                task, depth, agent_name, context_info = payload
+                task, depth, agent_name, fork, context_info = payload
                 agent_info = f" [{agent_name}]" if agent_name else ""
                 text = (f"\n{'+'*60}\n"
                         f"深度: {depth}/{context_info.get('max_depth', 4)}{agent_info} | 任务: {task}\n"
@@ -168,8 +168,9 @@ class GUIOutput(OutputHandler):
                 self.chat_panel.add_collapsible_block("[命令结果]", block.content, collapsed=True)
                 rendered += 1
                 continue
-            if block.block_type == "create_agent":
-                self.chat_panel.add_collapsible_block("[创建Agent]", block.content, collapsed=True)
+            if block.block_type in ("create_agent", "fork_agent"):
+                label = "[Fork Agent]" if block.block_type == "fork_agent" else "[创建Agent]"
+                self.chat_panel.add_collapsible_block(label, block.content, collapsed=True)
                 rendered += 1
                 continue
             self.chat_panel.add_text(block.content)

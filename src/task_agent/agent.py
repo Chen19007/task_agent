@@ -64,6 +64,7 @@ class ChildTaskRequest:
     task: str  # 任务描述
     global_count: int  # 全局子 agent 计数
     agent_name: Optional[str] = None  # 预定义 agent 名称（如果有）
+    fork: bool = False  # True=<fork_agent> 继承父Agent上下文，False=<create_agent> 清洁模式
 
 
 @dataclass
@@ -924,6 +925,7 @@ class SimpleAgent:
                 task=task,
                 depth=self.depth + 1,
                 agent_name=agent_name,
+                fork=request.fork,
                 context_info={
                     "context_used": context_used,
                     "context_total": context_total,
@@ -977,6 +979,18 @@ class SimpleAgent:
         """添加消息到历史记录"""
         normalized_think = think.strip() if think else ""
         self.history.append(Message(role=role, content=content, think=normalized_think))
+
+    def inherit_history_from(self, parent: 'SimpleAgent'):
+        """从父Agent继承完整对话历史（fork_agent模式）"""
+        self._add_message(
+            "system",
+            f"[父Agent上下文] 继承自父Agent的完整对话历史（来源: Agent {parent.agent_id}, 深度: {parent.depth}）"
+        )
+        for msg in parent.history:
+            self.history.append(Message(
+                role=msg.role, content=msg.content,
+                timestamp=msg.timestamp, think=msg.think,
+            ))
 
     def _add_depth_prefix(self, outputs: list[str]) -> list[str]:
         """给所有输出添加深度前缀（+号）
@@ -1176,7 +1190,12 @@ class SimpleAgent:
 
     def _filter_action_blocks(self, response: str) -> tuple[str, bool]:
         """Keep only tool tags when present to avoid mixed output."""
-        pattern = r"<(ps_call|bash_call)\b[^>]*>.*?</\1>|<builtin\b[^>]*>.*?</builtin>|<create_agent(?:\s+name=(\S+?))?\s*>.*?</create_agent>"
+        pattern = (
+            r"<(ps_call|bash_call)\b[^>]*>.*?</\1>|"
+            r"<builtin\b[^>]*>.*?</builtin>|"
+            r"<create_agent(?:\s+name=(\S+?))?\s*>(.+?)</create_agent>|"
+            r"<fork_agent(?:\s+name=(\S+?))?\s*>(.+?)</fork_agent>"
+        )
         matches = list(re.finditer(pattern, response, re.DOTALL | re.IGNORECASE))
         if not matches:
             return response, False
@@ -1185,7 +1204,7 @@ class SimpleAgent:
 
     def _has_action_tags(self, response: str) -> bool:
         """检查是否有操作标签"""
-        return bool(re.search(r'<(ps_call|bash_call|builtin|create_agent|return)\b', response, re.IGNORECASE))
+        return bool(re.search(r'<(ps_call|bash_call|builtin|create_agent|fork_agent|return)\b', response, re.IGNORECASE))
 
     def _is_completed(self, response: str) -> bool:
         """检查是否完成"""
@@ -1297,6 +1316,21 @@ class SimpleAgent:
                 )
                 break
 
+        # Fork Agent（继承父Agent上下文）
+        for match in re.finditer(r'<fork_agent(?:\s+name=(\S+?))?\s*>(.+?)</fork_agent>', response, re.DOTALL):
+            if not self._pending_child_request:  # 只处理第一个
+                agent_name = match.group(1)
+                if agent_name:
+                    agent_name = agent_name.strip('"').strip("'")
+                task_content = match.group(2).strip()
+                self._pending_child_request = ChildTaskRequest(
+                    task=task_content,
+                    global_count=0,
+                    agent_name=agent_name,
+                    fork=True,
+                )
+                break
+
         return outputs, commands, command_blocks
 
     def _parse_tools_with_callbacks(self, response: str) -> tuple[list[str], list["CommandSpec"], list[str]]:
@@ -1353,6 +1387,21 @@ class SimpleAgent:
                     task=task_content,
                     global_count=0,  # 会在 step() 中更新
                     agent_name=agent_name
+                )
+                break
+
+        # Fork Agent（继承父Agent上下文）
+        for match in re.finditer(r'<fork_agent(?:\s+name=(\S+?))?\s*>(.+?)</fork_agent>', response, re.DOTALL):
+            if not self._pending_child_request:  # 只处理第一个
+                agent_name = match.group(1)
+                if agent_name:
+                    agent_name = agent_name.strip('"').strip("'")
+                task_content = match.group(2).strip()
+                self._pending_child_request = ChildTaskRequest(
+                    task=task_content,
+                    global_count=0,
+                    agent_name=agent_name,
+                    fork=True,
                 )
                 break
 
@@ -1661,19 +1710,24 @@ class Executor:
             if result.action == Action.SWITCH_TO_CHILD:
                 # result.data 现在是 ChildTaskRequest 对象
                 request: ChildTaskRequest = result.data
-                self.context_stack.append(self.current_agent)
+                parent = self.current_agent  # 保存父Agent引用（用于fork继承）
+                self.context_stack.append(parent)
 
                 # 如果有预定义 agent，加载内容并注入到第一条消息
                 predefined_content = None
                 if request.agent_name:
-                    predefined_content = self.current_agent._load_agent_full_content(request.agent_name)
+                    predefined_content = parent._load_agent_full_content(request.agent_name)
 
                 # 创建子 agent，传递 agent_name 用于 forbidden_agents 过滤
                 self.current_agent = self._create_agent(
-                    depth=self.current_agent.depth + 1,
+                    depth=parent.depth + 1,
                     global_subagent_count=request.global_count,
                     agent_name=request.agent_name or ""
                 )
+
+                # Fork模式：子Agent继承父Agent完整对话历史
+                if request.fork:
+                    self.current_agent.inherit_history_from(parent)
 
                 if predefined_content:
                     # 将流程名加入用户任务首行，避免任务跑偏

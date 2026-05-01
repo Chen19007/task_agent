@@ -88,9 +88,11 @@ task-agent "安装项目依赖" --timeout 120 --model qwen2.5:7b --verbose
 
 **Tool tag system** (XML-like format):
 - `<ps_call> command </ps_call>` - Execute PowerShell/bash commands
-- `<create_agent> task </create_agent>` - Create sub-agent for task
+- `<create_agent> task </create_agent>` - Create sub-agent (clean mode, independent context)
 - `<create_agent name=agent_name> task </create_agent>` - Create predefined sub-agent
-- `<completion> summary </completion>` - Mark task completion
+- `<fork_agent> task </fork_agent>` - Fork sub-agent (inherits parent context)
+- `<fork_agent name=agent_name> task </fork_agent>` - Fork predefined sub-agent
+- `<return> summary </return>` - Mark task completion
 
 ### Module Structure
 
@@ -120,7 +122,7 @@ task-agent "安装项目依赖" --timeout 120 --model qwen2.5:7b --verbose
 ## Agent Flow Convention
 
 - **Agent 文件首行**: 预定义 agent 文件（如 `agents/file-edit.md`）第一行使用 `# Xxx Flow` 命名格式。
-- **子 agent 用户任务首行**: 通过 `<create_agent name=...>` 创建时，用户任务行按 `用户任务: Use Xxx Flow, <任务>` 组装；如果未解析到 Flow 名称，则保持 `用户任务: <任务>`。
+- **子 agent 用户任务首行**: 通过 `<create_agent name=...>` 或 `<fork_agent name=...>` 创建时，用户任务行按 `用户任务: Use Xxx Flow, <任务>` 组装；如果未解析到 Flow 名称，则保持 `用户任务: <任务>`。
 
 ## Process Management
 

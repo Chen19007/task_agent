@@ -55,13 +55,14 @@ class OutputHandler(ABC):
 
     @abstractmethod
     def on_create_agent(self, task: str, depth: int, agent_name: str,
-                       context_info: dict) -> None:
+                       context_info: dict, fork: bool = False) -> None:
         """创建子 Agent
 
         Args:
             task: 任务描述
             depth: 新深度
             agent_name: 预定义 agent 名称
+            fork: 是否 fork 模式（继承父Agent上下文）
             context_info: 上下文信息 {
                 context_used: 已使用上下文,
                 context_total: 总上下文,
@@ -125,7 +126,7 @@ class NullOutputHandler(OutputHandler):
         pass
 
     def on_create_agent(self, task: str, depth: int, agent_name: str,
-                       context_info: dict) -> None:
+                       context_info: dict, fork: bool = False) -> None:
         pass
 
     def on_agent_complete(self, summary: str, stats: dict) -> None:

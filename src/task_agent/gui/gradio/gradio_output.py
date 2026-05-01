@@ -56,9 +56,9 @@ class GradioOutput(OutputHandler):
         self._events.append(("ps_call_result", (result, status)))
 
     def on_create_agent(self, task: str, depth: int, agent_name: str,
-                       context_info: dict) -> None:
+                       context_info: dict, fork: bool = False) -> None:
         """创建子 Agent"""
-        self._events.append(("create_agent", (task, depth, agent_name, context_info)))
+        self._events.append(("create_agent", (task, depth, agent_name, fork, context_info)))
 
     def on_agent_complete(self, summary: str, stats: dict) -> None:
         """Agent 完成"""
@@ -127,7 +127,7 @@ class GradioOutput(OutputHandler):
             return self._render_collapsible(f"{icon} 结果", result)
 
         elif event_type == "create_agent":
-            task, depth, agent_name, context_info = payload
+            task, depth, agent_name, fork, context_info = payload
             agent_info = f" [{agent_name}]" if agent_name else ""
             return (
                 f"\n{'+'*60}\n"
@@ -174,7 +174,7 @@ class GradioOutput(OutputHandler):
             # 只渲染文本，tool tags 由专门的事件处理
             if block.block_type == "text":
                 rendered_parts.append(f"```\n{block.content}\n```")
-            # 其他类型（ps_call, create_agent 等）由专门的事件处理，这里忽略
+            # 其他类型（ps_call, create_agent, fork_agent 等）由专门的事件处理，这里忽略
 
         return "\n\n".join(rendered_parts) if rendered_parts else ""
 
