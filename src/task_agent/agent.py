@@ -824,6 +824,8 @@ class SimpleAgent:
         """
         # 调用LLM（内部会触发 before_llm_callback 保存前快照）
         content, reasoning = self._call_llm()
+        if content is None:
+            content = ""
         self.last_think = reasoning.strip() if reasoning else ""
 
         # 调用回调：输出思考内容
