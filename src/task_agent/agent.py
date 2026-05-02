@@ -1,33 +1,35 @@
 """极简 Agent 核心模块 - 上下文切换架构"""
 
 import json
+import os
 import re
 import sys
 import threading
 import time
 import uuid
-import os
-import yaml
-from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Generator, Optional, Any, Callable
 from enum import Enum
+from pathlib import Path
+from typing import Any, Callable, Generator, Optional
 
-from .config import Config
-from .llm import create_client, ChatMessage
-from .execution_event_bus import ExecutionEventBus
-from .output_event_bridge import EventBusOutputHandler
-from .output_handler import OutputHandler, NullOutputHandler
-from .platform_utils import get_hint_platform_suffix, get_shell_tool_name
-from .hint_utils import select_hint_file
+import yaml
+
 from .builtin_schema import (
     build_builtin_read_file_example_lines,
     build_builtin_smart_edit_example_lines,
 )
+from .config import Config
+from .execution_event_bus import ExecutionEventBus
+from .hint_utils import select_hint_file
+from .llm import ChatMessage, create_client
+from .output_event_bridge import EventBusOutputHandler
+from .output_handler import NullOutputHandler, OutputHandler
+from .platform_utils import get_hint_platform_suffix, get_shell_tool_name
 
 
 class Action(Enum):
     """Agent执行后的动作"""
+
     CONTINUE = "continue"  # 继续执行下一轮
     WAIT = "wait"  # 等待用户输入
     SWITCH_TO_CHILD = "switch_to_child"  # 切换到子Agent
@@ -38,14 +40,22 @@ class Action(Enum):
 @dataclass
 class StepResult:
     """单步执行结果"""
+
     outputs: list[str]  # 输出内容列表（不含命令框）
     action: Action  # 下一步动作
     data: Any = None  # 携带数据（切换时的任务/摘要）
-    pending_commands: list["CommandSpec"] = field(default_factory=list)  # 待确认的命令列表
-    command_blocks: list[str] = field(default_factory=list)  # 命令框显示内容（逐个显示）
+    pending_commands: list["CommandSpec"] = field(
+        default_factory=list
+    )  # 待确认的命令列表
+    command_blocks: list[str] = field(
+        default_factory=list
+    )  # 命令框显示内容（逐个显示）
+
+
 @dataclass
 class CommandSpec:
     """命令规格，携带上下文信息。"""
+
     command: str
     tool: str = field(default_factory=get_shell_tool_name)
     background: bool = False
@@ -61,15 +71,19 @@ class CommandSpec:
 @dataclass
 class ChildTaskRequest:
     """子任务请求"""
+
     task: str  # 任务描述
     global_count: int  # 全局子 agent 计数
     agent_name: Optional[str] = None  # 预定义 agent 名称（如果有）
-    fork: bool = False  # True=<fork_agent> 继承父Agent上下文，False=<create_agent> 清洁模式
+    fork: bool = (
+        False  # True=<fork_agent> 继承父Agent上下文，False=<create_agent> 清洁模式
+    )
 
 
 @dataclass
 class Message:
     """消息记录"""
+
     role: str  # system, user, assistant
     content: str
     timestamp: float = field(default_factory=time.time)
@@ -87,14 +101,18 @@ class SimpleAgent:
     5. 任务完成：step() 返回 COMPLETE
     """
 
-    def __init__(self, config: Optional[Config] = None,
-                 depth: int = 0, max_depth: int = 4,
-                 global_subagent_count: int = 0,
-                 agent_name: Optional[str] = None,
-                 output_handler: Optional[OutputHandler] = None,
-                 workspace_dir: Optional[str] = None,
-                 runtime_scene: str = "cli",
-                 init_system_prompt: bool = True):
+    def __init__(
+        self,
+        config: Optional[Config] = None,
+        depth: int = 0,
+        max_depth: int = 4,
+        global_subagent_count: int = 0,
+        agent_name: Optional[str] = None,
+        output_handler: Optional[OutputHandler] = None,
+        workspace_dir: Optional[str] = None,
+        runtime_scene: str = "cli",
+        init_system_prompt: bool = True,
+    ):
         """初始化 Agent
 
         Args:
@@ -143,7 +161,7 @@ class SimpleAgent:
         self._after_llm_callback: Optional[callable] = None
 
         # Executor 引用（用于访问命令确认回调）
-        self._executor: Optional['Executor'] = None
+        self._executor: Optional["Executor"] = None
 
         # 上下文压缩状态
         self._last_compact_message_count = 0
@@ -168,7 +186,7 @@ class SimpleAgent:
 
     def _init_system_prompt(self):
         """初始化系统提示词"""
-        max_agents = self.max_depth ** 2
+        max_agents = self.max_depth**2
         local_remaining = max_agents - self.total_sub_agents_created
 
         # 全局配额（累加计数）
@@ -214,7 +232,9 @@ class SimpleAgent:
 
         prompt_rules_section = self._build_prompt_rules_section()
         if prompt_rules_section:
-            base_system_prompt = f"{base_system_prompt.rstrip()}\n\n{prompt_rules_section}\n"
+            base_system_prompt = (
+                f"{base_system_prompt.rstrip()}\n\n{prompt_rules_section}\n"
+            )
 
         self.history.append(Message(role="system", content=base_system_prompt))
 
@@ -251,11 +271,13 @@ class SimpleAgent:
             description = str(metadata.get("description", "")).strip()
             injection = str(metadata.get("system_prompt_injection", "")).strip()
 
-            metadata_list.append({
-                "name": hint_name,
-                "description": description,
-                "system_prompt_injection": injection,
-            })
+            metadata_list.append(
+                {
+                    "name": hint_name,
+                    "description": description,
+                    "system_prompt_injection": injection,
+                }
+            )
 
         if not metadata_list:
             return ""
@@ -271,7 +293,9 @@ class SimpleAgent:
         return "\n".join(lines).strip()
 
     def _get_builtin_plugins_dir(self) -> str:
-        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        project_root = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..")
+        )
         plugins_dir = os.path.join(project_root, "builtin_plugins")
         return plugins_dir if os.path.isdir(plugins_dir) else ""
 
@@ -509,7 +533,9 @@ class SimpleAgent:
         return False
 
     def _get_prompt_rules_dir(self) -> str:
-        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        project_root = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..")
+        )
         rules_dir = os.path.join(project_root, "prompt_rules")
         return rules_dir if os.path.isdir(rules_dir) else ""
 
@@ -587,7 +613,9 @@ class SimpleAgent:
 
     def _get_hints_dir(self) -> str:
         """获取 hints 根目录路径"""
-        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        project_root = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..")
+        )
         hints_dir = os.path.join(project_root, "hints")
         return hints_dir if os.path.isdir(hints_dir) else ""
 
@@ -619,7 +647,9 @@ class SimpleAgent:
         return agents
 
     def _get_project_agents_dir(self) -> str:
-        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        project_root = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..")
+        )
         agents_dir = os.path.join(project_root, "agents")
         return agents_dir if os.path.isdir(agents_dir) else ""
 
@@ -633,7 +663,9 @@ class SimpleAgent:
             return stem[:-8], "windows"
         return stem, ""
 
-    def _collect_agent_candidates(self, exts: tuple[str, ...]) -> dict[str, dict[str, str]]:
+    def _collect_agent_candidates(
+        self, exts: tuple[str, ...]
+    ) -> dict[str, dict[str, str]]:
         agents_dir = self._get_project_agents_dir()
         if not agents_dir:
             return {}
@@ -676,7 +708,9 @@ class SimpleAgent:
 
     def _get_templates_dir(self) -> str:
         """获取模板目录路径"""
-        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        project_root = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..")
+        )
         templates_dir = os.path.join(project_root, "templates")
         return templates_dir if os.path.isdir(templates_dir) else ""
 
@@ -723,7 +757,11 @@ class SimpleAgent:
                 forbidden = forbidden.strip()
                 if forbidden.startswith("[") and forbidden.endswith("]"):
                     items = forbidden[1:-1].split(",")
-                    forbidden_list = [item.strip().strip("'").strip('"') for item in items if item.strip()]
+                    forbidden_list = [
+                        item.strip().strip("'").strip('"')
+                        for item in items
+                        if item.strip()
+                    ]
                 else:
                     forbidden_list = [forbidden.strip().strip("'").strip('"')]
 
@@ -762,7 +800,9 @@ class SimpleAgent:
             forbidden_str = forbidden_str.strip()
             if forbidden_str.startswith("[") and forbidden_str.endswith("]"):
                 items = forbidden_str[1:-1].split(",")
-                return [item.strip().strip("'").strip('"') for item in items if item.strip()]
+                return [
+                    item.strip().strip("'").strip('"') for item in items if item.strip()
+                ]
             return [forbidden_str.strip().strip("'").strip('"')]
         except (OSError, UnicodeDecodeError):
             return []
@@ -855,15 +895,17 @@ class SimpleAgent:
         outputs = []
         if reasoning and reasoning.strip():
             outputs.append(f"\n** 思考过程：\n")
-            outputs.append(f"{'━'*50}\n")
+            outputs.append(f"{'━' * 50}\n")
             outputs.append(f"{reasoning}\n")
-            outputs.append(f"{'━'*50}\n\n")
+            outputs.append(f"{'━' * 50}\n\n")
         if response and response.strip():
             outputs.append(response)
 
         if skip_parse:
             self._output_handler.on_wait_input()
-            outputs.append("\n[已跳过本轮解析] 本条回复未解析工具调用，请输入澄清意图。\n")
+            outputs.append(
+                "\n[已跳过本轮解析] 本条回复未解析工具调用，请输入澄清意图。\n"
+            )
             outputs.append("[等待用户输入]\n")
             return StepResult(
                 outputs=self._add_depth_prefix(outputs),
@@ -873,7 +915,9 @@ class SimpleAgent:
             )
 
         # 解析并执行标签，收集输出和命令（使用带回调的版本）
-        tool_outputs, pending_commands, command_blocks = self._parse_tools_with_callbacks(response)
+        tool_outputs, pending_commands, command_blocks = (
+            self._parse_tools_with_callbacks(response)
+        )
         outputs.extend(tool_outputs)
 
         # 检查是否需要切换到子Agent
@@ -894,27 +938,42 @@ class SimpleAgent:
                 self._output_handler.on_depth_limit()
                 outputs.append(f"\n!! [深度限制]\n")
                 outputs.append(f"已达到最大深度 {self.max_depth}，由当前Agent执行\n")
-                outputs.append(f"{'═'*50}\n\n")
-                return StepResult(outputs=self._add_depth_prefix(outputs), action=Action.CONTINUE, pending_commands=pending_commands, command_blocks=command_blocks)
+                outputs.append(f"{'═' * 50}\n\n")
+                return StepResult(
+                    outputs=self._add_depth_prefix(outputs),
+                    action=Action.CONTINUE,
+                    pending_commands=pending_commands,
+                    command_blocks=command_blocks,
+                )
 
             # 检查本地配额限制
-            if self.total_sub_agents_created >= self.max_depth ** 2:
+            if self.total_sub_agents_created >= self.max_depth**2:
                 self._output_handler.on_quota_limit("local")
                 outputs.append(f"\n!! [本地配额限制]\n")
-                outputs.append(f"当前Agent已用完 {self.max_depth ** 2} 个子Agent配额\n")
-                outputs.append(f"{'═'*50}\n\n")
+                outputs.append(f"当前Agent已用完 {self.max_depth**2} 个子Agent配额\n")
+                outputs.append(f"{'═' * 50}\n\n")
                 self._add_message("system", f"[本地配额限制] 请直接执行任务: {task}")
-                return StepResult(outputs=self._add_depth_prefix(outputs), action=Action.CONTINUE, pending_commands=pending_commands, command_blocks=command_blocks)
+                return StepResult(
+                    outputs=self._add_depth_prefix(outputs),
+                    action=Action.CONTINUE,
+                    pending_commands=pending_commands,
+                    command_blocks=command_blocks,
+                )
 
             # 检查全局配额限制（防止层级间循环）- 累加计数
-            global_total = self.max_depth ** 2 * 2
+            global_total = self.max_depth**2 * 2
             if self._global_subagent_count >= global_total:
                 self._output_handler.on_quota_limit("global")
                 outputs.append(f"\n!! [全局配额限制]\n")
                 outputs.append(f"整个任务已用完所有 {global_total} 个子Agent配额\n")
-                outputs.append(f"{'═'*50}\n\n")
+                outputs.append(f"{'═' * 50}\n\n")
                 self._add_message("system", f"[全局配额限制] 请直接执行任务: {task}")
-                return StepResult(outputs=self._add_depth_prefix(outputs), action=Action.CONTINUE, pending_commands=pending_commands, command_blocks=command_blocks)
+                return StepResult(
+                    outputs=self._add_depth_prefix(outputs),
+                    action=Action.CONTINUE,
+                    pending_commands=pending_commands,
+                    command_blocks=command_blocks,
+                )
 
             self.total_sub_agents_created += 1
 
@@ -933,18 +992,28 @@ class SimpleAgent:
                     "context_total": context_total,
                     "global_count": new_global_count,
                     "global_total": global_total,
-                    "max_depth": self.max_depth
-                }
+                    "max_depth": self.max_depth,
+                },
             )
 
-            outputs.append(f"\n{'+'*60}\n")
+            outputs.append(f"\n{'+' * 60}\n")
             agent_info = f" [{agent_name}]" if agent_name else ""
-            outputs.append(f"深度: {self.depth + 1}/{self.max_depth}{agent_info} | 任务: {task}\n")
-            outputs.append(f"上下文: {context_used}/{context_total} | 配额: {new_global_count}/{global_total}\n")
-            outputs.append(f"{'+'*60}\n\n")
+            outputs.append(
+                f"深度: {self.depth + 1}/{self.max_depth}{agent_info} | 任务: {task}\n"
+            )
+            outputs.append(
+                f"上下文: {context_used}/{context_total} | 配额: {new_global_count}/{global_total}\n"
+            )
+            outputs.append(f"{'+' * 60}\n\n")
 
             # 返回 ChildTaskRequest 对象
-            return StepResult(outputs=self._add_depth_prefix(outputs), action=Action.SWITCH_TO_CHILD, data=request, pending_commands=pending_commands, command_blocks=command_blocks)
+            return StepResult(
+                outputs=self._add_depth_prefix(outputs),
+                action=Action.SWITCH_TO_CHILD,
+                data=request,
+                pending_commands=pending_commands,
+                command_blocks=command_blocks,
+            )
 
         # 检查是否完成
         if not has_tool_tags and self._is_completed(response):
@@ -952,7 +1021,13 @@ class SimpleAgent:
             # 调用回调：输出完成信息
             stats = self.get_summary()
             self._output_handler.on_agent_complete(summary, stats)
-            return StepResult(outputs=self._add_depth_prefix(outputs), action=Action.COMPLETE, data=summary, pending_commands=pending_commands, command_blocks=command_blocks)
+            return StepResult(
+                outputs=self._add_depth_prefix(outputs),
+                action=Action.COMPLETE,
+                data=summary,
+                pending_commands=pending_commands,
+                command_blocks=command_blocks,
+            )
 
         # 检查是否需要等待用户输入
         # 只有当没有任何标签时才等待（reasoning 不影响）
@@ -960,9 +1035,19 @@ class SimpleAgent:
             self._output_handler.on_wait_input()
             outputs.append(f"\n?? 等待用户输入...\n")
             outputs.append("[等待用户输入]\n")  # 保留供 cli.py 检测
-            return StepResult(outputs=self._add_depth_prefix(outputs), action=Action.WAIT, pending_commands=pending_commands, command_blocks=command_blocks)
+            return StepResult(
+                outputs=self._add_depth_prefix(outputs),
+                action=Action.WAIT,
+                pending_commands=pending_commands,
+                command_blocks=command_blocks,
+            )
 
-        return StepResult(outputs=self._add_depth_prefix(outputs), action=Action.CONTINUE, pending_commands=pending_commands, command_blocks=command_blocks)
+        return StepResult(
+            outputs=self._add_depth_prefix(outputs),
+            action=Action.CONTINUE,
+            pending_commands=pending_commands,
+            command_blocks=command_blocks,
+        )
 
     def on_child_completed(self, summary: str, global_count: int):
         """子Agent完成时的回调
@@ -973,7 +1058,9 @@ class SimpleAgent:
         """
         if summary:
             # 子Agent结果是工具执行的输出，用user角色（兼容不支持tool角色的API）
-            self._add_message("assistant", f"<child_summary>\n{summary}\n</child_summary>")
+            self._add_message(
+                "assistant", f"<child_summary>\n{summary}\n</child_summary>"
+            )
         # 同步全局计数
         self._global_subagent_count = global_count
 
@@ -982,17 +1069,21 @@ class SimpleAgent:
         normalized_think = think.strip() if think else ""
         self.history.append(Message(role=role, content=content, think=normalized_think))
 
-    def inherit_history_from(self, parent: 'SimpleAgent'):
+    def inherit_history_from(self, parent: "SimpleAgent"):
         """从父Agent继承完整对话历史（fork_agent模式）"""
         self._add_message(
             "system",
-            f"[父Agent上下文] 继承自父Agent的完整对话历史（来源: Agent {parent.agent_id}, 深度: {parent.depth}）"
+            f"[父Agent上下文] 继承自父Agent的完整对话历史（来源: Agent {parent.agent_id}, 深度: {parent.depth}）",
         )
         for msg in parent.history:
-            self.history.append(Message(
-                role=msg.role, content=msg.content,
-                timestamp=msg.timestamp, think=msg.think,
-            ))
+            self.history.append(
+                Message(
+                    role=msg.role,
+                    content=msg.content,
+                    timestamp=msg.timestamp,
+                    think=msg.think,
+                )
+            )
 
     def _add_depth_prefix(self, outputs: list[str]) -> list[str]:
         """给所有输出添加深度前缀（+号）
@@ -1010,9 +1101,9 @@ class SimpleAgent:
         result = []
         for output in outputs:
             # 按行分割，给每行添加前缀
-            lines = output.split('\n')
+            lines = output.split("\n")
             prefixed_lines = [prefix + line if line.strip() else line for line in lines]
-            result.append('\n'.join(prefixed_lines))
+            result.append("\n".join(prefixed_lines))
         return result
 
     def _estimate_context_tokens(self) -> int:
@@ -1090,7 +1181,8 @@ class SimpleAgent:
             return summaries[0]
 
         combined = "\n\n".join(
-            f"[分段摘要 {idx}]\n{summary}" for idx, summary in enumerate(summaries, start=1)
+            f"[分段摘要 {idx}]\n{summary}"
+            for idx, summary in enumerate(summaries, start=1)
         )
         return self._summarize_text(combined)
 
@@ -1108,12 +1200,16 @@ class SimpleAgent:
             return False
         return True
 
-    def compact_history(self, reason: str = "手动压缩", keep_last: Optional[int] = None) -> dict:
+    def compact_history(
+        self, reason: str = "手动压缩", keep_last: Optional[int] = None
+    ) -> dict:
         """压缩历史上下文，保留关键摘要和最近消息。"""
         if self._is_compacting:
             return {"compacted": False, "reason": "compacting"}
 
-        keep_last = keep_last if keep_last is not None else self.config.compact_keep_messages
+        keep_last = (
+            keep_last if keep_last is not None else self.config.compact_keep_messages
+        )
         total_before = len(self.history)
         if total_before <= keep_last + 2:
             return {"compacted": False, "reason": "too_short", "messages": total_before}
@@ -1179,7 +1275,9 @@ class SimpleAgent:
         if self._before_llm_callback:
             self._before_llm_callback(self)
 
-        messages = [ChatMessage(role=msg.role, content=msg.content) for msg in self.history]
+        messages = [
+            ChatMessage(role=msg.role, content=msg.content) for msg in self.history
+        ]
 
         # 使用 LLM 客户端
         client = create_client(self.config)
@@ -1206,15 +1304,21 @@ class SimpleAgent:
 
     def _has_action_tags(self, response: str) -> bool:
         """检查是否有操作标签"""
-        return bool(re.search(r'<(ps_call|bash_call|builtin|create_agent|fork_agent|return)\b', response, re.IGNORECASE))
+        return bool(
+            re.search(
+                r"<(ps_call|bash_call|builtin|create_agent|fork_agent|return)\b",
+                response,
+                re.IGNORECASE,
+            )
+        )
 
     def _is_completed(self, response: str) -> bool:
         """检查是否完成"""
-        return bool(re.search(r'<return\b', response, re.IGNORECASE))
+        return bool(re.search(r"<return\b", response, re.IGNORECASE))
 
     def _extract_return(self, response: str) -> str:
         """提取返回内容"""
-        match = re.search(r'<return>\s*(.+?)\s*</return>', response, re.DOTALL)
+        match = re.search(r"<return>\s*(.+?)\s*</return>", response, re.DOTALL)
         return match.group(1) if match else "任务完成"
 
     def _normalize_builtin_command(self, command: str) -> str:
@@ -1243,7 +1347,9 @@ class SimpleAgent:
         for match in re.finditer(r"(\w+)\s*=\s*(\".*?\"|'.*?'|[^\s>]+)", raw_attrs):
             key = match.group(1).lower()
             value = match.group(2).strip()
-            if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+            if (value.startswith('"') and value.endswith('"')) or (
+                value.startswith("'") and value.endswith("'")
+            ):
                 value = value[1:-1]
             attrs[key] = value
         return attrs
@@ -1263,7 +1369,9 @@ class SimpleAgent:
         except ValueError:
             return None
 
-    def _parse_tools(self, response: str) -> tuple[list[str], list["CommandSpec"], list[str]]:
+    def _parse_tools(
+        self, response: str
+    ) -> tuple[list[str], list["CommandSpec"], list[str]]:
         """解析工具标签
 
         Returns:
@@ -1274,35 +1382,55 @@ class SimpleAgent:
         command_blocks = []
 
         # 执行PowerShell命令与内置工具
-        for match in re.finditer(r'<(ps_call|bash_call|builtin)([^>]*)>\s*(.+?)\s*</\1>', response, re.DOTALL | re.IGNORECASE):
+        for match in re.finditer(
+            r"<(ps_call|bash_call|builtin)([^>]*)>\s*(.+?)\s*</\1>",
+            response,
+            re.DOTALL | re.IGNORECASE,
+        ):
             tag_name = match.group(1).lower()
             raw_attrs = match.group(2)
             command = match.group(3).strip()
             attrs = self._parse_tag_attributes(raw_attrs)
-            background = self._parse_bool_attr(attrs.get("background")) if tag_name in {"ps_call", "bash_call"} else False
-            timeout = self._parse_int_attr(attrs.get("timeout")) if tag_name in {"ps_call", "bash_call"} else None
+            background = (
+                self._parse_bool_attr(attrs.get("background"))
+                if tag_name in {"ps_call", "bash_call"}
+                else False
+            )
+            timeout = (
+                self._parse_int_attr(attrs.get("timeout"))
+                if tag_name in {"ps_call", "bash_call"}
+                else None
+            )
             if tag_name in {"ps_call", "bash_call"} and timeout is None:
                 timeout = 10
             if tag_name == "builtin":
                 command = self._normalize_builtin_command(command)
-            command_spec = CommandSpec(command=command, tool=tag_name, background=background, timeout=timeout)
+            command_spec = CommandSpec(
+                command=command, tool=tag_name, background=background, timeout=timeout
+            )
             display_command = command_spec.display()
             self.total_commands_executed += 1  # 解析时分配编号
 
             # 命令框单独存储，不放入 outputs
-            block = f"\n>> [待执行命令 #{self.total_commands_executed}]\n命令: {display_command}\n{'━'*50}\n\n"
+            block = f"\n>> [待执行命令 #{self.total_commands_executed}]\n命令: {display_command}\n{'━' * 50}\n\n"
             # 添加深度前缀到命令框
             prefix = "+" * self.depth + " " if self.depth > 0 else ""
             if prefix:
-                lines = block.split('\n')
-                prefixed_lines = [prefix + line if line.strip() else line for line in lines]
-                block = '\n'.join(prefixed_lines)
+                lines = block.split("\n")
+                prefixed_lines = [
+                    prefix + line if line.strip() else line for line in lines
+                ]
+                block = "\n".join(prefixed_lines)
             command_blocks.append(block)
             commands.append(command_spec)
 
         # 创建子Agent（解析 name 属性）
         # 支持格式：<create_agent name=xxx>任务</create_agent> 或 <create_agent>任务</create_agent>
-        for match in re.finditer(r'<create_agent(?:\s+name=(\S+?))?\s*>(.+?)</create_agent>', response, re.DOTALL):
+        for match in re.finditer(
+            r"<create_agent(?:\s+name=(\S+?))?\s*>(.+?)</create_agent>",
+            response,
+            re.DOTALL,
+        ):
             if not self._pending_child_request:  # 只处理第一个
                 agent_name = match.group(1)  # name 属性值（如果有）
                 if agent_name:
@@ -1314,12 +1442,14 @@ class SimpleAgent:
                 self._pending_child_request = ChildTaskRequest(
                     task=task_content,
                     global_count=0,  # 会在 step() 中更新
-                    agent_name=agent_name
+                    agent_name=agent_name,
                 )
                 break
 
         # Fork Agent（继承父Agent上下文）
-        for match in re.finditer(r'<fork_agent(?:\s+name=(\S+?))?\s*>(.+?)</fork_agent>', response, re.DOTALL):
+        for match in re.finditer(
+            r"<fork_agent(?:\s+name=(\S+?))?\s*>(.+?)</fork_agent>", response, re.DOTALL
+        ):
             if not self._pending_child_request:  # 只处理第一个
                 agent_name = match.group(1)
                 if agent_name:
@@ -1335,7 +1465,9 @@ class SimpleAgent:
 
         return outputs, commands, command_blocks
 
-    def _parse_tools_with_callbacks(self, response: str) -> tuple[list[str], list["CommandSpec"], list[str]]:
+    def _parse_tools_with_callbacks(
+        self, response: str
+    ) -> tuple[list[str], list["CommandSpec"], list[str]]:
         """解析工具标签并调用回调
 
         Returns:
@@ -1346,37 +1478,59 @@ class SimpleAgent:
         command_blocks = []
 
         # 执行PowerShell命令与内置工具
-        for match in re.finditer(r'<(ps_call|bash_call|builtin)([^>]*)>\s*(.+?)\s*</\1>', response, re.DOTALL | re.IGNORECASE):
+        for match in re.finditer(
+            r"<(ps_call|bash_call|builtin)([^>]*)>\s*(.+?)\s*</\1>",
+            response,
+            re.DOTALL | re.IGNORECASE,
+        ):
             tag_name = match.group(1).lower()
             raw_attrs = match.group(2)
             command = match.group(3).strip()
             attrs = self._parse_tag_attributes(raw_attrs)
-            background = self._parse_bool_attr(attrs.get("background")) if tag_name in {"ps_call", "bash_call"} else False
-            timeout = self._parse_int_attr(attrs.get("timeout")) if tag_name in {"ps_call", "bash_call"} else None
+            background = (
+                self._parse_bool_attr(attrs.get("background"))
+                if tag_name in {"ps_call", "bash_call"}
+                else False
+            )
+            timeout = (
+                self._parse_int_attr(attrs.get("timeout"))
+                if tag_name in {"ps_call", "bash_call"}
+                else None
+            )
             if tag_name in {"ps_call", "bash_call"} and timeout is None:
                 timeout = 10
             if tag_name == "builtin":
                 command = self._normalize_builtin_command(command)
-            command_spec = CommandSpec(command=command, tool=tag_name, background=background, timeout=timeout)
+            command_spec = CommandSpec(
+                command=command, tool=tag_name, background=background, timeout=timeout
+            )
             display_command = command_spec.display()
             self.total_commands_executed += 1  # 解析时分配编号
 
             # 调用回调
             depth_prefix = "+" * self.depth + " " if self.depth > 0 else ""
-            self._output_handler.on_ps_call(display_command, self.total_commands_executed, depth_prefix)
+            self._output_handler.on_ps_call(
+                display_command, self.total_commands_executed, depth_prefix
+            )
 
             # 命令框单独存储，不放入 outputs（兼容 CLI）
-            block = f"\n>> [待执行命令 #{self.total_commands_executed}]\n命令: {display_command}\n{'━'*50}\n\n"
+            block = f"\n>> [待执行命令 #{self.total_commands_executed}]\n命令: {display_command}\n{'━' * 50}\n\n"
             if depth_prefix:
-                lines = block.split('\n')
-                prefixed_lines = [depth_prefix + line if line.strip() else line for line in lines]
-                block = '\n'.join(prefixed_lines)
+                lines = block.split("\n")
+                prefixed_lines = [
+                    depth_prefix + line if line.strip() else line for line in lines
+                ]
+                block = "\n".join(prefixed_lines)
             command_blocks.append(block)
             commands.append(command_spec)
 
         # 创建子Agent（解析 name 属性）
         # 支持格式：<create_agent name=xxx>任务</create_agent> 或 <create_agent>任务</create_agent>
-        for match in re.finditer(r'<create_agent(?:\s+name=(\S+?))?\s*>(.+?)</create_agent>', response, re.DOTALL):
+        for match in re.finditer(
+            r"<create_agent(?:\s+name=(\S+?))?\s*>(.+?)</create_agent>",
+            response,
+            re.DOTALL,
+        ):
             if not self._pending_child_request:  # 只处理第一个
                 agent_name = match.group(1)  # name 属性值（如果有）
                 if agent_name:
@@ -1388,12 +1542,14 @@ class SimpleAgent:
                 self._pending_child_request = ChildTaskRequest(
                     task=task_content,
                     global_count=0,  # 会在 step() 中更新
-                    agent_name=agent_name
+                    agent_name=agent_name,
                 )
                 break
 
         # Fork Agent（继承父Agent上下文）
-        for match in re.finditer(r'<fork_agent(?:\s+name=(\S+?))?\s*>(.+?)</fork_agent>', response, re.DOTALL):
+        for match in re.finditer(
+            r"<fork_agent(?:\s+name=(\S+?))?\s*>(.+?)</fork_agent>", response, re.DOTALL
+        ):
             if not self._pending_child_request:  # 只处理第一个
                 agent_name = match.group(1)
                 if agent_name:
@@ -1411,9 +1567,11 @@ class SimpleAgent:
 
     def _strip_trailing_after_ps_call(self, response: str) -> str:
         """当包含 shell_call 或 builtin 时，去掉最后一个工具标签之后的文本，防止无回执的结果输出"""
-        if not re.search(r'<(ps_call|bash_call|builtin)\b', response, re.IGNORECASE):
+        if not re.search(r"<(ps_call|bash_call|builtin)\b", response, re.IGNORECASE):
             return response
-        matches = list(re.finditer(r'</(ps_call|bash_call|builtin)>', response, re.IGNORECASE))
+        matches = list(
+            re.finditer(r"</(ps_call|bash_call|builtin)>", response, re.IGNORECASE)
+        )
         if not matches:
             return response
         last_end = matches[-1].end()
@@ -1446,10 +1604,17 @@ class Executor:
     维护上下文栈，处理Agent切换逻辑
     """
 
-    def __init__(self, config: Optional[Config] = None, max_depth: int = 4, session_manager: Optional['SessionManager'] = None,
-                 output_handler: Optional[OutputHandler] = None, command_confirm_callback: Optional[Callable[[str], str]] = None,
-                 workspace_dir: Optional[str] = None, runtime_scene: str = "cli",
-                 event_bus: Optional[ExecutionEventBus] = None):
+    def __init__(
+        self,
+        config: Optional[Config] = None,
+        max_depth: int = 4,
+        session_manager: Optional["SessionManager"] = None,
+        output_handler: Optional[OutputHandler] = None,
+        command_confirm_callback: Optional[Callable[[str], str]] = None,
+        workspace_dir: Optional[str] = None,
+        runtime_scene: str = "cli",
+        event_bus: Optional[ExecutionEventBus] = None,
+    ):
         """初始化执行器
 
         Args:
@@ -1470,7 +1635,7 @@ class Executor:
         self.runtime_scene = (runtime_scene or "cli").strip().lower()
 
         # 全局子Agent配额（防止层级间循环）- 累加计数
-        self._global_subagent_total = max_depth ** 2 * 2  # 总配额
+        self._global_subagent_total = max_depth**2 * 2  # 总配额
         self._global_subagent_count = 0  # 已使用的子Agent数量
 
         # 保存最近的 StepResult，供 cli.py 访问
@@ -1480,8 +1645,8 @@ class Executor:
         self._auto_approve_lock = threading.Lock()
         self._auto_approve: bool = False
 
-        # 对话模式：跳过文件快照，所有命令强制手动授权
-        self._chat_mode: bool = False
+        # 对话模式：跳过文件快照，所有命令强制手动授权（默认开启）
+        self._chat_mode: bool = True
         self._saved_auto_approve: bool = False
 
         # 会话管理（用于快照保存）
@@ -1492,7 +1657,9 @@ class Executor:
         base_output_handler = output_handler or NullOutputHandler()
         self.event_bus = event_bus
         if self.event_bus is not None:
-            self._output_handler = EventBusOutputHandler(base_output_handler, self.event_bus)
+            self._output_handler = EventBusOutputHandler(
+                base_output_handler, self.event_bus
+            )
         else:
             self._output_handler = base_output_handler
 
@@ -1602,7 +1769,12 @@ class Executor:
             f"{result.get('context_before')} -> {result.get('context_after')}\n"
         )
 
-    def _create_agent(self, depth: int = 0, global_subagent_count: int = 0, agent_name: Optional[str] = None) -> SimpleAgent:
+    def _create_agent(
+        self,
+        depth: int = 0,
+        global_subagent_count: int = 0,
+        agent_name: Optional[str] = None,
+    ) -> SimpleAgent:
         """创建 Agent 并设置回调
 
         Args:
@@ -1621,7 +1793,7 @@ class Executor:
             agent_name=agent_name,
             workspace_dir=self.workspace_dir,
             runtime_scene=self.runtime_scene,
-            output_handler=self._output_handler  # 传递 output_handler
+            output_handler=self._output_handler,  # 传递 output_handler
         )
         # 设置双回调（前快照 + 后快照）
         if self.session_manager:
@@ -1646,7 +1818,7 @@ class Executor:
             self.session_manager.save_snapshot(
                 executor=self,
                 session_id=session_id,
-                snapshot_index=self._snapshot_index
+                snapshot_index=self._snapshot_index,
             )
             # 注意：不递增索引，留给 after_llm_snapshot_callback
 
@@ -1667,7 +1839,7 @@ class Executor:
             self.session_manager.save_after_snapshot(
                 executor=self,
                 session_id=session_id,
-                snapshot_index=self._snapshot_index
+                snapshot_index=self._snapshot_index,
             )
             # 下一轮递增一次
             self._snapshot_index += 1
@@ -1684,8 +1856,7 @@ class Executor:
         # 创建顶级Agent（如果不存在）
         if not self.current_agent:
             self.current_agent = self._create_agent(
-                depth=0,
-                global_subagent_count=self._global_subagent_count
+                depth=0, global_subagent_count=self._global_subagent_count
             )
             self.current_agent.start(task)
         else:
@@ -1698,7 +1869,9 @@ class Executor:
         self._is_running = True
         yield from self._execute_loop()
 
-    def resume(self, user_input: str) -> Generator[tuple[list[str], StepResult], None, None]:
+    def resume(
+        self, user_input: str
+    ) -> Generator[tuple[list[str], StepResult], None, None]:
         """恢复执行（用户输入后）
 
         Args:
@@ -1726,7 +1899,10 @@ class Executor:
         while self.current_agent and self._is_running:
             auto_notice = self._maybe_auto_compact()
             if auto_notice:
-                yield ([auto_notice], StepResult(outputs=[auto_notice], action=Action.CONTINUE))
+                yield (
+                    [auto_notice],
+                    StepResult(outputs=[auto_notice], action=Action.CONTINUE),
+                )
 
             with self._skip_parse_lock:
                 self._current_step_seq += 1
@@ -1751,13 +1927,15 @@ class Executor:
                 # 如果有预定义 agent，加载内容并注入到第一条消息
                 predefined_content = None
                 if request.agent_name:
-                    predefined_content = parent._load_agent_full_content(request.agent_name)
+                    predefined_content = parent._load_agent_full_content(
+                        request.agent_name
+                    )
 
                 # 创建子 agent，传递 agent_name 用于 forbidden_agents 过滤
                 self.current_agent = self._create_agent(
                     depth=parent.depth + 1,
                     global_subagent_count=request.global_count,
-                    agent_name=request.agent_name or ""
+                    agent_name=request.agent_name or "",
                 )
 
                 # Fork模式：子Agent继承父Agent完整对话历史
@@ -1768,12 +1946,16 @@ class Executor:
                     # 将流程名加入用户任务首行，避免任务跑偏
                     flow_name = None
                     if request.agent_name:
-                        flow_name = self.current_agent._get_agent_flow_name(request.agent_name)
+                        flow_name = self.current_agent._get_agent_flow_name(
+                            request.agent_name
+                        )
                     # 将预定义内容和用户任务组合（不包含 agent 名称，避免自调用）
                     if flow_name:
                         combined_task = f"{predefined_content}\n\n---\n\n用户任务: Use {flow_name}, {request.task}"
                     else:
-                        combined_task = f"{predefined_content}\n\n---\n\n用户任务: {request.task}"
+                        combined_task = (
+                            f"{predefined_content}\n\n---\n\n用户任务: {request.task}"
+                        )
                     self.current_agent.start(combined_task)
                 else:
                     # 如果没有预定义内容，按普通任务处理
@@ -1789,13 +1971,15 @@ class Executor:
                 else:
                     # 根 agent 完成后，保留 current_agent 状态，等待下一个任务
                     final_outputs = [
-                        f"\n{'='*50}\n",
+                        f"\n{'=' * 50}\n",
                         f"[任务完成]\n",
-                        f"{'='*50}\n",
-                        f"{result.data}\n"
+                        f"{'=' * 50}\n",
+                        f"{result.data}\n",
                     ]
                     agent_summary = self.current_agent.get_summary()
-                    final_outputs.append(f"执行命令: {agent_summary['commands']} | 创建子Agent: {agent_summary['sub_agents']}\n\n")
+                    final_outputs.append(
+                        f"执行命令: {agent_summary['commands']} | 创建子Agent: {agent_summary['sub_agents']}\n\n"
+                    )
                     yield (final_outputs, result)
                     self._is_running = False
                     # 不 break，保留 current_agent 供下一个任务使用

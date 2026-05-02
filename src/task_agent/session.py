@@ -1,16 +1,20 @@
-﻿from .agent import Executor, SimpleAgent, Message
-from .config import Config
-from pathlib import Path
+﻿import hashlib
 import json
-from datetime import datetime
-from typing import Optional
 import os
 import shutil
-import hashlib
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+
+from .agent import Executor, Message, SimpleAgent
+from .config import Config
+
 
 class SessionManager:
     def __init__(self):
-        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        project_root = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..")
+        )
         self.session_dir = Path(project_root) / "sessions"
         self.session_dir.mkdir(parents=True, exist_ok=True)
         self.fs_snapshot_root = self.session_dir / "fs_snapshots"
@@ -19,7 +23,6 @@ class SessionManager:
         self._pending_executor: Optional[Executor] = None  # 待切换的 executor
         self.current_snapshot_index: dict[int, int] = {}  # session_id -> snapshot_index
         self._session_workspace: dict[int, Path] = {}
-
 
     def get_snapshot_path(self, session_id: int, snapshot_index: int) -> Path:
         """获取快照文件路径"""
@@ -65,7 +68,7 @@ class SessionManager:
         executor = self._pending_executor
         self._pending_executor = None
         return executor
-    
+
     def get_next_session_id(self) -> int:
         used_ids = set()
         for f in self.session_dir.glob("*.json"):
@@ -85,7 +88,6 @@ class SessionManager:
                 return i
         return 1
 
-
     def _serialize_agent(self, agent: SimpleAgent) -> dict:
         return {
             "agent_id": agent.agent_id,
@@ -100,10 +102,12 @@ class SessionManager:
                     "think": msg.think,
                 }
                 for msg in agent.history
-            ]
+            ],
         }
 
-    def save_snapshot(self, executor: Executor, session_id: int, snapshot_index: int) -> bool:
+    def save_snapshot(
+        self, executor: Executor, session_id: int, snapshot_index: int
+    ) -> bool:
         """保存会话快照
 
         Args:
@@ -141,7 +145,8 @@ class SessionManager:
                 "global_subagent_count": executor._global_subagent_count,
                 "context_stack": stack_data,
                 "current_agent": current_data,
-                "auto_approve": getattr(executor, 'auto_approve', False),
+                "auto_approve": getattr(executor, "auto_approve", False),
+                "chat_mode": executor.chat_mode,
                 "runtime_scene": getattr(executor, "runtime_scene", "cli"),
                 "workspace_root": str(self._get_workspace_root(session_id)),
                 "fs_snapshot_status": fs_snapshot_status,
@@ -155,7 +160,9 @@ class SessionManager:
             print(f"[error]保存快照失败: {e}[/error]")
             return False
 
-    def save_after_snapshot(self, executor: Executor, session_id: int, snapshot_index: int) -> bool:
+    def save_after_snapshot(
+        self, executor: Executor, session_id: int, snapshot_index: int
+    ) -> bool:
         """保存调用后快照（仅用于调试，不保存文件快照）"""
         try:
             snapshot_path = self.get_after_snapshot_path(session_id, snapshot_index)
@@ -173,7 +180,8 @@ class SessionManager:
                 "global_subagent_count": executor._global_subagent_count,
                 "context_stack": stack_data,
                 "current_agent": current_data,
-                "auto_approve": getattr(executor, 'auto_approve', False),
+                "auto_approve": getattr(executor, "auto_approve", False),
+                "chat_mode": executor.chat_mode,
                 "runtime_scene": getattr(executor, "runtime_scene", "cli"),
                 "workspace_root": str(self._get_workspace_root(session_id)),
             }
@@ -186,16 +194,21 @@ class SessionManager:
             print(f"[error]保存调用后快照失败: {e}[/error]")
             return False
 
-    def _deserialize_agent(self, agent_data: dict, config: Config, global_count: int,
-                           runtime_scene: str = "cli",
-                           output_handler: Optional['OutputHandler'] = None) -> SimpleAgent:
+    def _deserialize_agent(
+        self,
+        agent_data: dict,
+        config: Config,
+        global_count: int,
+        runtime_scene: str = "cli",
+        output_handler: Optional["OutputHandler"] = None,
+    ) -> SimpleAgent:
         agent = SimpleAgent(
             config=config,
             depth=agent_data["depth"],
             global_subagent_count=global_count,
             runtime_scene=agent_data.get("runtime_scene", runtime_scene),
             output_handler=output_handler,
-            init_system_prompt=False
+            init_system_prompt=False,
         )
         agent.agent_id = agent_data["agent_id"]
         agent.last_think = agent_data.get("last_think", "")
@@ -204,14 +217,18 @@ class SessionManager:
                 role=msg_data["role"],
                 content=msg_data["content"],
                 timestamp=msg_data.get("timestamp", 0.0),
-                think=msg_data.get("think", "")
+                think=msg_data.get("think", ""),
             )
             agent.history.append(msg)
         return agent
 
-
-    def load_session(self, session_id: int, config: Config, runtime_scene: str = "cli",
-                     output_handler: Optional['OutputHandler'] = None) -> Optional[Executor]:
+    def load_session(
+        self,
+        session_id: int,
+        config: Config,
+        runtime_scene: str = "cli",
+        output_handler: Optional["OutputHandler"] = None,
+    ) -> Optional[Executor]:
         try:
             # 查找该会话的最大快照索引
             max_index = self._get_max_snapshot_index(session_id)
@@ -224,7 +241,9 @@ class SessionManager:
                 data = json.load(f)
             workspace_root = data.get("workspace_root")
             if workspace_root and not self._ensure_workspace_match(workspace_root):
-                print(f"[error]当前目录与会话工作目录不一致，禁止恢复: {workspace_root}[/error]")
+                print(
+                    f"[error]当前目录与会话工作目录不一致，禁止恢复: {workspace_root}[/error]"
+                )
                 return None
             snapshot_scene = data.get("runtime_scene", runtime_scene)
             executor = Executor(
@@ -236,7 +255,10 @@ class SessionManager:
             )
             executor._global_subagent_count = data.get("global_subagent_count", 0)
             executor.auto_approve = data.get("auto_approve", False)
-            executor._snapshot_index = data.get("snapshot_index", max_index) + 1  # 下一个快照索引
+            executor._chat_mode = data.get("chat_mode", True)
+            executor._snapshot_index = (
+                data.get("snapshot_index", max_index) + 1
+            )  # 下一个快照索引
             executor.context_stack = []
             for agent_data in data.get("context_stack", []):
                 agent = self._deserialize_agent(
@@ -244,7 +266,7 @@ class SessionManager:
                     config,
                     executor._global_subagent_count,
                     runtime_scene=executor.runtime_scene,
-                    output_handler=output_handler
+                    output_handler=output_handler,
                 )
                 # 恢复双回调
                 agent.set_before_llm_callback(executor._before_llm_snapshot_callback)
@@ -256,20 +278,27 @@ class SessionManager:
                     config,
                     executor._global_subagent_count,
                     runtime_scene=executor.runtime_scene,
-                    output_handler=output_handler
+                    output_handler=output_handler,
                 )
                 # 恢复双回调
-                executor.current_agent.set_before_llm_callback(executor._before_llm_snapshot_callback)
-                executor.current_agent.set_after_llm_callback(executor._after_llm_snapshot_callback)
+                executor.current_agent.set_before_llm_callback(
+                    executor._before_llm_snapshot_callback
+                )
+                executor.current_agent.set_after_llm_callback(
+                    executor._after_llm_snapshot_callback
+                )
             self.current_session_id = session_id
-            self.current_snapshot_index[session_id] = data.get("snapshot_index", max_index)
+            self.current_snapshot_index[session_id] = data.get(
+                "snapshot_index", max_index
+            )
             if workspace_root:
-                self._session_workspace[session_id] = self._normalize_path(workspace_root)
+                self._session_workspace[session_id] = self._normalize_path(
+                    workspace_root
+                )
             return executor
         except Exception as e:
             print(f"[error]加载会话失败: {e}[/error]")
             return None
-
 
     def list_sessions(self) -> list:
         """列出所有会话（每个会话只显示最新快照）"""
@@ -284,8 +313,14 @@ class SessionManager:
                     session_id = int(parts[0])
                     snapshot_index = int(parts[1])
                     # 只保留最大索引
-                    if session_id not in session_latest_snapshots or snapshot_index > session_latest_snapshots[session_id][1]:
-                        session_latest_snapshots[session_id] = (session_file, snapshot_index)
+                    if (
+                        session_id not in session_latest_snapshots
+                        or snapshot_index > session_latest_snapshots[session_id][1]
+                    ):
+                        session_latest_snapshots[session_id] = (
+                            session_file,
+                            snapshot_index,
+                        )
                 else:
                     # 旧格式: session_id.json（兼容）
                     session_id = int(parts[0])
@@ -296,7 +331,10 @@ class SessionManager:
 
         # 读取最新快照并构建会话列表
         sessions = []
-        for session_id, (snapshot_file, snapshot_index) in session_latest_snapshots.items():
+        for session_id, (
+            snapshot_file,
+            snapshot_index,
+        ) in session_latest_snapshots.items():
             try:
                 with open(snapshot_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
@@ -340,8 +378,9 @@ class SessionManager:
         sessions.sort(key=lambda x: x["session_id"])
         return sessions
 
-
-    def create_new_session(self, executor: Executor, save_old: bool = True, temp: bool = False) -> tuple[int, Executor]:
+    def create_new_session(
+        self, executor: Executor, save_old: bool = True, temp: bool = False
+    ) -> tuple[int, Executor]:
         """创建新会话
 
         Args:
@@ -401,18 +440,24 @@ class SessionManager:
             if history:
                 last_message = history[-1].get("content", "").replace("\n", " ").strip()
 
-            snapshots.append({
-                "session_id": session_id,
-                "snapshot_index": snapshot_index,
-                "created_at": data.get("created_at", "Unknown"),
-                "last_message": last_message,
-            })
+            snapshots.append(
+                {
+                    "session_id": session_id,
+                    "snapshot_index": snapshot_index,
+                    "created_at": data.get("created_at", "Unknown"),
+                    "last_message": last_message,
+                }
+            )
 
         snapshots.sort(key=lambda x: x["snapshot_index"])
         return snapshots
 
-    def rollback_to_snapshot(self, session_id: int, snapshot_index: int,
-                             confirm_callback: Optional[callable] = None) -> bool:
+    def rollback_to_snapshot(
+        self,
+        session_id: int,
+        snapshot_index: int,
+        confirm_callback: Optional[callable] = None,
+    ) -> bool:
         """回滚到会话的指定快照点（需要确认）"""
         if confirm_callback is None:
             print("[warning]回滚需要确认回调，请在调用方提供确认逻辑[/warning]")
@@ -435,7 +480,9 @@ class SessionManager:
 
         workspace_root = snapshot_data.get("workspace_root")
         if workspace_root and not self._ensure_workspace_match(workspace_root):
-            print(f"[error]当前目录与会话工作目录不一致，禁止回滚: {workspace_root}[/error]")
+            print(
+                f"[error]当前目录与会话工作目录不一致，禁止回滚: {workspace_root}[/error]"
+            )
             return False
 
         baseline_dir = self._get_baseline_dir(session_id)
@@ -449,11 +496,17 @@ class SessionManager:
 
         workspace_root = self._get_workspace_root(session_id)
         try:
-            self._clear_workspace(workspace_root, exclude_roots=[self.session_dir, self.fs_snapshot_root])
+            self._clear_workspace(
+                workspace_root, exclude_roots=[self.session_dir, self.fs_snapshot_root]
+            )
             # baseline 目录位于 sessions 下，_copy_workspace 会排除 session_dir，
             # 这里改用 _apply_snapshot_dir 以确保 baseline 能正确恢复到工作区
-            latest_index, latest_dir = self._get_latest_saved_snapshot_dir(session_id, snapshot_index)
-            print(f"回滚信息：工作目录={workspace_root} | baseline={baseline_dir} | 快照目录={latest_dir or '无'}")
+            latest_index, latest_dir = self._get_latest_saved_snapshot_dir(
+                session_id, snapshot_index
+            )
+            print(
+                f"回滚信息：工作目录={workspace_root} | baseline={baseline_dir} | 快照目录={latest_dir or '无'}"
+            )
             self._apply_snapshot_dir(baseline_dir, workspace_root)
             if latest_dir is not None:
                 self._apply_snapshot_dir(latest_dir, workspace_root)
@@ -471,7 +524,9 @@ class SessionManager:
                 if len(parts) < 2:
                     continue
                 index = int(parts[1])
-                if index > snapshot_index or (index == snapshot_index and "after" in parts[2:]):
+                if index > snapshot_index or (
+                    index == snapshot_index and "after" in parts[2:]
+                ):
                     snapshot_files_to_delete.append(snapshot_file)
             except (ValueError, OSError):
                 continue
@@ -492,13 +547,21 @@ class SessionManager:
             print(f"回滚清理：将清理快照索引 > {snapshot_index} 的记录")
             if snapshot_files_to_delete:
                 snapshot_files_to_delete.sort(
-                    key=lambda p: int(p.name.split(".")[1]) if len(p.name.split(".")) >= 3 else 0
+                    key=lambda p: int(p.name.split(".")[1])
+                    if len(p.name.split(".")) >= 3
+                    else 0
                 )
-                min_snapshot = snapshot_files_to_delete[0].name if snapshot_files_to_delete else ""
-                min_snapshot_index = int(min_snapshot.split(".")[1]) if min_snapshot else None
+                min_snapshot = (
+                    snapshot_files_to_delete[0].name if snapshot_files_to_delete else ""
+                )
+                min_snapshot_index = (
+                    int(min_snapshot.split(".")[1]) if min_snapshot else None
+                )
                 print(f"  会话快照文件（将删除）：{len(snapshot_files_to_delete)}")
                 if min_snapshot:
-                    print(f"    - 最小索引={min_snapshot_index}（文件名={min_snapshot}）")
+                    print(
+                        f"    - 最小索引={min_snapshot_index}（文件名={min_snapshot}）"
+                    )
                 for path in snapshot_files_to_delete[:3]:
                     print(f"    - {path.name}")
                 if len(snapshot_files_to_delete) > 3:
@@ -507,8 +570,12 @@ class SessionManager:
                 fs_snapshots_to_delete.sort(
                     key=lambda p: int(p.name.split("_", 1)[1]) if "_" in p.name else 0
                 )
-                min_fs_snapshot = fs_snapshots_to_delete[0].name if fs_snapshots_to_delete else ""
-                min_fs_index = int(min_fs_snapshot.split("_", 1)[1]) if min_fs_snapshot else None
+                min_fs_snapshot = (
+                    fs_snapshots_to_delete[0].name if fs_snapshots_to_delete else ""
+                )
+                min_fs_index = (
+                    int(min_fs_snapshot.split("_", 1)[1]) if min_fs_snapshot else None
+                )
                 print(f"  文件系统快照目录（将删除）：{len(fs_snapshots_to_delete)}")
                 if min_fs_snapshot:
                     print(f"    - 最小索引={min_fs_index}（目录名={min_fs_snapshot}）")
@@ -555,7 +622,7 @@ class SessionManager:
         name = rel_path.name
         if not name.endswith(suffix):
             return rel_path
-        stripped = name[:-len(suffix)]
+        stripped = name[: -len(suffix)]
         return rel_path.with_name(stripped)
 
     def _apply_snapshot_dir(self, snapshot_dir: Path, workspace_root: Path) -> None:
@@ -615,15 +682,36 @@ class SessionManager:
 
     def _is_reserved_device_name(self, name: str) -> bool:
         reserved = {
-            "con", "prn", "aux", "nul",
-            "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9",
-            "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+            "con",
+            "prn",
+            "aux",
+            "nul",
+            "com1",
+            "com2",
+            "com3",
+            "com4",
+            "com5",
+            "com6",
+            "com7",
+            "com8",
+            "com9",
+            "lpt1",
+            "lpt2",
+            "lpt3",
+            "lpt4",
+            "lpt5",
+            "lpt6",
+            "lpt7",
+            "lpt8",
+            "lpt9",
         }
         normalized = name.rstrip(" .")
         base = normalized.split(".")[0] if normalized else ""
         return base.lower() in reserved
 
-    def _iter_files(self, root: Path, exclude_roots: Optional[list[Path]] = None) -> list[tuple[Path, Path]]:
+    def _iter_files(
+        self, root: Path, exclude_roots: Optional[list[Path]] = None
+    ) -> list[tuple[Path, Path]]:
         exclude_roots = exclude_roots or []
         results: list[tuple[Path, Path]] = []
         for dirpath, dirnames, filenames in os.walk(root):
@@ -702,11 +790,15 @@ class SessionManager:
             curr_stat = current_path.stat()
         except OSError:
             return False
-        if base_stat.st_size == curr_stat.st_size and int(base_stat.st_mtime) == int(curr_stat.st_mtime):
+        if base_stat.st_size == curr_stat.st_size and int(base_stat.st_mtime) == int(
+            curr_stat.st_mtime
+        ):
             return True
         return self._file_hash(baseline_path) == self._file_hash(current_path)
 
-    def _save_filesystem_snapshot(self, session_id: int, snapshot_index: int) -> tuple[bool, str]:
+    def _save_filesystem_snapshot(
+        self, session_id: int, snapshot_index: int
+    ) -> tuple[bool, str]:
         baseline_dir = self._ensure_baseline(session_id)
         if not baseline_dir:
             return False, "failed"
@@ -717,13 +809,18 @@ class SessionManager:
             rel: abs_path for abs_path, rel in self._iter_files(baseline_dir)
         }
         current_files = {
-            rel: abs_path for abs_path, rel in self._iter_files(workspace_root, exclude_roots=[self.session_dir, self.fs_snapshot_root])
+            rel: abs_path
+            for abs_path, rel in self._iter_files(
+                workspace_root, exclude_roots=[self.session_dir, self.fs_snapshot_root]
+            )
         }
 
         changed_files: list[tuple[Path, Path]] = []
         for rel_path, current_path in current_files.items():
             baseline_path = baseline_files.get(rel_path)
-            if baseline_path is None or not self._files_are_equal(baseline_path, current_path):
+            if baseline_path is None or not self._files_are_equal(
+                baseline_path, current_path
+            ):
                 changed_files.append((rel_path, current_path))
 
         deleted_files: list[Path] = []
@@ -731,8 +828,12 @@ class SessionManager:
             if rel_path not in current_files:
                 deleted_files.append(rel_path)
 
-        current_signature = self._build_snapshot_signature_from_changes(changed_files, deleted_files)
-        prev_signature = self._get_previous_snapshot_signature(session_id, snapshot_index)
+        current_signature = self._build_snapshot_signature_from_changes(
+            changed_files, deleted_files
+        )
+        prev_signature = self._get_previous_snapshot_signature(
+            session_id, snapshot_index
+        )
         if prev_signature is not None and current_signature == prev_signature:
             return True, "skipped"
         if prev_signature is None and not current_signature:
@@ -756,7 +857,9 @@ class SessionManager:
 
         return True, "saved"
 
-    def _get_latest_saved_snapshot_dir(self, session_id: int, snapshot_index: int) -> tuple[Optional[int], Optional[Path]]:
+    def _get_latest_saved_snapshot_dir(
+        self, session_id: int, snapshot_index: int
+    ) -> tuple[Optional[int], Optional[Path]]:
         snapshots_root = self._get_snapshots_root(session_id)
         latest_index = None
         latest_dir = None
@@ -793,10 +896,14 @@ class SessionManager:
                 signature[str(rel_path)] = self._file_hash(abs_path)
         return signature
 
-    def _get_previous_snapshot_signature(self, session_id: int, snapshot_index: int) -> Optional[dict[str, str]]:
+    def _get_previous_snapshot_signature(
+        self, session_id: int, snapshot_index: int
+    ) -> Optional[dict[str, str]]:
         if snapshot_index <= 0:
             return None
-        prev_index, prev_dir = self._get_latest_saved_snapshot_dir(session_id, snapshot_index - 1)
+        prev_index, prev_dir = self._get_latest_saved_snapshot_dir(
+            session_id, snapshot_index - 1
+        )
         if prev_dir is None:
             return None
         return self._build_snapshot_signature_from_dir(prev_dir)

@@ -1,20 +1,19 @@
 ﻿"""极简命令行接口模块"""
 
 import argparse
+import atexit
 import json
 import os
 import re
-import sys
-import time
-import atexit
-import uuid
 import shlex
-import threading
 import subprocess
+import sys
 import tempfile
+import threading
+import time
+import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from datetime import datetime, timezone, timedelta
-
 from typing import Optional
 
 from rich.console import Console
@@ -23,18 +22,7 @@ from rich.panel import Panel
 from rich.text import Text
 from rich.theme import Theme
 
-from .agent import Executor, CommandSpec
-from .command_approval_flow import CommandApprovalFlow
-from .command_runtime import (
-    format_shell_result as runtime_format_shell_result,
-    normalize_command_spec,
-)
-from .config import Config
-from .llm import create_client, ChatMessage
-from .output_handler import NullOutputHandler
-from .session import SessionManager
-from .platform_utils import is_windows
-from .hint_utils import select_hint_file
+from .agent import CommandSpec, Executor
 from .builtin_schema import (
     BuiltinParseError,
     normalize_builtin_args_with_schema,
@@ -42,6 +30,19 @@ from .builtin_schema import (
     parse_builtin_simple_kv_args,
     resolve_path_against_workspace,
 )
+from .command_approval_flow import CommandApprovalFlow
+from .command_runtime import (
+    format_shell_result as runtime_format_shell_result,
+)
+from .command_runtime import (
+    normalize_command_spec,
+)
+from .config import Config
+from .hint_utils import select_hint_file
+from .llm import ChatMessage, create_client
+from .output_handler import NullOutputHandler
+from .platform_utils import is_windows
+from .session import SessionManager
 from .webhook.calendar_service import create_feishu_calendar_event
 
 # 自定义主题
@@ -122,7 +123,7 @@ def _resolve_file_references(text: str) -> tuple[str, list[str]]:
     """
     errors = []
     # 匹配 @filename 格式（@ 后跟非空白字符）
-    pattern = r'@(\S+)'
+    pattern = r"@(\S+)"
 
     def replace_match(match):
         file_path = match.group(1)
@@ -133,7 +134,7 @@ def _resolve_file_references(text: str) -> tuple[str, list[str]]:
             errors.append(f"[warning]路径是目录而非文件: @{file_path}[/warning]")
             return match.group(0)  # 保留原 @path
         try:
-            with open(file_path, 'r', encoding='utf-8') as f:
+            with open(file_path, "r", encoding="utf-8") as f:
                 content = f.read()
             # 只返回文件内容，不包含文件名
             return content
@@ -203,7 +204,9 @@ def _open_external_editor(initial_text: str) -> Optional[str]:
     editor_cmd = _get_editor_command()
     tmp_file = None
     try:
-        tmp_file = tempfile.NamedTemporaryFile(mode="w", delete=False, encoding="utf-8", suffix=".txt")
+        tmp_file = tempfile.NamedTemporaryFile(
+            mode="w", delete=False, encoding="utf-8", suffix=".txt"
+        )
         tmp_file.write(initial_text or "")
         tmp_file.flush()
         tmp_file.close()
@@ -282,6 +285,7 @@ def _cleanup_background_jobs() -> None:
 
 atexit.register(_cleanup_background_jobs)
 
+
 def _load_template_text(filename: str) -> str:
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     template_path = os.path.join(project_root, "templates", filename)
@@ -338,7 +342,9 @@ def _get_cli_approval_flow() -> CommandApprovalFlow:
 
 
 def _contains_shell_result_tag(content: str) -> bool:
-    return bool(re.search(r"<(ps_call_result|bash_call_result)\b", content, re.IGNORECASE))
+    return bool(
+        re.search(r"<(ps_call_result|bash_call_result)\b", content, re.IGNORECASE)
+    )
 
 
 def _extract_direct_shell_call(text: str) -> Optional[str]:
@@ -357,12 +363,16 @@ def _execute_direct_shell_call(command: str, console: Console, timeout: int) -> 
         else:
             result_msg = "命令执行成功（无输出）"
     else:
-        result_msg = f"命令执行失败（退出码: {cmd_result.returncode}）：\n{cmd_result.stderr}"
+        result_msg = (
+            f"命令执行失败（退出码: {cmd_result.returncode}）：\n{cmd_result.stderr}"
+        )
     _update_smart_edit_stats(command, "executed", result_msg)
     console.print(f"[info]{result_msg}[/info]\n")
 
 
-def _handle_compact_command(executor: Executor, console: Console, reason: str = "手动压缩") -> None:
+def _handle_compact_command(
+    executor: Executor, console: Console, reason: str = "手动压缩"
+) -> None:
     if not executor.current_agent:
         console.print("[warning]暂无可压缩的会话[/warning]\n")
         return
@@ -410,34 +420,59 @@ def parse_args():
 
     parser.add_argument("task", nargs="?", help="要执行的任务描述")
 
-    parser.add_argument("--model", "-m", default="minimax-m2",
-                        help="模型名称（默认：minimax-m2）")
+    parser.add_argument(
+        "--model", "-m", default="minimax-m2", help="模型名称（默认：minimax-m2）"
+    )
 
-    parser.add_argument("--timeout", "-t", type=int, default=300,
-                        help="超时时间（秒，默认：300）")
+    parser.add_argument(
+        "--timeout", "-t", type=int, default=300, help="超时时间（秒，默认：300）"
+    )
 
-    parser.add_argument("--host", "-H", default="http://localhost:11434",
-                        help="Ollama地址（默认：http://localhost:11434）")
+    parser.add_argument(
+        "--host",
+        "-H",
+        default="http://localhost:11434",
+        help="Ollama地址（默认：http://localhost:11434）",
+    )
 
-    parser.add_argument("--api-type", "-a", default="openai",
-                        choices=["ollama", "openai"],
-                        help="API类型：ollama 或 openai（默认：openai）")
+    parser.add_argument(
+        "--api-type",
+        "-a",
+        default="openai",
+        choices=["ollama", "openai"],
+        help="API类型：ollama 或 openai（默认：openai）",
+    )
 
-    parser.add_argument("--base-url", "-b", default="http://localhost:3000/v1",
-                        help="OpenAI Base URL（默认：http://localhost:3000/v1）")
+    parser.add_argument(
+        "--base-url",
+        "-b",
+        default="http://localhost:3000/v1",
+        help="OpenAI Base URL（默认：http://localhost:3000/v1）",
+    )
 
-    parser.add_argument("--api-key", "-k", default="sk-1qTPR2NfODm9Y8YwQTXtGVONXF0g2bxWWreaZaMvPK4ErKOV",
-                        help="OpenAI API Key")
+    parser.add_argument(
+        "--api-key",
+        "-k",
+        default="sk-1qTPR2NfODm9Y8YwQTXtGVONXF0g2bxWWreaZaMvPK4ErKOV",
+        help="OpenAI API Key",
+    )
 
-    parser.add_argument("--max-tokens", "-M", type=int, default=None,
-                        help="最大输出token数（默认：Ollama=4096, OpenAI=8192）")
+    parser.add_argument(
+        "--max-tokens",
+        "-M",
+        type=int,
+        default=None,
+        help="最大输出token数（默认：Ollama=4096, OpenAI=8192）",
+    )
 
-    parser.add_argument("--num-ctx", type=int, default=None,
-                        help="上下文窗口大小（Ollama num_ctx，默认 4096）")
+    parser.add_argument(
+        "--num-ctx",
+        type=int,
+        default=None,
+        help="上下文窗口大小（Ollama num_ctx，默认 4096）",
+    )
 
-
-    parser.add_argument("--verbose", "-v", action="store_true",
-                        help="显示详细日志")
+    parser.add_argument("--verbose", "-v", action="store_true", help="显示详细日志")
 
     return parser.parse_args()
 
@@ -456,7 +491,7 @@ def print_welcome():
     console.print(
         Panel(
             Text(
-                "极简任务执行 Agent\n\n统一逻辑：创建子Agent → 聚合结果 → 继续/结束\n深度优先执行，自动聚合结果\n最大4层深度（最多16个子Agent）\n输入 /chat 进入对话模式，/exit 退出",
+                "极简任务执行 Agent\n\n统一逻辑：创建子Agent → 聚合结果 → 继续/结束\n深度优先执行，自动聚合结果\n最大4层深度（最多16个子Agent）\n默认对话模式（/chat 可切换），/exit 退出",
                 justify="center",
                 style="bold cyan",
             ),
@@ -479,7 +514,7 @@ def print_help():
     - <任务描述>   - 执行任务（使用当前会话上下文）
     - : <命令>     - 直接执行命令（不发给模型，不写入历史）
     - /new        - 创建新会话（自动保存当前会话）
-    - /chat       - 切换对话模式（跳过文件快照，命令强制手动授权）
+    - /chat       - 切换对话模式（默认开启，跳过文件快照，命令强制手动授权）
     - /list       - 列出所有保存的会话
     - /list-snapshot <id> - 列出指定会话的快照点
     - /resume <id>- 恢复指定ID的会话
@@ -607,19 +642,29 @@ def main():
             if pending:
                 executor = pending
                 if session_manager.current_session_id:
-                    console.print(f"\n[dim]已切换到会话: {session_manager.current_session_id}[/dim]\n")
+                    console.print(
+                        f"\n[dim]已切换到会话: {session_manager.current_session_id}[/dim]\n"
+                    )
                 else:
                     console.print(f"\n[dim]当前会话：临时（未保存）[/dim]\n")
 
             # 显示当前会话状态
-            auto_status = " | [success]自动同意: 启[/success]" if executor.auto_approve else ""
-            chat_status = " | [bold magenta]Chat[/bold magenta]" if executor.chat_mode else ""
+            auto_status = (
+                " | [success]自动同意: 启[/success]" if executor.auto_approve else ""
+            )
+            chat_status = (
+                " | [bold magenta]Chat[/bold magenta]" if executor.chat_mode else ""
+            )
             hint_status = f" | 当前 hint: {_ACTIVE_HINT}" if _ACTIVE_HINT else ""
             if not paste_mode:
                 if session_manager.current_session_id:
-                    console.print(f"[dim]当前会话 #{session_manager.current_session_id} | 输入任务继续，/edit 外部编辑器，/new 新建，/chat 对话模式，/list 列表，/auto 切换自动同意，/exit 退出{auto_status}{chat_status}{hint_status}[/dim]")
+                    console.print(
+                        f"[dim]当前会话 #{session_manager.current_session_id} | 输入任务继续，/edit 外部编辑器，/new 新建，/chat 对话模式，/list 列表，/auto 切换自动同意，/exit 退出{auto_status}{chat_status}{hint_status}[/dim]"
+                    )
                 else:
-                    console.print(f"[dim]临时会话 | 输入任务创建会话，/edit 外部编辑器，/chat 对话模式，/list 列表，/auto 切换自动同意，/exit 退出{auto_status}{chat_status}{hint_status}[/dim]")
+                    console.print(
+                        f"[dim]临时会话 | 输入任务创建会话，/edit 外部编辑器，/chat 对话模式，/list 列表，/auto 切换自动同意，/exit 退出{auto_status}{chat_status}{hint_status}[/dim]"
+                    )
             elif not paste_prompt_shown:
                 paste_prompt_shown = True
 
@@ -688,17 +733,23 @@ def main():
                     if not sessions:
                         console.print("[dim]  （暂无保存的会话）[/dim]\n")
                     for s in sessions:
-                        msg_preview = s.get('first_message', '')
+                        msg_preview = s.get("first_message", "")
                         if msg_preview:
-                            console.print(f"  会话 {s['session_id']} | {s['created_at'][:19]} | 消息数: {s['message_count']} | 深度: {s['depth']} | [dim]{msg_preview}[/dim]")
+                            console.print(
+                                f"  会话 {s['session_id']} | {s['created_at'][:19]} | 消息数: {s['message_count']} | 深度: {s['depth']} | [dim]{msg_preview}[/dim]"
+                            )
                         else:
-                            console.print(f"  会话 {s['session_id']} | {s['created_at'][:19]} | 消息数: {s['message_count']} | 深度: {s['depth']}")
+                            console.print(
+                                f"  会话 {s['session_id']} | {s['created_at'][:19]} | 消息数: {s['message_count']} | 深度: {s['depth']}"
+                            )
                     console.print("")
                     continue
                 if task.lower().startswith("/list-snapshot"):
                     parts = task.split()
                     if len(parts) != 2:
-                        console.print("\n[error]用法: /list-snapshot <session_id>[/error]\n")
+                        console.print(
+                            "\n[error]用法: /list-snapshot <session_id>[/error]\n"
+                        )
                         continue
                     try:
                         session_id = int(parts[1])
@@ -715,8 +766,12 @@ def main():
                         preview = s.get("last_message", "")
                         if preview:
                             preview = preview.replace("\n", " ").strip()
-                            preview = preview[:50] + ("..." if len(preview) > 50 else "")
-                        console.print(f"  会话 {s['session_id']} | 快照 {s['snapshot_index']} | {s['created_at'][:19]} | [dim]{preview}[/dim]")
+                            preview = preview[:50] + (
+                                "..." if len(preview) > 50 else ""
+                            )
+                        console.print(
+                            f"  会话 {s['session_id']} | 快照 {s['snapshot_index']} | {s['created_at'][:19]} | [dim]{preview}[/dim]"
+                        )
                     console.print("")
                     continue
 
@@ -730,13 +785,22 @@ def main():
                 if len(parts) == 2 and parts[0].lower() == "/resume":
                     try:
                         session_id = int(parts[1])
-                        new_executor = session_manager.load_session(session_id, config, runtime_scene="cli")
+                        new_executor = session_manager.load_session(
+                            session_id, config, runtime_scene="cli"
+                        )
                         if new_executor:
                             executor = new_executor
-                            console.print(f"\n[success]会话已恢复: {session_id}[/success]\n")
+                            console.print(
+                                f"\n[success]会话已恢复: {session_id}[/success]\n"
+                            )
 
-                            if executor.current_agent and executor.current_agent.history:
-                                console.print("[dim]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[/dim]")
+                            if (
+                                executor.current_agent
+                                and executor.current_agent.history
+                            ):
+                                console.print(
+                                    "[dim]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[/dim]"
+                                )
                                 console.print("[bold cyan]历史上下文：[/bold cyan]\n")
 
                                 history = executor.current_agent.history
@@ -747,31 +811,49 @@ def main():
                                     content = msg.content.strip()
 
                                     if role == "system":
-                                        if content.startswith("你是一个任务执行agent") or content.startswith("会话ID:"):
+                                        if content.startswith(
+                                            "你是一个任务执行agent"
+                                        ) or content.startswith("会话ID:"):
                                             continue
 
-                                    is_last = (i == total - 1)
+                                    is_last = i == total - 1
 
                                     if role == "user":
                                         if is_last:
-                                            console.print(f"[dim]{i+1}. [/dim][user]用户:[/user]")
+                                            console.print(
+                                                f"[dim]{i + 1}. [/dim][user]用户:[/user]"
+                                            )
                                             console.print(f"{content}\n")
                                         else:
-                                            console.print(f"[dim]{i+1}. [/dim][user]用户:[/user] {content[:100]}{'...' if len(content) > 100 else ''}")
+                                            console.print(
+                                                f"[dim]{i + 1}. [/dim][user]用户:[/user] {content[:100]}{'...' if len(content) > 100 else ''}"
+                                            )
                                     elif role == "assistant":
                                         if is_last:
-                                            console.print(f"[dim]{i+1}. [/dim][assistant]助手:[/assistant]")
+                                            console.print(
+                                                f"[dim]{i + 1}. [/dim][assistant]助手:[/assistant]"
+                                            )
                                             console.print(f"{content}\n")
                                         else:
-                                            preview = content[:50].replace('\n', ' ')
-                                            console.print(f"[dim]{i+1}. [/dim][assistant]助手:[/assistant] [dim]{preview}...[/dim]")
+                                            preview = content[:50].replace("\n", " ")
+                                            console.print(
+                                                f"[dim]{i + 1}. [/dim][assistant]助手:[/assistant] [dim]{preview}...[/dim]"
+                                            )
                                     elif role == "tool":
-                                        console.print(f"[dim]{i+1}. [/dim][info]工具: {content[:80]}...[/info]")
+                                        console.print(
+                                            f"[dim]{i + 1}. [/dim][info]工具: {content[:80]}...[/info]"
+                                        )
                                     elif role == "system":
-                                        console.print(f"[dim]{i+1}. [/dim][dim]系统: {content}[/dim]")
+                                        console.print(
+                                            f"[dim]{i + 1}. [/dim][dim]系统: {content}[/dim]"
+                                        )
 
-                                console.print("[dim]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[/dim]\n")
-                                console.print(f"[info]已加载 {total} 条历史消息[/info]\n")
+                                console.print(
+                                    "[dim]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[/dim]\n"
+                                )
+                                console.print(
+                                    f"[info]已加载 {total} 条历史消息[/info]\n"
+                                )
                         else:
                             console.print("\n[error]恢复失败[/error]\n")
                     except ValueError:
@@ -781,14 +863,20 @@ def main():
                 if task.lower() == "/chat":
                     if executor.chat_mode:
                         executor.leave_chat_mode()
-                        console.print("\n[success]已退出对话模式，恢复文件快照[/success]\n")
+                        console.print(
+                            "\n[success]已退出对话模式，恢复文件快照[/success]\n"
+                        )
                     else:
                         executor.enter_chat_mode()
-                        console.print("\n[success]已进入对话模式：跳过文件快照，命令强制手动授权[/success]\n")
+                        console.print(
+                            "\n[success]已进入对话模式：跳过文件快照，命令强制手动授权[/success]\n"
+                        )
                     continue
                 if task.lower() == "/auto":
                     if executor.chat_mode:
-                        console.print("\n[warning]对话模式下不支持自动同意，请先 /chat 退出对话模式[/warning]\n")
+                        console.print(
+                            "\n[warning]对话模式下不支持自动同意，请先 /chat 退出对话模式[/warning]\n"
+                        )
                         continue
                     executor.auto_approve = not executor.auto_approve
                     status = "启用" if executor.auto_approve else "禁用"
@@ -801,7 +889,9 @@ def main():
                 if task.lower().startswith("/rollback"):
                     parts = task.split()
                     if len(parts) != 3:
-                        console.print("\n[error]用法: /rollback <session_id> <snapshot_index>[/error]\n")
+                        console.print(
+                            "\n[error]用法: /rollback <session_id> <snapshot_index>[/error]\n"
+                        )
                         continue
                     try:
                         session_id = int(parts[1])
@@ -812,26 +902,34 @@ def main():
 
                     def confirm(prompt: str) -> bool:
                         _clear_input_buffer()
-                        answer = console.input(f"[bold yellow]{prompt} [y/N][/bold yellow]")
+                        answer = console.input(
+                            f"[bold yellow]{prompt} [y/N][/bold yellow]"
+                        )
                         return answer.strip().lower() == "y"
 
                     ok = session_manager.rollback_to_snapshot(
-                        session_id,
-                        snapshot_index,
-                        confirm_callback=confirm
+                        session_id, snapshot_index, confirm_callback=confirm
                     )
                     if ok:
-                        new_executor = session_manager.load_session(session_id, config, runtime_scene="cli")
+                        new_executor = session_manager.load_session(
+                            session_id, config, runtime_scene="cli"
+                        )
                         if new_executor:
                             executor = new_executor
-                            console.print("\n[success]回滚完成，已切换到该会话[/success]\n")
+                            console.print(
+                                "\n[success]回滚完成，已切换到该会话[/success]\n"
+                            )
                         else:
-                            console.print("\n[warning]回滚完成，但会话恢复失败[/warning]\n")
+                            console.print(
+                                "\n[warning]回滚完成，但会话恢复失败[/warning]\n"
+                            )
                     else:
                         console.print("\n[warning]回滚已取消或失败[/warning]\n")
                     continue
 
-                console.print("[error]未知命令。可用命令: /list, /list-snapshot <id>, /new, /chat, /resume <id>, /rollback <id> <snapshot>, /compact, /auto, /exit[/error]\n")
+                console.print(
+                    "[error]未知命令。可用命令: /list, /list-snapshot <id>, /new, /chat, /resume <id>, /rollback <id> <snapshot>, /compact, /auto, /exit[/error]\n"
+                )
                 continue
 
             direct_command = _extract_direct_shell_call(task)
@@ -864,10 +962,16 @@ def main():
             console.print(f"\n[error]错误：{rich_escape(str(e))}[/error]")
             if args.verbose:
                 import traceback
+
                 console.print(traceback.format_exc())
 
 
-def _run_single_task(config: Config, task: str, executor: 'Executor' = None, session_manager: 'SessionManager' = None):
+def _run_single_task(
+    config: Config,
+    task: str,
+    executor: "Executor" = None,
+    session_manager: "SessionManager" = None,
+):
     """执行单个任务
 
     Args:
@@ -924,11 +1028,7 @@ def _run_single_task(config: Config, task: str, executor: 'Executor' = None, ses
 
             if result:
                 command_batch_id, processed_count = _handle_pending_commands(
-                    executor,
-                    console,
-                    result,
-                    command_batch_id,
-                    processed_count
+                    executor, console, result, command_batch_id, processed_count
                 )
 
             # 检查是否需要等待用户输入
@@ -946,7 +1046,9 @@ def _run_single_task(config: Config, task: str, executor: 'Executor' = None, ses
 
         console.print("\n" + "=" * 60)
         console.print("[bold yellow]Agent 等待您的回复[/bold yellow]")
-        console.print("[dim]输入内容继续（/exit 退出，/list 查看会话，/compact 压缩上下文，/edit 外部编辑器）[/dim]")
+        console.print(
+            "[dim]输入内容继续（/exit 退出，/list 查看会话，/compact 压缩上下文，/edit 外部编辑器）[/dim]"
+        )
         if _ACTIVE_HINT:
             console.print(f"[dim]当前 hint: {_ACTIVE_HINT}[/dim]")
         console.print("=" * 60 + "\n")
@@ -1008,17 +1110,23 @@ def _run_single_task(config: Config, task: str, executor: 'Executor' = None, ses
                     if not sessions:
                         console.print("[dim]  （暂无保存的会话）[/dim]\n")
                     for s in sessions:
-                        msg_preview = s.get('first_message', '')
+                        msg_preview = s.get("first_message", "")
                         if msg_preview:
-                            console.print(f"  会话 {s['session_id']} | {s['created_at'][:19]} | 消息数: {s['message_count']} | 深度: {s['depth']} | [dim]{msg_preview}[/dim]")
+                            console.print(
+                                f"  会话 {s['session_id']} | {s['created_at'][:19]} | 消息数: {s['message_count']} | 深度: {s['depth']} | [dim]{msg_preview}[/dim]"
+                            )
                         else:
-                            console.print(f"  会话 {s['session_id']} | {s['created_at'][:19]} | 消息数: {s['message_count']} | 深度: {s['depth']}")
+                            console.print(
+                                f"  会话 {s['session_id']} | {s['created_at'][:19]} | 消息数: {s['message_count']} | 深度: {s['depth']}"
+                            )
                     console.print("")
                     continue
                 if line.lower() == "/compact":
                     _handle_compact_command(executor, console, reason="手动压缩")
                     continue
-                console.print("[warning]提示：在等待输入模式下，只支持 /list 和 /compact 命令[/warning]\n")
+                console.print(
+                    "[warning]提示：在等待输入模式下，只支持 /list 和 /compact 命令[/warning]\n"
+                )
                 continue
             else:
                 user_input = line
@@ -1058,11 +1166,7 @@ def _run_single_task(config: Config, task: str, executor: 'Executor' = None, ses
 
                 if result:
                     command_batch_id, processed_count = _handle_pending_commands(
-                        executor,
-                        console,
-                        result,
-                        command_batch_id,
-                        processed_count
+                        executor, console, result, command_batch_id, processed_count
                     )
 
                 # 检查是否需要等待用户输入
@@ -1076,7 +1180,7 @@ def _run_single_task(config: Config, task: str, executor: 'Executor' = None, ses
     console.print("-" * 60)
 
 
-def _create_cli_command_confirm_callback(executor: 'Executor', console: Console):
+def _create_cli_command_confirm_callback(executor: "Executor", console: Console):
     """创建 CLI 的命令确认回调函数
 
     Args:
@@ -1158,8 +1262,13 @@ def _create_cli_command_confirm_callback(executor: 'Executor', console: Console)
     return confirm_callback
 
 
-def _handle_pending_commands(executor: 'Executor', console: Console, result: 'StepResult',
-                             command_batch_id: int, processed_count: int) -> tuple[int, int]:
+def _handle_pending_commands(
+    executor: "Executor",
+    console: Console,
+    result: "StepResult",
+    command_batch_id: int,
+    processed_count: int,
+) -> tuple[int, int]:
     """处理待确认命令，返回更新后的批次ID和处理计数"""
     if not result.pending_commands:
         return command_batch_id, processed_count
@@ -1215,7 +1324,9 @@ def _handle_pending_commands(executor: 'Executor', console: Console, result: 'St
                     commands=[command_spec],
                     workspace_dir=current_dir,
                 )
-                result_msg = executed[0].message if executed else "命令执行成功（无输出）"
+                result_msg = (
+                    executed[0].message if executed else "命令执行成功（无输出）"
+                )
 
                 console.print(f"\n[info]{result_msg}[/info]\n")
                 _update_smart_edit_stats(command, "executed", result_msg)
@@ -1308,28 +1419,38 @@ def _execute_builtin_tool(
         parsed_args, error = _parse_smart_edit_command(stripped)
         if error:
             return _prefix_builtin_result("smart_edit", _ExecResult("", error, 1))
-        return _prefix_builtin_result("smart_edit", _execute_builtin_smart_edit(parsed_args, workspace_dir))
+        return _prefix_builtin_result(
+            "smart_edit", _execute_builtin_smart_edit(parsed_args, workspace_dir)
+        )
     if stripped.lower().startswith("builtin.read_file"):
         parsed_args, error = _parse_read_file_command(stripped)
         if error:
             return _prefix_builtin_result("read_file", _ExecResult("", error, 1))
-        return _prefix_builtin_result("read_file", _execute_builtin_read_file(parsed_args, workspace_dir))
+        return _prefix_builtin_result(
+            "read_file", _execute_builtin_read_file(parsed_args, workspace_dir)
+        )
     if stripped.lower().startswith("builtin.get_job_log"):
         parsed_args, error = _parse_job_log_command(stripped)
         if error:
             return _prefix_builtin_result("get_job_log", _ExecResult("", error, 1))
-        return _prefix_builtin_result("get_job_log", _execute_builtin_job_log(parsed_args))
+        return _prefix_builtin_result(
+            "get_job_log", _execute_builtin_job_log(parsed_args)
+        )
     if stripped.lower().startswith("builtin.get_resource"):
         parsed_args, error = _parse_get_resource_command(stripped)
         if error:
             return _prefix_builtin_result("get_resource", _ExecResult("", error, 1))
-        return _prefix_builtin_result("get_resource", _execute_builtin_get_resource(parsed_args))
+        return _prefix_builtin_result(
+            "get_resource", _execute_builtin_get_resource(parsed_args)
+        )
     if stripped.lower().startswith("builtin.memory_query"):
         parsed_args, error = _parse_memory_query_command(stripped)
         if error:
             return _prefix_builtin_result("memory_query", _ExecResult("", error, 1))
         if not config:
-            return _prefix_builtin_result("memory_query", _ExecResult("", "memory_query 缺少配置", 1))
+            return _prefix_builtin_result(
+                "memory_query", _ExecResult("", "memory_query 缺少配置", 1)
+            )
         return _prefix_builtin_result(
             "memory_query",
             _execute_builtin_memory_query(parsed_args, config, context_messages or []),
@@ -1339,7 +1460,9 @@ def _execute_builtin_tool(
         if error:
             return _prefix_builtin_result("create_schedule", _ExecResult("", error, 1))
         if not config:
-            return _prefix_builtin_result("create_schedule", _ExecResult("", "create_schedule 缺少配置", 1))
+            return _prefix_builtin_result(
+                "create_schedule", _ExecResult("", "create_schedule 缺少配置", 1)
+            )
         return _prefix_builtin_result(
             "create_schedule",
             _execute_builtin_create_schedule(parsed_args, config),
@@ -1355,7 +1478,9 @@ def _execute_builtin_tool(
         return None
 
     tool_name = match.group(1).lower()
-    return _prefix_builtin_result(tool_name, _ExecResult("", f"未知内置工具: {tool_name}", 1))
+    return _prefix_builtin_result(
+        tool_name, _ExecResult("", f"未知内置工具: {tool_name}", 1)
+    )
 
 
 def _read_text_file(path: str, start_line: int, max_lines: int, encoding: str):
@@ -1396,7 +1521,9 @@ def _read_text_file(path: str, start_line: int, max_lines: int, encoding: str):
     return lines, has_more, capped, end_line, max_lines, None
 
 
-def _resolve_builtin_file_path(raw_path: str, workspace_dir: str) -> tuple[Optional[str], Optional[str]]:
+def _resolve_builtin_file_path(
+    raw_path: str, workspace_dir: str
+) -> tuple[Optional[str], Optional[str]]:
     """解析 builtin 文件路径，禁止 cwd 隐式兜底。"""
     resolved, error = resolve_path_against_workspace(raw_path, workspace_dir)
     if error:
@@ -1441,7 +1568,9 @@ def _execute_builtin_read_file(args: dict, workspace_dir: str = "") -> _ExecResu
 
     if has_more:
         next_start = start_line + returned
-        header_lines.append(f"还有更多内容。如需继续读取，请使用 start_line={next_start}，max_lines={max_lines}。")
+        header_lines.append(
+            f"还有更多内容。如需继续读取，请使用 start_line={next_start}，max_lines={max_lines}。"
+        )
     else:
         header_lines.append("已到文件末尾。")
 
@@ -1486,7 +1615,9 @@ def _execute_builtin_job_log(args: dict) -> _ExecResult:
 
     if has_more:
         next_start = start_line + returned
-        header_lines.append(f"还有更多内容。如需继续读取，请使用 start_line={next_start}，max_lines={max_lines}。")
+        header_lines.append(
+            f"还有更多内容。如需继续读取，请使用 start_line={next_start}，max_lines={max_lines}。"
+        )
     else:
         header_lines.append("已到文件末尾。")
 
@@ -1574,7 +1705,11 @@ def _parse_smart_edit_command(command: str) -> tuple[dict, Optional[str]]:
             continue
 
         lower = line.lower()
-        if lower.startswith("path:") or lower.startswith("file:") or lower.startswith("filepath:"):
+        if (
+            lower.startswith("path:")
+            or lower.startswith("file:")
+            or lower.startswith("filepath:")
+        ):
             value = line.split(":", 1)[1].strip()
             if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
                 value = value[1:-1]
@@ -1638,7 +1773,9 @@ def _is_safe_relative_path(path: str) -> bool:
     return ".." not in parts
 
 
-def _resolve_resource_path(rel_path: str, roots: list[Path]) -> tuple[Optional[Path], Optional[str]]:
+def _resolve_resource_path(
+    rel_path: str, roots: list[Path]
+) -> tuple[Optional[Path], Optional[str]]:
     if not _is_safe_relative_path(rel_path):
         return None, "路径不合法，仅允许相对路径且禁止 .."
 
@@ -1687,6 +1824,7 @@ def _execute_builtin_get_resource(args: dict) -> _ExecResult:
     if content == "":
         content = "(空内容)"
     return _ExecResult(content, "", 0)
+
 
 def _parse_job_log_command(command: str) -> tuple[dict, Optional[str]]:
     return _parse_builtin_kv_command(command, "get_job_log")
@@ -1857,13 +1995,15 @@ def _llm_expand_query_terms(client, query: str) -> list[str]:
     return terms
 
 
-def _llm_filter_windows(client, query: str, windows: list[dict], batch_size: int) -> dict[int, dict]:
+def _llm_filter_windows(
+    client, query: str, windows: list[dict], batch_size: int
+) -> dict[int, dict]:
     results: dict[int, dict] = {}
     template = _load_template_text("memory_filter_prompt.txt")
     if not template:
         template = "用户问题：{query}\n\n候选片段：\n{items}"
     for start in range(0, len(windows), batch_size):
-        batch = windows[start:start + batch_size]
+        batch = windows[start : start + batch_size]
         items = []
         for item in batch:
             items.append(f"[{item['index']}]\n{item['text']}")
@@ -1875,7 +2015,11 @@ def _llm_filter_windows(client, query: str, windows: list[dict], batch_size: int
         parsed = _parse_json_array(response.content or "")
         if not parsed:
             for item in batch:
-                results[item["index"]] = {"relevant": True, "score": 50, "reason": "fallback"}
+                results[item["index"]] = {
+                    "relevant": True,
+                    "score": 50,
+                    "reason": "fallback",
+                }
             continue
         for item in parsed:
             try:
@@ -1887,11 +2031,17 @@ def _llm_filter_windows(client, query: str, windows: list[dict], batch_size: int
                 score = int(item.get("score", 0))
             except Exception:
                 score = 0
-            results[index] = {"relevant": relevant, "score": score, "reason": item.get("reason", "")}
+            results[index] = {
+                "relevant": relevant,
+                "score": score,
+                "reason": item.get("reason", ""),
+            }
     return results
 
 
-def _llm_summarize_windows(client, query: str, context_text: str, windows: list[dict]) -> str:
+def _llm_summarize_windows(
+    client, query: str, context_text: str, windows: list[dict]
+) -> str:
     items = []
     for item in windows:
         items.append(f"[{item['index']}]\n{item['text']}")
@@ -1907,7 +2057,9 @@ def _llm_summarize_windows(client, query: str, context_text: str, windows: list[
     return (response.content or "").strip()
 
 
-def _execute_builtin_memory_query(args: dict, config: Config, context_messages: list) -> _ExecResult:
+def _execute_builtin_memory_query(
+    args: dict, config: Config, context_messages: list
+) -> _ExecResult:
     query = args.get("query", "").strip()
     if not query:
         return _ExecResult("", "memory_query 需要参数: query", 1)
@@ -1952,7 +2104,8 @@ def _execute_builtin_memory_query(args: dict, config: Config, context_messages: 
     candidates = {}
     max_chars_per_window = 1500
     files = sorted(
-        f for f in os.listdir(sessions_dir)
+        f
+        for f in os.listdir(sessions_dir)
         if f.endswith(".json") and os.path.isfile(os.path.join(sessions_dir, f))
     )
 
@@ -2023,7 +2176,13 @@ def _execute_builtin_memory_query(args: dict, config: Config, context_messages: 
             continue
         if not meta.get("relevant"):
             continue
-        relevant.append({"index": item["index"], "text": item["text"], "score": meta.get("score", 0)})
+        relevant.append(
+            {
+                "index": item["index"],
+                "text": item["text"],
+                "score": meta.get("score", 0),
+            }
+        )
 
     if not relevant:
         return _ExecResult("memory_query: 未命中", "", 0)
@@ -2049,9 +2208,17 @@ def _execute_builtin_create_schedule(args: dict, config: Config) -> _ExecResult:
     timezone_name = (args.get("timezone") or "Asia/Shanghai").strip() or "Asia/Shanghai"
     description = (args.get("description") or "").strip()
     calendar_id = (args.get("calendar_id") or config.webhook_calendar_id or "").strip()
-    need_notification = str(args.get("need_notification", "false")).strip().lower() in {"1", "true", "yes", "y", "on"}
+    need_notification = str(args.get("need_notification", "false")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
     user_id_type = (args.get("user_id_type") or "open_id").strip() or "open_id"
-    attendee_need_notification = str(args.get("attendee_need_notification", "true")).strip().lower() in {
+    attendee_need_notification = str(
+        args.get("attendee_need_notification", "true")
+    ).strip().lower() in {
         "1",
         "true",
         "yes",
@@ -2061,7 +2228,9 @@ def _execute_builtin_create_schedule(args: dict, config: Config) -> _ExecResult:
     attendee_open_ids_raw = str(args.get("attendee_open_ids") or "").strip()
     attendee_open_ids = []
     if attendee_open_ids_raw:
-        attendee_open_ids = [x.strip() for x in attendee_open_ids_raw.split(",") if x.strip()]
+        attendee_open_ids = [
+            x.strip() for x in attendee_open_ids_raw.split(",") if x.strip()
+        ]
     default_attendee_open_id = (config.webhook_default_attendee_open_id or "").strip()
     if not attendee_open_ids and default_attendee_open_id:
         attendee_open_ids = [default_attendee_open_id]
@@ -2230,11 +2399,13 @@ def _execute_command(
     Returns:
         Result 对象，包含 stdout, stderr, returncode
     """
-    import subprocess
     import base64
     import shlex
+    import subprocess
 
-    builtin_result = _execute_builtin_tool(command, config, context_messages, workspace_dir=workspace_dir)
+    builtin_result = _execute_builtin_tool(
+        command, config, context_messages, workspace_dir=workspace_dir
+    )
     if builtin_result is not None:
         return builtin_result
 
@@ -2253,7 +2424,9 @@ def _execute_command(
             resolved_path = module_path.resolve()
             path_text = _ps_escape(str(resolved_path))
             module_dir = _ps_escape(str(resolved_path.parent))
-            parts.append(f"$env:HINT_MODULE_DIR='{module_dir}'; Import-Module '{path_text}'")
+            parts.append(
+                f"$env:HINT_MODULE_DIR='{module_dir}'; Import-Module '{path_text}'"
+            )
         if not parts:
             return ""
         return env_prefix + "; ".join(parts) + "; "
@@ -2265,24 +2438,26 @@ def _execute_command(
         # Windows 中文系统默认输出是 GBK (CP936)，需要显式设置
         if background:
             prefixed_command = (
-                '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; '
+                "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
                 '$PSDefaultParameterValues["Out-File:Encoding"] = "utf8"; '
                 '$ProgressPreference = "SilentlyContinue"; '
                 '$InformationPreference = "SilentlyContinue"; '
                 '$VerbosePreference = "SilentlyContinue"; '
                 '$WarningPreference = "SilentlyContinue"; '
-                f'{import_prefix}{command}'
+                f"{import_prefix}{command}"
             )
         else:
             prefixed_command = (
-                '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; '
+                "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
                 '$PSDefaultParameterValues["Out-File:Encoding"] = "utf8"; '
-                f'{import_prefix}{command}'
+                f"{import_prefix}{command}"
             )
 
         # 使用 UTF-16 LE 编码并 Base64 编码命令，避免引号转义问题
-        encoded_command = base64.b64encode(prefixed_command.encode('utf-16-le')).decode('ascii')
-        full_cmd = f'powershell -EncodedCommand {encoded_command}'
+        encoded_command = base64.b64encode(prefixed_command.encode("utf-16-le")).decode(
+            "ascii"
+        )
+        full_cmd = f"powershell -EncodedCommand {encoded_command}"
 
         try:
             if background:
@@ -2291,9 +2466,7 @@ def _execute_command(
                 log_path = jobs_dir / f"job_{job_id}.log"
                 log_handle = open(log_path, "ab")
                 process = subprocess.Popen(
-                    full_cmd, shell=True,
-                    stdout=log_handle,
-                    stderr=log_handle
+                    full_cmd, shell=True, stdout=log_handle, stderr=log_handle
                 )
                 log_handle.close()
                 _register_background_job(job_id, process, log_path)
@@ -2306,21 +2479,16 @@ def _execute_command(
                 return _ExecResult(stdout=result_msg, stderr="", returncode=0)
 
             process = subprocess.run(
-                full_cmd, shell=True, capture_output=True,
-                timeout=timeout
+                full_cmd, shell=True, capture_output=True, timeout=timeout
             )
         except (subprocess.SubprocessError, OSError, FileNotFoundError) as e:
             # 捕获命令执行异常（如命令行太长、文件未找到等）
             # 创建一个错误结果对象
-            return _ExecResult(
-                stdout="",
-                stderr=str(e),
-                returncode=1
-            )
+            return _ExecResult(stdout="", stderr=str(e), returncode=1)
 
         # 手动解码，处理编码错误
-        stdout = process.stdout.decode('utf-8', errors='replace')
-        stderr = process.stderr.decode('utf-8', errors='replace')
+        stdout = process.stdout.decode("utf-8", errors="replace")
+        stderr = process.stderr.decode("utf-8", errors="replace")
         return _ExecResult(stdout, stderr, process.returncode)
 
     def build_bash_prefix() -> str:
@@ -2350,9 +2518,7 @@ def _execute_command(
             log_path = jobs_dir / f"job_{job_id}.log"
             log_handle = open(log_path, "ab")
             process = subprocess.Popen(
-                ["bash", "-lc", prefixed_command],
-                stdout=log_handle,
-                stderr=log_handle
+                ["bash", "-lc", prefixed_command], stdout=log_handle, stderr=log_handle
             )
             log_handle.close()
             _register_background_job(job_id, process, log_path)
@@ -2365,19 +2531,13 @@ def _execute_command(
             return _ExecResult(stdout=result_msg, stderr="", returncode=0)
 
         process = subprocess.run(
-            ["bash", "-lc", prefixed_command],
-            capture_output=True,
-            timeout=timeout
+            ["bash", "-lc", prefixed_command], capture_output=True, timeout=timeout
         )
     except (subprocess.SubprocessError, OSError, FileNotFoundError) as e:
-        return _ExecResult(
-            stdout="",
-            stderr=str(e),
-            returncode=1
-        )
+        return _ExecResult(stdout="", stderr=str(e), returncode=1)
 
-    stdout = process.stdout.decode('utf-8', errors='replace')
-    stderr = process.stderr.decode('utf-8', errors='replace')
+    stdout = process.stdout.decode("utf-8", errors="replace")
+    stderr = process.stderr.decode("utf-8", errors="replace")
     return _ExecResult(stdout, stderr, process.returncode)
 
 
