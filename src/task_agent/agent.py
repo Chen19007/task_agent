@@ -17,7 +17,7 @@ from .builtin_schema import (
     build_builtin_read_file_example_lines,
     build_builtin_smart_edit_example_lines,
 )
-from .command_runtime import normalize_command_spec
+from .command_runtime import can_auto_execute_command, normalize_command_spec
 from .command_spec import CommandSpec
 from .config import Config
 from .execution_event_bus import ExecutionEventBus
@@ -28,7 +28,6 @@ from .output_handler import NullOutputHandler, OutputHandler
 from .platform_utils import get_hint_platform_suffix, get_shell_tool_name
 
 if TYPE_CHECKING:
-    from .command_approval_flow import CommandApprovalFlow
     from .session import SessionManager
 
 
@@ -67,6 +66,8 @@ class ChildTaskRequest:
     fork: bool = (
         False  # True=<fork_agent> 继承父Agent上下文，False=<create_agent> 清洁模式
     )
+    depth: int = 0
+    context_info: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -896,8 +897,8 @@ class SimpleAgent:
         if self._after_llm_callback:
             self._after_llm_callback(self)
 
-        # 调用回调：输出普通内容
-        if response and response.strip():
+        # 调用回调：输出普通内容 (如果有标签则由 Executor 逐条输出，此处抑制原始标签打印)
+        if response and response.strip() and not has_tool_tags:
             self._output_handler.on_content(response)
 
         # 格式化输出（保持向后兼容）
@@ -907,7 +908,7 @@ class SimpleAgent:
             outputs.append(f"{'━' * 50}\n")
             outputs.append(f"{reasoning}\n")
             outputs.append(f"{'━' * 50}\n\n")
-        if response and response.strip():
+        if response and response.strip() and not has_tool_tags:
             outputs.append(response)
 
         if skip_parse:
@@ -938,7 +939,6 @@ class SimpleAgent:
             request.global_count = self._global_subagent_count + 1
 
             task = request.task
-            agent_name = request.agent_name or ""
             new_global_count = request.global_count
 
             # 检查深度限制
@@ -990,30 +990,14 @@ class SimpleAgent:
             context_used = self._estimate_context_tokens()
             context_total = self.config.num_ctx
 
-            # 调用回调：输出创建子 agent 信息
-            self._output_handler.on_create_agent(
-                task=task,
-                depth=self.depth + 1,
-                agent_name=agent_name,
-                fork=request.fork,
-                context_info={
-                    "context_used": context_used,
-                    "context_total": context_total,
-                    "global_count": new_global_count,
-                    "global_total": global_total,
-                    "max_depth": self.max_depth,
-                },
-            )
-
-            outputs.append(f"\n{'+' * 60}\n")
-            agent_info = f" [{agent_name}]" if agent_name else ""
-            outputs.append(
-                f"深度: {self.depth + 1}/{self.max_depth}{agent_info} | 任务: {task}\n"
-            )
-            outputs.append(
-                f"上下文: {context_used}/{context_total} | 配额: {new_global_count}/{global_total}\n"
-            )
-            outputs.append(f"{'+' * 60}\n\n")
+            request.depth = self.depth + 1
+            request.context_info = {
+                "context_used": context_used,
+                "context_total": context_total,
+                "global_count": new_global_count,
+                "global_total": global_total,
+                "max_depth": self.max_depth,
+            }
 
             # 返回 ChildTaskRequest 对象
             return StepResult(
@@ -1414,12 +1398,17 @@ class SimpleAgent:
                 timeout = 10
             if tag_name == "builtin":
                 command = self._normalize_builtin_command(command)
+            self.total_commands_executed += 1  # 解析时分配编号
             command_spec = CommandSpec(
-                command=command, tool=tag_name, background=background, timeout=timeout
+                command=command,
+                tool=tag_name,
+                background=background,
+                timeout=timeout,
+                index=self.total_commands_executed,
             )
             display_command = command_spec.display()
-            self.total_commands_executed += 1  # 解析时分配编号
 
+            # 调用回调
             # 命令框单独存储，不放入 outputs
             block = f"\n>> [待执行命令 #{self.total_commands_executed}]\n命令: {display_command}\n{'━' * 50}\n\n"
             # 添加深度前缀到命令框
@@ -1515,14 +1504,10 @@ class SimpleAgent:
             )
             display_command = command_spec.display()
             self.total_commands_executed += 1  # 解析时分配编号
-
-            # 调用回调
-            depth_prefix = "+" * self.depth + " " if self.depth > 0 else ""
-            self._output_handler.on_ps_call(
-                display_command, self.total_commands_executed, depth_prefix
-            )
+            command_spec.index = self.total_commands_executed
 
             # 命令框单独存储，不放入 outputs（兼容 CLI）
+            depth_prefix = "+" * self.depth + " " if self.depth > 0 else ""
             block = f"\n>> [待执行命令 #{self.total_commands_executed}]\n命令: {display_command}\n{'━' * 50}\n\n"
             if depth_prefix:
                 lines = block.split("\n")
@@ -1936,9 +1921,9 @@ class Executor:
             # yield 输出和结果，让 CLI/GUI 先显示输出
             yield (result.outputs, result)
 
-            # --- 闭环处理：批量处理待执行命令 ---
-            # 注意：命令处理必须在 Action 检查之前，因为命令执行结果会作为反馈输入到下一步
+            # --- 闭环处理：逐条处理待执行命令 (保持顺序) ---
             has_executed_commands = False
+            any_command_failed = False
             if (
                 result.pending_commands
                 and self._is_running
@@ -1946,47 +1931,70 @@ class Executor:
             ):
                 _logger = logging.getLogger(__name__)
                 current_dir = self.workspace_dir or "."
-
-                # 批量规范化所有待执行命令
-                cmd_specs = [
-                    normalize_command_spec(cmd_obj)
-                    for cmd_obj in result.pending_commands
-                ]
-
-                # 一次性拆分自动/手动
-                auto_list, manual_list = self._approval_flow.split_auto_executable(
-                    cmd_specs, self.auto_approve, current_dir, config=self.config
+                depth_prefix = (
+                    "+" * self.current_agent.depth + " "
+                    if self.current_agent.depth > 0
+                    else ""
                 )
 
-                # 批量自动执行：通过 yield 输出结果，确保 CLI/GUI 都能显示
-                if auto_list:
-                    exec_results = self._approval_flow.execute_commands(
-                        executor=self,
-                        commands=auto_list,
-                        workspace_dir=current_dir,
+                for i, cmd_obj in enumerate(result.pending_commands):
+                    if not self._is_running:
+                        break
+
+                    cmd_spec = normalize_command_spec(cmd_obj)
+
+                    # 1. 显示发现的命令 (通过 command_blocks 逐条展示)
+                    if i < len(result.command_blocks):
+                        yield ([result.command_blocks[i]], result)
+                    # 也通过回调通知（供 GUI 等监听）
+                    self.current_agent._output_handler.on_ps_call(
+                        cmd_spec.display(), cmd_spec.index, depth_prefix
                     )
-                    if exec_results:
-                        has_executed_commands = True
-                        cmd_outputs = []
-                        for item in exec_results:
-                            cmd_outputs.append(f"\n{item.message}\n")
-                        yield (cmd_outputs, result)
 
-                # 手动命令：通过回调逐条确认（回调内部已完成 _add_message，不再重复添加）
-                if manual_list:
-                    if self._command_confirm_callback:
-                        for cmd_spec in manual_list:
-                            # 回调内部会调用 flow.execute_commands/reject_commands，并更新 history
-                            self._command_confirm_callback(cmd_spec.command)
-                        has_executed_commands = True
-                    else:
-                        _logger.warning(
-                            "有 %d 条命令需要手动确认但未设置回调，命令将被跳过: %s",
-                            len(manual_list),
-                            [c.command for c in manual_list],
+                    # 2. 判断是否可以自动执行
+                    if can_auto_execute_command(
+                        cmd_spec, self.auto_approve, current_dir, config=self.config
+                    ):
+                        # 自动执行
+                        exec_results = self._approval_flow.execute_commands(
+                            executor=self,
+                            commands=[cmd_spec],
+                            workspace_dir=current_dir,
                         )
+                        if exec_results:
+                            has_executed_commands = True
+                            cmd_outputs = [
+                                f"\n{item.message}\n" for item in exec_results
+                            ]
+                            yield (cmd_outputs, result)
 
-            # 如果刚才执行了命令，我们需要让 Agent 再次思考（即继续循环调用 step）
+                            # 如果自动执行失败（状态为 rejected），停止后续命令
+                            if exec_results[0].status == "rejected":
+                                any_command_failed = True
+                                break
+                    else:
+                        # 手动确认
+                        if self._command_confirm_callback:
+                            # 回调内部会调用 flow.execute_commands/reject_commands，并更新 history
+                            res = self._command_confirm_callback(cmd_spec.command)
+                            has_executed_commands = True
+                            # 如果手动执行取消或建议（状态为 rejected），停止后续命令
+                            if 'id="rejected"' in (res or ""):
+                                any_command_failed = True
+                                break
+                        else:
+                            _logger.warning(
+                                "有命令需要手动确认但未设置回调，跳过后续命令: %s",
+                                cmd_spec.command,
+                            )
+                            any_command_failed = True
+                            break
+
+            # 如果有任何命令失败或被拒绝，且原动作为切换子Agent，则强制停止切换，让父Agent处理错误
+            if any_command_failed and result.action == Action.SWITCH_TO_CHILD:
+                result.action = Action.CONTINUE
+
+            # 如果刚才处理过命令，我们需要让 Agent 再次思考（即继续循环调用 step）
             # 除非原始 action 就是 SWITCH_TO_CHILD，此时切换逻辑优先级更高
             if has_executed_commands and result.action != Action.SWITCH_TO_CHILD:
                 continue
@@ -1995,6 +2003,16 @@ class Executor:
                 # result.data 现在是 ChildTaskRequest 对象
                 request: ChildTaskRequest = result.data
                 parent = self.current_agent  # 保存父Agent引用（用于fork继承）
+
+                # 调用回调：输出创建子 agent 信息（放在命令执行之后，切换之前）
+                parent._output_handler.on_create_agent(
+                    task=request.task,
+                    depth=request.depth,
+                    agent_name=request.agent_name or "",
+                    fork=request.fork,
+                    context_info=request.context_info,
+                )
+
                 self.context_stack.append(parent)
 
                 # 如果有预定义 agent，加载内容并注入到第一条消息

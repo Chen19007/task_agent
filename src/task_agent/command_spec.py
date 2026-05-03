@@ -16,6 +16,7 @@ class CommandSpec:
     tool: str = field(default_factory=get_shell_tool_name)
     background: bool = False
     timeout: Optional[int] = None
+    index: int = 0
 
     def display(self) -> str:
         """命令显示文本"""
