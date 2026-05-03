@@ -6,9 +6,8 @@
 import queue
 import threading
 import time
-from typing import Optional, List, Tuple, Generator
-from task_agent.gui.adapter import ExecutorAdapter
-from task_agent.agent import CommandSpec
+from typing import Generator, List, Optional, Tuple
+
 from task_agent.command_runtime import (
     ExecutionContext,
     can_auto_execute_command,
@@ -16,6 +15,8 @@ from task_agent.command_runtime import (
     format_shell_result,
     normalize_command_spec,
 )
+from task_agent.command_spec import CommandSpec
+from task_agent.gui.adapter import ExecutorAdapter
 from task_agent.output_handler import OutputHandler
 
 
@@ -78,23 +79,47 @@ class GradioExecutor:
                             for idx, command in enumerate(result.pending_commands, 1):
                                 command_spec = self._normalize_command_spec(command)
                                 # 检查命令是否安全
-                                current_dir = (self.adapter.executor.workspace_dir or "").strip()
-                                if can_auto_execute_command(command_spec, True, current_dir):
+                                current_dir = (
+                                    self.adapter.executor.workspace_dir or ""
+                                ).strip()
+                                if can_auto_execute_command(
+                                    command_spec, True, current_dir
+                                ):
                                     self._execute_command_sync(command_spec, "executed")
                                 else:
                                     # 不安全的命令需要用户确认
-                                    self._pending_commands = list(enumerate([self._normalize_command_spec(cmd) for cmd in result.pending_commands], 1))
+                                    self._pending_commands = list(
+                                        enumerate(
+                                            [
+                                                self._normalize_command_spec(cmd)
+                                                for cmd in result.pending_commands
+                                            ],
+                                            1,
+                                        )
+                                    )
                                     self._waiting_for_confirmation = True
-                                    self._state_queue.put(("pending_commands", self._pending_commands))
+                                    self._state_queue.put(
+                                        ("pending_commands", self._pending_commands)
+                                    )
                                     break
                             else:
                                 # 所有命令都已自动执行，继续循环
                                 continue
                         else:
                             # 需要用户确认，显示确认对话框
-                            self._pending_commands = list(enumerate([self._normalize_command_spec(cmd) for cmd in result.pending_commands], 1))
+                            self._pending_commands = list(
+                                enumerate(
+                                    [
+                                        self._normalize_command_spec(cmd)
+                                        for cmd in result.pending_commands
+                                    ],
+                                    1,
+                                )
+                            )
                             self._waiting_for_confirmation = True
-                            self._state_queue.put(("pending_commands", self._pending_commands))
+                            self._state_queue.put(
+                                ("pending_commands", self._pending_commands)
+                            )
                             break
 
                     # 检查是否需要等待用户输入
@@ -114,13 +139,18 @@ class GradioExecutor:
         """\u540c\u6b65\u6267\u884c\u547d\u4ee4\uff08\u7528\u4e8e\u81ea\u52a8\u540c\u610f\u6a21\u5f0f\uff09"""
         try:
             from task_agent.cli import _execute_command
+
             current_dir = (self.adapter.executor.workspace_dir or "").strip()
             exec_result = execute_command_spec(
                 command_spec=command_spec,
                 context=ExecutionContext(
                     config=self.adapter.executor.config,
                     workspace_dir=current_dir,
-                    context_messages=(self.adapter.executor.current_agent.history if self.adapter.executor.current_agent else None),
+                    context_messages=(
+                        self.adapter.executor.current_agent.history
+                        if self.adapter.executor.current_agent
+                        else None
+                    ),
                 ),
                 execute_command=_execute_command,
             )
@@ -137,7 +167,9 @@ class GradioExecutor:
         except Exception as e:
             error_msg = f"\u547d\u4ee4\u6267\u884c\u5f02\u5e38\uff1a{e}"
             if self.adapter.executor.current_agent:
-                self.adapter.executor.current_agent._add_message("user", format_shell_result("executed", error_msg))
+                self.adapter.executor.current_agent._add_message(
+                    "user", format_shell_result("executed", error_msg)
+                )
 
     def confirm_command(self, command_index: int, action: str, user_input: str = ""):
         """\u786e\u8ba4\u5e76\u6267\u884c\u547d\u4ee4"""
@@ -156,13 +188,18 @@ class GradioExecutor:
         def execute():
             try:
                 from task_agent.cli import _execute_command
+
                 current_dir = (self.adapter.executor.workspace_dir or "").strip()
                 exec_result = execute_command_spec(
                     command_spec=command_spec,
                     context=ExecutionContext(
                         config=self.adapter.executor.config,
                         workspace_dir=current_dir,
-                        context_messages=(self.adapter.executor.current_agent.history if self.adapter.executor.current_agent else None),
+                        context_messages=(
+                            self.adapter.executor.current_agent.history
+                            if self.adapter.executor.current_agent
+                            else None
+                        ),
                     ),
                     execute_command=_execute_command,
                 )
@@ -174,7 +211,9 @@ class GradioExecutor:
                     if user_input:
                         message = f"\u7528\u6237\u5efa\u8bae\uff1a{user_input}"
                     else:
-                        message = "\u7528\u6237\u53d6\u6d88\u4e86\u547d\u4ee4\u6267\u884c"
+                        message = (
+                            "\u7528\u6237\u53d6\u6d88\u4e86\u547d\u4ee4\u6267\u884c"
+                        )
                     result_msg = format_shell_result("rejected", message)
 
                 if self.adapter.executor.current_agent:
@@ -184,7 +223,9 @@ class GradioExecutor:
             except Exception as e:
                 error_msg = f"\u547d\u4ee4\u6267\u884c\u5f02\u5e38\uff1a{e}"
                 if self.adapter.executor.current_agent:
-                    self.adapter.executor.current_agent._add_message("user", format_shell_result("executed", error_msg))
+                    self.adapter.executor.current_agent._add_message(
+                        "user", format_shell_result("executed", error_msg)
+                    )
                 self._continue_execution()
 
         threading.Thread(target=execute, daemon=True).start()
@@ -204,9 +245,19 @@ class GradioExecutor:
                     self._state_queue.put(("output", (outputs, result)))
 
                     if result and result.pending_commands:
-                        self._pending_commands = list(enumerate([self._normalize_command_spec(cmd) for cmd in result.pending_commands], 1))
+                        self._pending_commands = list(
+                            enumerate(
+                                [
+                                    self._normalize_command_spec(cmd)
+                                    for cmd in result.pending_commands
+                                ],
+                                1,
+                            )
+                        )
                         self._waiting_for_confirmation = True
-                        self._state_queue.put(("pending_commands", self._pending_commands))
+                        self._state_queue.put(
+                            ("pending_commands", self._pending_commands)
+                        )
                         break
 
                     if result and result.action.value == "wait":

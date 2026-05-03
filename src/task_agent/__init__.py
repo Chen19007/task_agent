@@ -3,7 +3,8 @@
 __version__ = "0.1.0"
 __author__ = "MiniMax Agent"
 
-from .agent import SimpleAgent, Executor, Action, StepResult
+from .agent import Action, Executor, SimpleAgent, StepResult
+from .command_spec import CommandSpec
 from .config import Config
 
-__all__ = ["SimpleAgent", "Executor", "Action", "StepResult", "Config"]
+__all__ = ["SimpleAgent", "Executor", "Action", "StepResult", "CommandSpec", "Config"]

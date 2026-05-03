@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from .agent import Executor
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .agent import Executor
 from .command_runtime import ExecutionContext
 
 
@@ -11,6 +14,7 @@ def build_execution_context(executor: Executor, workspace_dir: str) -> Execution
     return ExecutionContext(
         config=executor.config,
         workspace_dir=workspace_dir,
-        context_messages=(executor.current_agent.history if executor.current_agent else None),
+        context_messages=(
+            executor.current_agent.history if executor.current_agent else None
+        ),
     )
-

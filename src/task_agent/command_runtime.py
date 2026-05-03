@@ -6,8 +6,8 @@ import shlex
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-from .agent import CommandSpec
 from .builtin_schema import builtin_requires_authorization
+from .command_spec import CommandSpec
 from .platform_utils import get_shell_result_tag
 from .safety import is_safe_command
 
@@ -66,7 +66,9 @@ def _wrap_bash_workspace(command: str, workspace_dir: str) -> str:
     return f"cd {escaped}; {command}"
 
 
-def prepare_command_for_execution(command_spec: CommandSpec, workspace_dir: str = "") -> str:
+def prepare_command_for_execution(
+    command_spec: CommandSpec, workspace_dir: str = ""
+) -> str:
     """
     仅对 shell 类命令注入工作目录；builtin 保持原样。
     """

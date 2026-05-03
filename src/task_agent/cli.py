@@ -22,7 +22,7 @@ from rich.panel import Panel
 from rich.text import Text
 from rich.theme import Theme
 
-from .agent import CommandSpec, Executor
+from .agent import Executor
 from .builtin_schema import (
     BuiltinParseError,
     normalize_builtin_args_with_schema,
@@ -37,6 +37,7 @@ from .command_runtime import (
 from .command_runtime import (
     normalize_command_spec,
 )
+from .command_spec import CommandSpec
 from .config import Config
 from .hint_utils import select_hint_file
 from .llm import ChatMessage, create_client
@@ -630,6 +631,7 @@ def main():
         session_manager=session_manager,
         runtime_scene="cli",
         workspace_dir=os.getcwd(),
+        execute_command=_execute_command,
     )  # 保持 Executor 实例，保留上下文
     paste_mode = False
     paste_lines: list[str] = []
@@ -668,7 +670,6 @@ def main():
             elif not paste_prompt_shown:
                 paste_prompt_shown = True
 
-            _clear_input_buffer()
             if paste_mode:
                 task = input("")
             else:
@@ -901,7 +902,6 @@ def main():
                         continue
 
                     def confirm(prompt: str) -> bool:
-                        _clear_input_buffer()
                         answer = console.input(
                             f"[bold yellow]{prompt} [y/N][/bold yellow]"
                         )
@@ -998,6 +998,7 @@ def _run_single_task(
             output_handler=cli_output,
             runtime_scene="cli",
             workspace_dir=os.getcwd(),
+            execute_command=_execute_command,
         )
     else:
         # 更新现有 executor 的 output_handler
@@ -1008,9 +1009,6 @@ def _run_single_task(
         _create_cli_command_confirm_callback(executor, console)
     )
 
-    # 用于命令确认的状态
-    command_batch_id = 0  # 当前处理的命令批次ID
-    processed_count = 0  # 已处理的命令数量
     waiting_for_user_input = False  # 等待用户输入标志
 
     # 首次创建会话ID（确保快照能正常保存）
@@ -1026,15 +1024,9 @@ def _run_single_task(
             for output in outputs:
                 console.print(output, end="", soft_wrap=True)
 
-            if result:
-                command_batch_id, processed_count = _handle_pending_commands(
-                    executor, console, result, command_batch_id, processed_count
-                )
-
             # 检查是否需要等待用户输入
             if any("[等待用户输入]" in output for output in outputs):
                 waiting_for_user_input = True
-                # 会话快照已保存完整状态，无需额外保存
     finally:
         _stop_esc_skip_listener(esc_listener)
 
@@ -1054,7 +1046,6 @@ def _run_single_task(
         console.print("=" * 60 + "\n")
 
         try:
-            _clear_input_buffer()
             if paste_mode:
                 if not paste_prompt_shown:
                     paste_prompt_shown = True
@@ -1164,11 +1155,6 @@ def _run_single_task(
                 for output in outputs:
                     console.print(output, end="", soft_wrap=True)
 
-                if result:
-                    command_batch_id, processed_count = _handle_pending_commands(
-                        executor, console, result, command_batch_id, processed_count
-                    )
-
                 # 检查是否需要等待用户输入
                 if any("[等待用户输入]" in output for output in outputs):
                     waiting_for_user_input = True
@@ -1222,7 +1208,6 @@ def _create_cli_command_confirm_callback(executor: "Executor", console: Console)
             return _format_shell_result("executed", result_msg)
 
         # 等待用户确认
-        _clear_input_buffer()
         auto_status = " (自动: 启)" if executor.auto_approve else ""
         confirm = input(f"执行命令[y] / 取消[c] / 执行并开启自动[a]{auto_status} ")
         confirm_lower = confirm.lower().strip()
@@ -1260,90 +1245,6 @@ def _create_cli_command_confirm_callback(executor: "Executor", console: Console)
             return _format_shell_result("rejected", f"用户建议：{confirm}")
 
     return confirm_callback
-
-
-def _handle_pending_commands(
-    executor: "Executor",
-    console: Console,
-    result: "StepResult",
-    command_batch_id: int,
-    processed_count: int,
-) -> tuple[int, int]:
-    """处理待确认命令，返回更新后的批次ID和处理计数"""
-    if not result.pending_commands:
-        return command_batch_id, processed_count
-    flow = _get_cli_approval_flow()
-
-    # 新的命令批次
-    if id(result.command_blocks) != command_batch_id:
-        command_batch_id = id(result.command_blocks)
-        processed_count = 0
-
-    while processed_count < len(result.command_blocks):
-        # 显示当前命令框
-        console.print(result.command_blocks[processed_count], end="")
-
-        # 获取对应的命令
-        command_spec = normalize_command_spec(result.pending_commands[processed_count])
-        command = command_spec.command
-
-        current_dir = _get_effective_workspace_dir(executor.workspace_dir)
-        auto_commands, manual_commands = flow.split_auto_executable(
-            [command_spec], executor.auto_approve, current_dir
-        )
-
-        if auto_commands and not manual_commands:
-            # 自动执行安全命令
-            console.print("[dim](自动执行)[/dim]\n", end="")
-            executed = flow.execute_commands(
-                executor=executor,
-                commands=auto_commands,
-                workspace_dir=current_dir,
-            )
-            result_msg = executed[0].message if executed else "命令执行成功（无输出）"
-
-            console.print(f"[dim]{result_msg}[/dim]\n")
-            _update_smart_edit_stats(command, "executed", result_msg)
-        else:
-            # 等待用户确认
-            _clear_input_buffer()
-            auto_status = " (自动: 启)" if executor.auto_approve else ""
-            confirm = input(f"执行命令[y] / 取消[c] / 执行并开启自动[a]{auto_status} ")
-            confirm_lower = confirm.lower().strip()
-
-            if confirm_lower == "a":
-                # 启用自动同意并执行当前命令
-                executor.auto_approve = True
-                console.print("[success]自动同意已启用[/success]\n")
-                confirm_lower = "y"
-
-            if confirm_lower == "y":
-                # 用户确认，执行命令
-                executed = flow.execute_commands(
-                    executor=executor,
-                    commands=[command_spec],
-                    workspace_dir=current_dir,
-                )
-                result_msg = (
-                    executed[0].message if executed else "命令执行成功（无输出）"
-                )
-
-                console.print(f"\n[info]{result_msg}[/info]\n")
-                _update_smart_edit_stats(command, "executed", result_msg)
-
-            elif confirm_lower == "c":
-                console.print("[info]命令已取消[/info]\n")
-                _update_smart_edit_stats(command, "rejected")
-                flow.reject_commands(executor, "用户取消了命令执行")
-            else:
-                # 用户输入修改建议
-                console.print("[info]已将您的建议发送给 Agent[/info]\n")
-                _update_smart_edit_stats(command, "rejected")
-                flow.reject_commands(executor, f"用户建议：{confirm}")
-
-        processed_count += 1
-
-    return command_batch_id, processed_count
 
 
 class _ExecResult:

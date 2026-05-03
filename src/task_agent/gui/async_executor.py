@@ -7,7 +7,7 @@ import queue
 import threading
 from typing import Callable, Optional
 
-from ..agent import StepResult, CommandSpec
+from ..agent import StepResult
 from ..command_runtime import (
     ExecutionContext,
     can_auto_execute_command,
@@ -15,6 +15,7 @@ from ..command_runtime import (
     format_shell_result,
     normalize_command_spec,
 )
+from ..command_spec import CommandSpec
 from .adapter import ExecutorAdapter
 
 
@@ -42,7 +43,6 @@ class AsyncExecutor:
 
     def _normalize_command_spec(self, command: object) -> CommandSpec:
         return normalize_command_spec(command)
-
 
     def execute_task_async(self, task: str):
         """异步执行任务
@@ -76,13 +76,17 @@ class AsyncExecutor:
                     if result and result.pending_commands:
                         # 检查 auto_approve 模式
                         if self.adapter.executor.auto_approve:
-                            current_dir = (self.adapter.executor.workspace_dir or "").strip()
+                            current_dir = (
+                                self.adapter.executor.workspace_dir or ""
+                            ).strip()
                             # 过滤出安全命令自动执行
                             safe_commands = []
                             unsafe_commands = []
                             for cmd in result.pending_commands:
                                 cmd_spec = self._normalize_command_spec(cmd)
-                                if can_auto_execute_command(cmd_spec, True, current_dir):
+                                if can_auto_execute_command(
+                                    cmd_spec, True, current_dir
+                                ):
                                     safe_commands.append(cmd_spec)
                                 else:
                                     unsafe_commands.append(cmd_spec)
@@ -97,13 +101,25 @@ class AsyncExecutor:
                             # 否则只处理不安全的命令
                             self._pending_commands = list(enumerate(unsafe_commands, 1))
                             self._waiting_for_confirmation = True
-                            self.output_queue.put(("pending_commands", self._pending_commands))
+                            self.output_queue.put(
+                                ("pending_commands", self._pending_commands)
+                            )
                             break
                         else:
                             # 非 auto 模式，正常流程
-                            self._pending_commands = list(enumerate([self._normalize_command_spec(cmd) for cmd in result.pending_commands], 1))
+                            self._pending_commands = list(
+                                enumerate(
+                                    [
+                                        self._normalize_command_spec(cmd)
+                                        for cmd in result.pending_commands
+                                    ],
+                                    1,
+                                )
+                            )
                             self._waiting_for_confirmation = True
-                            self.output_queue.put(("pending_commands", self._pending_commands))
+                            self.output_queue.put(
+                                ("pending_commands", self._pending_commands)
+                            )
                             break  # 等待 GUI 确认
 
                     # 检查是否需要等待用户输入
@@ -123,7 +139,9 @@ class AsyncExecutor:
         self._thread = threading.Thread(target=_run, daemon=True)
         self._thread.start()
 
-    def confirm_and_execute_command(self, command_index: int, action: str, user_input: str = ""):
+    def confirm_and_execute_command(
+        self, command_index: int, action: str, user_input: str = ""
+    ):
         """确认并执行命令（由 GUI 对话框调用）
 
         Args:
@@ -148,13 +166,18 @@ class AsyncExecutor:
         def execute():
             try:
                 from ..cli import _execute_command
+
                 current_dir = (self.adapter.executor.workspace_dir or "").strip()
                 exec_result = execute_command_spec(
                     command_spec=command_spec,
                     context=ExecutionContext(
                         config=self.adapter.executor.config,
                         workspace_dir=current_dir,
-                        context_messages=(self.adapter.executor.current_agent.history if self.adapter.executor.current_agent else None),
+                        context_messages=(
+                            self.adapter.executor.current_agent.history
+                            if self.adapter.executor.current_agent
+                            else None
+                        ),
                     ),
                     execute_command=_execute_command,
                 )
@@ -182,7 +205,9 @@ class AsyncExecutor:
             except Exception as e:
                 error_msg = f"命令执行异常：{str(e)}"
                 if self.adapter.executor.current_agent:
-                    self.adapter.executor.current_agent._add_message("user", format_shell_result("executed", error_msg))
+                    self.adapter.executor.current_agent._add_message(
+                        "user", format_shell_result("executed", error_msg)
+                    )
                 self._continue_execution()
 
         thread = threading.Thread(target=execute, daemon=True)
@@ -207,13 +232,17 @@ class AsyncExecutor:
                     if result and result.pending_commands:
                         # 检查 auto_approve 模式
                         if self.adapter.executor.auto_approve:
-                            current_dir = (self.adapter.executor.workspace_dir or "").strip()
+                            current_dir = (
+                                self.adapter.executor.workspace_dir or ""
+                            ).strip()
                             # 过滤出安全命令自动执行
                             safe_commands = []
                             unsafe_commands = []
                             for cmd in result.pending_commands:
                                 cmd_spec = self._normalize_command_spec(cmd)
-                                if can_auto_execute_command(cmd_spec, True, current_dir):
+                                if can_auto_execute_command(
+                                    cmd_spec, True, current_dir
+                                ):
                                     safe_commands.append(cmd_spec)
                                 else:
                                     unsafe_commands.append(cmd_spec)
@@ -228,12 +257,24 @@ class AsyncExecutor:
                             # 否则只处理不安全的命令
                             self._pending_commands = list(enumerate(unsafe_commands, 1))
                             self._waiting_for_confirmation = True
-                            self.output_queue.put(("pending_commands", self._pending_commands))
+                            self.output_queue.put(
+                                ("pending_commands", self._pending_commands)
+                            )
                             break
                         else:
-                            self._pending_commands = list(enumerate([self._normalize_command_spec(cmd) for cmd in result.pending_commands], 1))
+                            self._pending_commands = list(
+                                enumerate(
+                                    [
+                                        self._normalize_command_spec(cmd)
+                                        for cmd in result.pending_commands
+                                    ],
+                                    1,
+                                )
+                            )
                             self._waiting_for_confirmation = True
-                            self.output_queue.put(("pending_commands", self._pending_commands))
+                            self.output_queue.put(
+                                ("pending_commands", self._pending_commands)
+                            )
                             break
 
                     if result and result.action.value == "wait":
@@ -276,13 +317,17 @@ class AsyncExecutor:
                     if result and result.pending_commands:
                         # 检查 auto_approve 模式
                         if self.adapter.executor.auto_approve:
-                            current_dir = (self.adapter.executor.workspace_dir or "").strip()
+                            current_dir = (
+                                self.adapter.executor.workspace_dir or ""
+                            ).strip()
                             # 过滤出安全命令自动执行
                             safe_commands = []
                             unsafe_commands = []
                             for cmd in result.pending_commands:
                                 cmd_spec = self._normalize_command_spec(cmd)
-                                if can_auto_execute_command(cmd_spec, True, current_dir):
+                                if can_auto_execute_command(
+                                    cmd_spec, True, current_dir
+                                ):
                                     safe_commands.append(cmd_spec)
                                 else:
                                     unsafe_commands.append(cmd_spec)
@@ -297,12 +342,24 @@ class AsyncExecutor:
                             # 否则只处理不安全的命令
                             self._pending_commands = list(enumerate(unsafe_commands, 1))
                             self._waiting_for_confirmation = True
-                            self.output_queue.put(("pending_commands", self._pending_commands))
+                            self.output_queue.put(
+                                ("pending_commands", self._pending_commands)
+                            )
                             break
                         else:
-                            self._pending_commands = list(enumerate([self._normalize_command_spec(cmd) for cmd in result.pending_commands], 1))
+                            self._pending_commands = list(
+                                enumerate(
+                                    [
+                                        self._normalize_command_spec(cmd)
+                                        for cmd in result.pending_commands
+                                    ],
+                                    1,
+                                )
+                            )
                             self._waiting_for_confirmation = True
-                            self.output_queue.put(("pending_commands", self._pending_commands))
+                            self.output_queue.put(
+                                ("pending_commands", self._pending_commands)
+                            )
                             break
 
                     if result and result.action.value == "wait":
@@ -324,13 +381,18 @@ class AsyncExecutor:
         """\u81ea\u52a8\u6267\u884c\u5b89\u5168\u547d\u4ee4"""
         try:
             from ..cli import _execute_command
+
             current_dir = (self.adapter.executor.workspace_dir or "").strip()
             exec_result = execute_command_spec(
                 command_spec=command_spec,
                 context=ExecutionContext(
                     config=self.adapter.executor.config,
                     workspace_dir=current_dir,
-                    context_messages=(self.adapter.executor.current_agent.history if self.adapter.executor.current_agent else None),
+                    context_messages=(
+                        self.adapter.executor.current_agent.history
+                        if self.adapter.executor.current_agent
+                        else None
+                    ),
                 ),
                 execute_command=_execute_command,
             )
@@ -345,7 +407,9 @@ class AsyncExecutor:
         except Exception as e:
             error_msg = f"\u547d\u4ee4\u6267\u884c\u5f02\u5e38\uff1a{e}"
             if self.adapter.executor.current_agent:
-                self.adapter.executor.current_agent._add_message("user", format_shell_result("executed", error_msg))
+                self.adapter.executor.current_agent._add_message(
+                    "user", format_shell_result("executed", error_msg)
+                )
 
     def _emit_command_result(self, message: str, status: str):
         """直接向 GUI 输出命令结果"""
@@ -370,9 +434,14 @@ class AsyncExecutor:
         """检查是否在等待命令确认"""
         return self._waiting_for_confirmation
 
-    def process_queue(self, output_callback: Callable, complete_callback: Callable,
-                     error_callback: Callable, waiting_callback: Callable,
-                     pending_commands_callback: Callable = None):
+    def process_queue(
+        self,
+        output_callback: Callable,
+        complete_callback: Callable,
+        error_callback: Callable,
+        waiting_callback: Callable,
+        pending_commands_callback: Callable = None,
+    ):
         """处理队列中的消息（在主线程中调用）
 
         Args:

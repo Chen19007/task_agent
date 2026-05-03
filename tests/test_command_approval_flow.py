@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from task_agent.agent import CommandSpec
 from task_agent.command_approval_flow import CommandApprovalFlow
+from task_agent.command_spec import CommandSpec
 
 
 class _FakeAgent:
@@ -34,7 +34,10 @@ def _fake_execute_command(command: str, timeout: int, **kwargs):  # noqa: ARG001
 
 
 def test_auto_execute_if_all_safe(monkeypatch):
-    monkeypatch.setattr("task_agent.command_approval_flow.can_auto_execute_command", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        "task_agent.command_approval_flow.can_auto_execute_command",
+        lambda *args, **kwargs: True,
+    )
     flow = CommandApprovalFlow(_fake_execute_command)
     executor = _FakeExecutor(auto_approve=True)
     results = []
@@ -56,7 +59,9 @@ def test_auto_execute_fallback_when_contains_manual(monkeypatch):
     def _gate(command_spec, auto_approve, workspace_dir):  # noqa: ARG001
         return command_spec.command == "safe"
 
-    monkeypatch.setattr("task_agent.command_approval_flow.can_auto_execute_command", _gate)
+    monkeypatch.setattr(
+        "task_agent.command_approval_flow.can_auto_execute_command", _gate
+    )
     flow = CommandApprovalFlow(_fake_execute_command)
     executor = _FakeExecutor(auto_approve=True)
 
@@ -86,4 +91,3 @@ def test_reject_commands_emits_and_records():
 
     assert output == [("rejected", "用户拒绝")]
     assert "rejected" in executor.current_agent.messages[0][1]
-

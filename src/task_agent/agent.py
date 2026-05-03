@@ -1,6 +1,7 @@
 """极简 Agent 核心模块 - 上下文切换架构"""
 
 import json
+import logging
 import os
 import re
 import sys
@@ -10,7 +11,7 @@ import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Generator, Optional
+from typing import TYPE_CHECKING, Any, Callable, Generator, Optional
 
 import yaml
 
@@ -18,6 +19,8 @@ from .builtin_schema import (
     build_builtin_read_file_example_lines,
     build_builtin_smart_edit_example_lines,
 )
+from .command_runtime import normalize_command_spec
+from .command_spec import CommandSpec
 from .config import Config
 from .execution_event_bus import ExecutionEventBus
 from .hint_utils import select_hint_file
@@ -25,6 +28,9 @@ from .llm import ChatMessage, create_client
 from .output_event_bridge import EventBusOutputHandler
 from .output_handler import NullOutputHandler, OutputHandler
 from .platform_utils import get_hint_platform_suffix, get_shell_tool_name
+
+if TYPE_CHECKING:
+    from .command_approval_flow import CommandApprovalFlow
 
 
 class Action(Enum):
@@ -50,22 +56,6 @@ class StepResult:
     command_blocks: list[str] = field(
         default_factory=list
     )  # 命令框显示内容（逐个显示）
-
-
-@dataclass
-class CommandSpec:
-    """命令规格，携带上下文信息。"""
-
-    command: str
-    tool: str = field(default_factory=get_shell_tool_name)
-    background: bool = False
-    timeout: Optional[int] = None
-
-    def display(self) -> str:
-        """命令显示文本"""
-        if self.tool in {"ps_call", "bash_call"} and self.background:
-            return f"{self.command} (后台)"
-        return self.command
 
 
 @dataclass
@@ -1611,6 +1601,7 @@ class Executor:
         session_manager: Optional["SessionManager"] = None,
         output_handler: Optional[OutputHandler] = None,
         command_confirm_callback: Optional[Callable[[str], str]] = None,
+        execute_command: Optional[Callable[..., object]] = None,
         workspace_dir: Optional[str] = None,
         runtime_scene: str = "cli",
         event_bus: Optional[ExecutionEventBus] = None,
@@ -1665,6 +1656,14 @@ class Executor:
 
         # 命令确认回调（用于 CLI 和 GUI 的不同确认逻辑）
         self._command_confirm_callback = command_confirm_callback
+
+        # 内部审批流引擎（由调用方注入 execute_command，避免循环依赖）
+        if execute_command is not None:
+            from .command_approval_flow import CommandApprovalFlow
+
+            self._approval_flow = CommandApprovalFlow(execute_command)
+        else:
+            self._approval_flow = None
 
         # 跳过下一次解析（one-shot）状态
         self._skip_parse_lock = threading.Lock()
@@ -1915,8 +1914,63 @@ class Executor:
             # 保存 StepResult 供 cli.py 访问
             self.last_step_result = result
 
-            # yield 输出和结果，让 CLI/GUI 先显示输出，然后自己处理命令确认
+            # yield 输出和结果，让 CLI/GUI 先显示输出
             yield (result.outputs, result)
+
+            # --- 闭环处理：批量处理待执行命令 ---
+            # 注意：命令处理必须在 Action 检查之前，因为命令执行结果会作为反馈输入到下一步
+            has_executed_commands = False
+            if (
+                result.pending_commands
+                and self._is_running
+                and self._approval_flow is not None
+            ):
+                _logger = logging.getLogger(__name__)
+                current_dir = self.workspace_dir or "."
+
+                # 批量规范化所有待执行命令
+                cmd_specs = [
+                    normalize_command_spec(cmd_obj)
+                    for cmd_obj in result.pending_commands
+                ]
+
+                # 一次性拆分自动/手动
+                auto_list, manual_list = self._approval_flow.split_auto_executable(
+                    cmd_specs, self.auto_approve, current_dir, config=self.config
+                )
+
+                # 批量自动执行：通过 yield 输出结果，确保 CLI/GUI 都能显示
+                if auto_list:
+                    exec_results = self._approval_flow.execute_commands(
+                        executor=self,
+                        commands=auto_list,
+                        workspace_dir=current_dir,
+                    )
+                    if exec_results:
+                        has_executed_commands = True
+                        cmd_outputs = []
+                        for item in exec_results:
+                            cmd_outputs.append(f"\n{item.message}\n")
+                        yield (cmd_outputs, result)
+
+                # 手动命令：通过回调逐条确认（回调内部已完成 _add_message，不再重复添加）
+                if manual_list:
+                    if self._command_confirm_callback:
+                        for cmd_spec in manual_list:
+                            # 回调内部会调用 flow.execute_commands/reject_commands，并更新 history
+                            self._command_confirm_callback(cmd_spec.command)
+                        has_executed_commands = True
+                    else:
+                        _logger.warning(
+                            "有 %d 条命令需要手动确认但未设置回调，命令将被跳过: %s",
+                            len(manual_list),
+                            [c.command for c in manual_list],
+                        )
+
+            # 如果刚才执行了命令，我们需要让 Agent 再次思考（即继续循环调用 step）
+            # 除非原始 action 就是 SWITCH_TO_CHILD，此时切换逻辑优先级更高
+            if has_executed_commands and result.action != Action.SWITCH_TO_CHILD:
+                continue
 
             if result.action == Action.SWITCH_TO_CHILD:
                 # result.data 现在是 ChildTaskRequest 对象

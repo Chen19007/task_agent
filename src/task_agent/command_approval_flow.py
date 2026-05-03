@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Iterable
+from typing import TYPE_CHECKING, Callable, Iterable
 
-from .agent import CommandSpec, Executor
+from .command_spec import CommandSpec
+
+if TYPE_CHECKING:
+    from .agent import Executor
 from .approval_execution_context import build_execution_context
 from .command_runtime import (
     can_auto_execute_command,
@@ -42,7 +45,9 @@ class CommandApprovalFlow:
         auto_list: list[CommandSpec] = []
         manual_list: list[CommandSpec] = []
         for command_spec in commands:
-            if can_auto_execute_command(command_spec, auto_approve, workspace_dir, config=config):
+            if can_auto_execute_command(
+                command_spec, auto_approve, workspace_dir, config=config
+            ):
                 auto_list.append(command_spec)
             else:
                 manual_list.append(command_spec)
@@ -68,8 +73,14 @@ class CommandApprovalFlow:
             if output_result is not None:
                 output_result(message, status)
             if executor.current_agent:
-                executor.current_agent._add_message("user", format_shell_result("executed", message))
-            results.append(ApprovalExecutionItem(command_spec=command_spec, status=status, message=message))
+                executor.current_agent._add_message(
+                    "user", format_shell_result("executed", message)
+                )
+            results.append(
+                ApprovalExecutionItem(
+                    command_spec=command_spec, status=status, message=message
+                )
+            )
         return results
 
     def auto_execute_if_all_safe(
@@ -103,4 +114,6 @@ class CommandApprovalFlow:
         if output_result is not None:
             output_result(reject_text, "rejected")
         if executor.current_agent:
-            executor.current_agent._add_message("user", format_shell_result("rejected", reject_text))
+            executor.current_agent._add_message(
+                "user", format_shell_result("rejected", reject_text)
+            )
