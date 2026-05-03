@@ -1,17 +1,15 @@
 """极简 Agent 核心模块 - 上下文切换架构"""
 
-import json
 import logging
 import os
 import re
-import sys
 import threading
 import time
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Generator, Optional
+from typing import TYPE_CHECKING, Any, Callable, Generator, Optional, Union
 
 import yaml
 
@@ -31,6 +29,7 @@ from .platform_utils import get_hint_platform_suffix, get_shell_tool_name
 
 if TYPE_CHECKING:
     from .command_approval_flow import CommandApprovalFlow
+    from .session import SessionManager
 
 
 class Action(Enum):
@@ -147,8 +146,8 @@ class SimpleAgent:
         self.last_think: str = ""
 
         # LLM调用前后的回调函数（用于保存快照）
-        self._before_llm_callback: Optional[callable] = None
-        self._after_llm_callback: Optional[callable] = None
+        self._before_llm_callback: Optional[Callable[["SimpleAgent"], None]] = None
+        self._after_llm_callback: Optional[Callable[["SimpleAgent"], None]] = None
 
         # Executor 引用（用于访问命令确认回调）
         self._executor: Optional["Executor"] = None
@@ -158,7 +157,7 @@ class SimpleAgent:
         self._last_compact_time = 0.0
         self._is_compacting = False
 
-    def set_before_llm_callback(self, callback: callable):
+    def set_before_llm_callback(self, callback: Callable[["SimpleAgent"], None]):
         """设置LLM调用前的回调函数
 
         Args:
@@ -166,7 +165,7 @@ class SimpleAgent:
         """
         self._before_llm_callback = callback
 
-    def set_after_llm_callback(self, callback: callable):
+    def set_after_llm_callback(self, callback: Callable[["SimpleAgent"], None]):
         """设置LLM响应后的回调函数
 
         Args:
@@ -757,7 +756,10 @@ class SimpleAgent:
 
             # 检查当前 agent_name 是否在该 agent 的 forbidden_agents 中
             # 如果不在，注入该 agent 的 system_prompt_injection
-            should_inject = self.agent_name not in forbidden_list
+            should_inject = True
+            if self.agent_name and forbidden_list:
+                should_inject = self.agent_name not in forbidden_list
+
             injection = agent.get("system_prompt_injection", "")
 
             if should_inject and injection:
@@ -774,6 +776,23 @@ class SimpleAgent:
 
         # 如果没有注入内容，返回空字符串
         return ""
+
+    def _parse_agent_frontmatter(self, text: str) -> dict[str, Any]:
+        """解析 Markdown 文件开头的 YAML frontmatter"""
+        if not text.startswith("---"):
+            return {}
+        try:
+            # 寻找第二个 ---
+            end_index = text.find("---", 3)
+            if end_index == -1:
+                return {}
+            frontmatter_text = text[3:end_index].strip()
+            metadata = yaml.safe_load(frontmatter_text)
+            if isinstance(metadata, dict):
+                return metadata
+        except Exception as e:
+            logging.error(f"Error parsing frontmatter: {e}")
+        return {}
 
     def _get_agent_forbidden_agents(self, agent_name: str) -> list[str]:
         """获取指定 agent 的 forbidden_agents 列表"""
@@ -884,7 +903,7 @@ class SimpleAgent:
         # 格式化输出（保持向后兼容）
         outputs = []
         if reasoning and reasoning.strip():
-            outputs.append(f"\n** 思考过程：\n")
+            outputs.append("\n** 思考过程：\n")
             outputs.append(f"{'━' * 50}\n")
             outputs.append(f"{reasoning}\n")
             outputs.append(f"{'━' * 50}\n\n")
@@ -926,7 +945,7 @@ class SimpleAgent:
             if self.depth >= self.max_depth:
                 self._add_message("system", f"[深度限制] 请直接执行任务: {task}")
                 self._output_handler.on_depth_limit()
-                outputs.append(f"\n!! [深度限制]\n")
+                outputs.append("\n!! [深度限制]\n")
                 outputs.append(f"已达到最大深度 {self.max_depth}，由当前Agent执行\n")
                 outputs.append(f"{'═' * 50}\n\n")
                 return StepResult(
@@ -939,7 +958,7 @@ class SimpleAgent:
             # 检查本地配额限制
             if self.total_sub_agents_created >= self.max_depth**2:
                 self._output_handler.on_quota_limit("local")
-                outputs.append(f"\n!! [本地配额限制]\n")
+                outputs.append("\n!! [本地配额限制]\n")
                 outputs.append(f"当前Agent已用完 {self.max_depth**2} 个子Agent配额\n")
                 outputs.append(f"{'═' * 50}\n\n")
                 self._add_message("system", f"[本地配额限制] 请直接执行任务: {task}")
@@ -954,7 +973,7 @@ class SimpleAgent:
             global_total = self.max_depth**2 * 2
             if self._global_subagent_count >= global_total:
                 self._output_handler.on_quota_limit("global")
-                outputs.append(f"\n!! [全局配额限制]\n")
+                outputs.append("\n!! [全局配额限制]\n")
                 outputs.append(f"整个任务已用完所有 {global_total} 个子Agent配额\n")
                 outputs.append(f"{'═' * 50}\n\n")
                 self._add_message("system", f"[全局配额限制] 请直接执行任务: {task}")
@@ -1023,7 +1042,7 @@ class SimpleAgent:
         # 只有当没有任何标签时才等待（reasoning 不影响）
         if not self._has_action_tags(response) and not tool_outputs:
             self._output_handler.on_wait_input()
-            outputs.append(f"\n?? 等待用户输入...\n")
+            outputs.append("\n?? 等待用户输入...\n")
             outputs.append("[等待用户输入]\n")  # 保留供 cli.py 检测
             return StepResult(
                 outputs=self._add_depth_prefix(outputs),
@@ -1598,7 +1617,7 @@ class Executor:
         self,
         config: Optional[Config] = None,
         max_depth: int = 4,
-        session_manager: Optional["SessionManager"] = None,
+        session_manager: Optional[Union["SessionManager", Any]] = None,
         output_handler: Optional[OutputHandler] = None,
         command_confirm_callback: Optional[Callable[[str], str]] = None,
         execute_command: Optional[Callable[..., object]] = None,

@@ -71,15 +71,14 @@ except Exception:
 
 def _clear_input_buffer():
     """清空 stdin 中的残留输入（Windows）"""
-    if not msvcrt:
-        return
-    while msvcrt.kbhit():
-        msvcrt.getch()
+    if msvcrt is not None:
+        while msvcrt.kbhit():
+            msvcrt.getch()
 
 
 def _start_esc_skip_listener(executor: Executor, console: Console):
     """仅在执行阶段监听 Esc，触发跳过下一次解析。"""
-    if not msvcrt:
+    if msvcrt is None:
         return None
 
     stop_event = threading.Event()
@@ -950,8 +949,9 @@ def main():
             while executor.context_stack:
                 parent = executor.context_stack.pop()
                 # 传递子 agent 的 global_count（不是父 agent 的），确保计数器同步
-                child_global_count = executor.current_agent._global_subagent_count
-                parent.on_child_completed("任务中断", child_global_count)
+                if executor.current_agent:
+                    child_global_count = executor.current_agent._global_subagent_count
+                    parent.on_child_completed("任务中断", child_global_count)
                 executor.current_agent = parent
 
         except KeyboardInterrupt:
@@ -969,8 +969,8 @@ def main():
 def _run_single_task(
     config: Config,
     task: str,
-    executor: "Executor" = None,
-    session_manager: "SessionManager" = None,
+    executor: Optional["Executor"] = None,
+    session_manager: Optional["SessionManager"] = None,
 ):
     """执行单个任务
 
@@ -982,10 +982,10 @@ def _run_single_task(
     """
     console.print("-" * 60)
 
-    # 打开日志
-    log_file = None
+    # 清空日志文件（如果配置了环境变量）
     if os.environ.get("AGENT_LOG_FILE"):
-        log_file = open(os.environ["AGENT_LOG_FILE"], "w", encoding="utf-8")
+        with open(os.environ["AGENT_LOG_FILE"], "w", encoding="utf-8"):
+            pass
 
     # CLI 输出由本地打印控制，避免重复展示
     cli_output = NullOutputHandler()
@@ -1015,6 +1015,10 @@ def _run_single_task(
     if session_manager and session_manager.current_session_id is None:
         new_id = session_manager.get_next_session_id()
         session_manager.current_session_id = new_id
+
+    # 预先检查 executor 是否为 None
+    if executor is None:
+        return
 
     # 执行任务
     esc_listener = _start_esc_skip_listener(executor, console)
@@ -1096,6 +1100,9 @@ def _run_single_task(
                 break
             elif line.startswith("/"):
                 if line.lower() == "/list":
+                    if session_manager is None:
+                        console.print("[warning]会话管理器未初始化[/warning]\n")
+                        continue
                     sessions = session_manager.list_sessions()
                     console.print("\n[bold cyan]保存的会话：[/bold cyan]\n")
                     if not sessions:
@@ -1142,7 +1149,7 @@ def _run_single_task(
 
         direct_command = _extract_direct_shell_call(user_input)
         if direct_command:
-            _execute_direct_shell_call(direct_command, console, args.timeout)
+            _execute_direct_shell_call(direct_command, console, executor.config.timeout)
             waiting_for_user_input = False
             continue
 
@@ -1209,6 +1216,7 @@ def _create_cli_command_confirm_callback(executor: "Executor", console: Console)
 
         # 等待用户确认
         auto_status = " (自动: 启)" if executor.auto_approve else ""
+        console.print()
         confirm = input(f"执行命令[y] / 取消[c] / 执行并开启自动[a]{auto_status} ")
         confirm_lower = confirm.lower().strip()
 
@@ -1456,7 +1464,7 @@ def _execute_builtin_read_file(args: dict, workspace_dir: str = "") -> _ExecResu
     if error:
         return _ExecResult("", error, 1)
 
-    returned = len(lines)
+    returned = len(lines) if lines is not None else 0
     header_lines = [
         "内置工具 builtin.read_file 执行成功。",
         f"路径: {abs_path}",
@@ -1465,17 +1473,17 @@ def _execute_builtin_read_file(args: dict, workspace_dir: str = "") -> _ExecResu
     ]
 
     if capped:
-        header_lines.append(f"提示: max_lines 超过上限，已截断为 2000 行。")
+        header_lines.append("提示: max_lines 超过上限，已截断为 2000 行。")
 
     if has_more:
-        next_start = start_line + returned
+        next_start = (start_line or 0) + returned
         header_lines.append(
             f"还有更多内容。如需继续读取，请使用 start_line={next_start}，max_lines={max_lines}。"
         )
     else:
         header_lines.append("已到文件末尾。")
 
-    content = "".join(lines)
+    content = "".join(lines) if lines is not None else ""
     if not content:
         content = "(空内容)"
 
@@ -1502,7 +1510,7 @@ def _execute_builtin_job_log(args: dict) -> _ExecResult:
     if error:
         return _ExecResult("", error, 1)
 
-    returned = len(lines)
+    returned = len(lines) if lines is not None else 0
     header_lines = [
         "内置工具 builtin.get_job_log 执行成功。",
         f"job_id: {job_id}",
@@ -1512,17 +1520,17 @@ def _execute_builtin_job_log(args: dict) -> _ExecResult:
     ]
 
     if capped:
-        header_lines.append(f"提示: max_lines 超过上限，已截断为 2000 行。")
+        header_lines.append("提示: max_lines 超过上限，已截断为 2000 行。")
 
     if has_more:
-        next_start = start_line + returned
+        next_start = (start_line or 0) + returned
         header_lines.append(
             f"还有更多内容。如需继续读取，请使用 start_line={next_start}，max_lines={max_lines}。"
         )
     else:
         header_lines.append("已到文件末尾。")
 
-    content = "".join(lines)
+    content = "".join(lines) if lines is not None else ""
     if not content:
         content = "(空内容)"
 
@@ -1720,8 +1728,8 @@ def _execute_builtin_get_resource(args: dict) -> _ExecResult:
     encoding = args.get("encoding") or "utf-8-sig"
     try:
         content = resolved.read_text(encoding=encoding)
-    except Exception as exc:
-        return _ExecResult("", f"读取资源失败: {exc}", 1)
+    except Exception as e:
+        return _ExecResult("", f"读取文件失败: {str(e)}", 1)
     if content == "":
         content = "(空内容)"
     return _ExecResult(content, "", 0)
@@ -1972,7 +1980,7 @@ def _execute_builtin_memory_query(
             return default
         return max(min_value, min(max_value, number))
 
-    limit = to_int(args.get("limit", "5"), 5, 1, 20)
+    _limit = to_int(args.get("limit", "5"), 5, 1, 20)
     window = to_int(args.get("window", "10"), 10, 2, 30)
     candidate = to_int(args.get("candidate", "50"), 50, 5, 200)
     batch = to_int(args.get("batch", "6"), 6, 2, 10)
@@ -2144,13 +2152,13 @@ def _execute_builtin_create_schedule(args: dict, config: Config) -> _ExecResult:
         return _ExecResult("", "缺少默认日历配置：WEBHOOK_CALENDAR_ID", 1)
 
     start_ts, start_err = _parse_time_to_epoch(start_time_raw, timezone_name)
-    if start_err:
-        return _ExecResult("", f"start_time 无效: {start_err}", 1)
+    if start_err or start_ts is None:
+        return _ExecResult("", f"start_time 无效: {start_err or '解析失败'}", 1)
 
     if end_time_raw:
         end_ts, end_err = _parse_time_to_epoch(end_time_raw, timezone_name)
-        if end_err:
-            return _ExecResult("", f"end_time 无效: {end_err}", 1)
+        if end_err or end_ts is None:
+            return _ExecResult("", f"end_time 无效: {end_err or '解析失败'}", 1)
     else:
         end_ts = start_ts + 30 * 60
 
